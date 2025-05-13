@@ -1,0 +1,191 @@
+2025-05-12T17:35:10.294224Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:35:10.294413Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:26: [CONFIG]: {
+  "debug": false,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}
+2025-05-12T17:36:59.697254Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:36:59.697382Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:26: [CONFIG]: {
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}
+2025-05-12T17:37:22.715357Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:37:22.715566Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:27: [CONFIG]: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:37:32.037614Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:37:32.037778Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:27: [CONFIG]: 
+ [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:37:47.872110Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:37:47.872317Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:27: 
+[CONFIG]: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:38:22.141235Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:38:22.141450Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:27: 
+[[34mCONFIG[0m]: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:38:33.765428Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:38:33.765610Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:27: 
+[34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:38:43.028327Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:38:43.028593Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:27: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:44:34.211578Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:44:34.211833Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:44:34.213850Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____          _                                   _                       _             _       _   _                                 
+ |_   _|  _ __  (_)   __ _   _ __     __ _   _   _  | |   __ _   _ __       / \     _ __  | |__   (_) | |_   _ __    __ _    __ _    ___ 
+   | |   | '__| | |  / _` | | '_ \   / _` | | | | | | |  / _` | | '__|     / _ \   | '__| | '_ \  | | | __| | '__|  / _` |  / _` |  / _ \
+   | |   | |    | | | (_| | | | | | | (_| | | |_| | | | | (_| | | |       / ___ \  | |    | |_) | | | | |_  | |    | (_| | | (_| | |  __/
+   |_|   |_|    |_|  \__,_| |_| |_|  \__, |  \__,_| |_|  \__,_| |_|      /_/   \_\ |_|    |_.__/  |_|  \__| |_|     \__,_|  \__, |  \___|
+                                     |___/                                                                                  |___/        
+
+2025-05-12T17:46:25.407299Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T17:46:25.409365Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                 
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _ 
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, |
+                                                                                       |___/ 
+
+2025-05-12T17:46:25.409724Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "pairs_count": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  }
+}[0m
+2025-05-12T17:46:25.411698Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+

@@ -1,0 +1,674 @@
+2025-05-12T19:11:08.577496Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:11:08.579829Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:11:08.580332Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT"
+}[0m
+2025-05-12T19:11:08.582210Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:11:08.582748Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:11:09.297553Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:11:11.428968Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 2.13s
+2025-05-12T19:11:11.430626Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:95: Found 396 symbols with USDT as quote
+2025-05-12T19:11:11.436605Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:182: Found 1696 potential triangular paths starting and ending with USDT
+2025-05-12T19:11:11.437253Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:199: Randomly selected 15 triangular paths
+2025-05-12T19:11:11.437267Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:204: Processed triangular paths in 6.646333ms
+2025-05-12T19:11:11.437298Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:82: Example paths: PARTIUSDT→PARTIBNB→BNBUSDT, STRKUSDT→STRKTRY→USDTTRY, ATMUSDT→ATMTRY→USDTTRY
+2025-05-12T19:11:11.437310Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:87: Application completed successfully
+2025-05-12T19:12:02.185276Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:12:02.187404Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:12:02.187922Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT"
+}[0m
+2025-05-12T19:12:02.189825Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:12:02.190297Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:12:02.832529Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:12:04.971265Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 2.14s
+2025-05-12T19:12:04.973527Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:95: Found 396 symbols with USDT as quote
+2025-05-12T19:12:04.986586Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:182: Found 1696 potential triangular paths starting and ending with USDT
+2025-05-12T19:12:04.987186Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:199: Randomly selected 15 triangular paths
+2025-05-12T19:12:04.987195Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:204: Processed triangular paths in 13.678708ms
+2025-05-12T19:12:04.987202Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:74: total_paths: 15
+2025-05-12T19:12:04.987229Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:85: Example paths: TRXUSDT→TRXBTC→BTCUSDT, TRXUSDT→TRXEUR→EURUSDT, FDUSDUSDT→DOGEFDUSD→DOGEUSDT
+2025-05-12T19:12:04.987235Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:90: Application completed successfully
+2025-05-12T19:12:35.294025Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:12:35.296155Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:12:35.296680Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT"
+}[0m
+2025-05-12T19:12:35.298581Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:12:35.299021Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:12:35.895873Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:12:39.674083Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 3.78s
+2025-05-12T19:12:39.675770Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:95: Found 396 symbols with USDT as quote
+2025-05-12T19:12:39.681491Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:182: Found 1696 potential triangular paths starting and ending with USDT
+2025-05-12T19:12:39.682135Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:199: Randomly selected 15 triangular paths
+2025-05-12T19:12:39.682149Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:204: Processed triangular paths in 6.384125ms
+2025-05-12T19:12:39.682156Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:74: total_paths: 15
+2025-05-12T19:12:39.682189Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:85: Example paths: RUNEUSDT→RUNEUSDC→USDCUSDT, ETHUSDT→ETHEUR→EURUSDT, FDUSDUSDT→IDEXFDUSD→IDEXUSDT, USDCUSDT→RPLUSDC→RPLUSDT, HYPERUSDT→HYPERFDUSD→FDUSDUSDT, FDUSDUSDT→GPSFDUSD→GPSUSDT, BNBUSDT→BNBBRL→USDTBRL, COTIUSDT→COTITRY→USDTTRY, BTCUSDT→TRUBTC→TRUUSDT, OSMOUSDT→OSMOUSDC→USDCUSDT, BMTUSDT→BMTBNB→BNBUSDT, BNBUSDT→EGLDBNB→EGLDUSDT, BTCUSDT→ATOMBTC→ATOMUSDT, FDUSDUSDT→WIFFDUSD→WIFUSDT, USDCUSDT→ENJUSDC→ENJUSDT
+2025-05-12T19:12:39.682204Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:90: Application completed successfully
+2025-05-12T19:13:11.188529Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:13:11.190708Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:13:11.191302Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT"
+}[0m
+2025-05-12T19:13:11.193309Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:13:11.193758Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:13:12.364084Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:13:14.504628Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 2.14s
+2025-05-12T19:13:14.506421Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:95: Found 396 symbols with USDT as quote
+2025-05-12T19:13:14.512363Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:182: Found 1696 potential triangular paths starting and ending with USDT
+2025-05-12T19:13:14.513013Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:199: Randomly selected 15 triangular paths
+2025-05-12T19:13:14.513034Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:204: Processed triangular paths in 6.616709ms
+2025-05-12T19:13:14.513041Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:74: total_paths: 15
+2025-05-12T19:13:14.513074Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:85: Example paths: AIUSDT→AITRY→USDTTRY
+USDCUSDT→RAREUSDC→RAREUSDT
+ETHUSDT→ETHEUR→EURUSDT
+FDUSDUSDT→SCRFDUSD→SCRUSDT
+USDCUSDT→IDEXUSDC→IDEXUSDT
+PIXELUSDT→PIXELUSDC→USDCUSDT
+USDCUSDT→EURIUSDC→EURIUSDT
+EURUSDT→TRXEUR→TRXUSDT
+FDUSDUSDT→GPSFDUSD→GPSUSDT
+PARTIUSDT→PARTIUSDC→USDCUSDT
+KERNELUSDT→KERNELTRY→USDTTRY
+BTCUSDT→FLMBTC→FLMUSDT
+BTCUSDT→ANKRBTC→ANKRUSDT
+PENGUUSDT→PENGUFDUSD→FDUSDUSDT
+ETHUSDT→AXSETH→AXSUSDT
+2025-05-12T19:13:14.513082Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:90: Application completed successfully
+2025-05-12T19:13:21.548732Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:13:21.551107Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:13:21.551654Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT"
+}[0m
+2025-05-12T19:13:21.553683Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:13:21.554281Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:13:22.179803Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:13:24.313885Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 2.13s
+2025-05-12T19:13:24.315802Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:95: Found 396 symbols with USDT as quote
+2025-05-12T19:13:24.321688Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:182: Found 1696 potential triangular paths starting and ending with USDT
+2025-05-12T19:13:24.322397Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:199: Randomly selected 15 triangular paths
+2025-05-12T19:13:24.322414Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:204: Processed triangular paths in 6.621542ms
+2025-05-12T19:13:24.322421Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:74: total_paths: 15
+2025-05-12T19:13:24.322459Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:85: Example paths: 
+GRTUSDT→GRTFDUSD→FDUSDUSDT
+BTCUSDT→AVAXBTC→AVAXUSDT
+INJUSDT→INJUSDC→USDCUSDT
+AEVOUSDT→AEVOTRY→USDTTRY
+USDCUSDT→UTKUSDC→UTKUSDT
+USDCUSDT→1000CHEEMSUSDC→1000CHEEMSUSDT
+POLUSDT→POLBRL→USDTBRL
+BTCUSDT→CTKBTC→CTKUSDT
+MAGICUSDT→MAGICTRY→USDTTRY
+ETHUSDT→ETHEUR→EURUSDT
+STOUSDT→STOUSDC→USDCUSDT
+EGLDUSDT→EGLDEUR→EURUSDT
+ETHUSDT→DENTETH→DENTUSDT
+BTCUSDT→BATBTC→BATUSDT
+USDCUSDT→ANIMEUSDC→ANIMEUSDT
+2025-05-12T19:13:24.322477Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:90: Application completed successfully
+2025-05-12T19:16:21.396994Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:16:21.398349Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:16:21.398678Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT",
+  "excluded_fiats": [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "RUB",
+    "TRY"
+  ]
+}[0m
+2025-05-12T19:16:21.399887Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:16:21.400223Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:16:22.523822Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:16:24.659978Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 2.14s
+2025-05-12T19:16:24.661916Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:111: Found 396 symbols with USDT as quote
+2025-05-12T19:16:24.667248Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:213: Found 1362 potential triangular paths starting and ending with USDT
+2025-05-12T19:16:24.667757Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:230: Randomly selected 15 triangular paths
+2025-05-12T19:16:24.667770Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:235: Processed triangular paths in 5.88475ms
+2025-05-12T19:16:24.667780Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:78: total_paths: 15
+2025-05-12T19:16:24.667801Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:89: Example paths: 
+BNBUSDT→HYPERBNB→HYPERUSDT
+BTCUSDT→OGNBTC→OGNUSDT
+BTCUSDT→ZECBTC→ZECUSDT
+POLUSDT→POLBRL→USDTBRL
+BTCUSDT→RENDERBTC→RENDERUSDT
+TUSDUSDT→XRPTUSD→XRPUSDT
+BTCUSDT→RAREBTC→RAREUSDT
+USDCUSDT→TUSDC→TUSDT
+BTCUSDT→SSVBTC→SSVUSDT
+BICOUSDT→BICOBTC→BTCUSDT
+REDUSDT→REDFDUSD→FDUSDUSDT
+HBARUSDT→HBARBNB→BNBUSDT
+BAKEUSDT→BAKEBTC→BTCUSDT
+BTCUSDT→STRKBTC→STRKUSDT
+USDCUSDT→ATOMUSDC→ATOMUSDT
+2025-05-12T19:16:24.667811Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:94: Application completed successfully
+2025-05-12T19:18:17.759443Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:18:17.761389Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:18:17.761821Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT",
+  "excluded_fiats": [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "RUB",
+    "TRY"
+  ]
+}[0m
+2025-05-12T19:18:17.763450Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:18:17.763851Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:18:18.846733Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:18:20.291824Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 1.44s
+2025-05-12T19:18:20.293470Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:111: Found 396 symbols with USDT as quote
+2025-05-12T19:18:20.298471Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:213: Found 1362 potential triangular paths starting and ending with USDT
+2025-05-12T19:18:20.298982Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:230: Randomly selected 15 triangular paths
+2025-05-12T19:18:20.298996Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:235: Processed triangular paths in 5.538ms
+2025-05-12T19:18:20.299006Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:78: total_paths: 15
+2025-05-12T19:18:20.299033Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:92: Example paths: 
+  1. BNBUSDT→LISTABNB→LISTAUSDT
+  2. USDCUSDT→IDEXUSDC→IDEXUSDT
+  3. ETHUSDT→XLMETH→XLMUSDT
+  4. BTCUSDT→MOVRBTC→MOVRUSDT
+  5. BTCUSDT→HFTBTC→HFTUSDT
+  6. RUNEUSDT→RUNEETH→ETHUSDT
+  7. BCHUSDT→BCHFDUSD→FDUSDUSDT
+  8. BTCUSDT→DATABTC→DATAUSDT
+  9. BTCUSDT→XVSBTC→XVSUSDT
+ 10. HMSTRUSDT→HMSTRFDUSD→FDUSDUSDT
+ 11. USDCUSDT→GUNUSDC→GUNUSDT
+ 12. INJUSDT→INJBTC→BTCUSDT
+ 13. BTCUSDT→SLFBTC→SLFUSDT
+ 14. INJUSDT→INJETH→ETHUSDT
+ 15. 1INCHUSDT→1INCHBTC→BTCUSDT
+2025-05-12T19:18:20.299044Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:97: Application completed successfully
+2025-05-12T19:18:36.007563Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:18:36.009569Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:18:36.009896Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT",
+  "excluded_fiats": [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "RUB",
+    "TRY"
+  ]
+}[0m
+2025-05-12T19:18:36.011051Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:18:36.011371Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:18:37.075617Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:18:38.503675Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 1.43s
+2025-05-12T19:18:38.505276Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:111: Found 396 symbols with USDT as quote
+2025-05-12T19:18:38.510246Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:213: Found 1362 potential triangular paths starting and ending with USDT
+2025-05-12T19:18:38.510682Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:230: Randomly selected 15 triangular paths
+2025-05-12T19:18:38.510693Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:235: Processed triangular paths in 5.430417ms
+2025-05-12T19:18:38.510703Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:78: total_paths: 15
+2025-05-12T19:18:38.510723Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:92: Example paths: 
+  1. SHELLUSDT-→SHELLBTC-→BTCUSDT
+  2. AVAXUSDT-→AVAXETH-→ETHUSDT
+  3. BBUSDT-→BBBTC-→BTCUSDT
+  4. ETHUSDT-→QTUMETH-→QTUMUSDT
+  5. USDCUSDT-→HMSTRUSDC-→HMSTRUSDT
+  6. ADAUSDT-→ADAFDUSD-→FDUSDUSDT
+  7. QNTUSDT-→QNTBTC-→BTCUSDT
+  8. USDCUSDT-→BNBUSDC-→BNBUSDT
+  9. BTCUSDT-→ANKRBTC-→ANKRUSDT
+ 10. AAVEUSDT-→AAVEBTC-→BTCUSDT
+ 11. IOTXUSDT-→IOTXETH-→ETHUSDT
+ 12. FDUSDUSDT-→SHELLFDUSD-→SHELLUSDT
+ 13. BTCUSDT-→QNTBTC-→QNTUSDT
+ 14. USDCUSDT-→SLFUSDC-→SLFUSDT
+ 15. SAGAUSDT-→SAGABTC-→BTCUSDT
+2025-05-12T19:18:38.510729Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:97: Application completed successfully
+2025-05-12T19:18:48.524509Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:18:48.526860Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:18:48.527395Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT",
+  "excluded_fiats": [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "RUB",
+    "TRY"
+  ]
+}[0m
+2025-05-12T19:18:48.529300Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:18:48.529898Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:42: Connected to exchange: Binance Testnet
+2025-05-12T19:18:49.110608Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:46: Exchange is operational
+2025-05-12T19:18:50.942720Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 1.83s
+2025-05-12T19:18:50.944400Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:111: Found 396 symbols with USDT as quote
+2025-05-12T19:18:50.949722Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:213: Found 1362 potential triangular paths starting and ending with USDT
+2025-05-12T19:18:50.950282Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:230: Randomly selected 15 triangular paths
+2025-05-12T19:18:50.950299Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:235: Processed triangular paths in 5.911583ms
+2025-05-12T19:18:50.950309Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:78: total_paths: 15
+2025-05-12T19:18:50.950336Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:98: Example paths: 
+  1. OMUSDT → OMUSDC → USDCUSDT
+  2. USDCUSDT → PEPEUSDC → PEPEUSDT
+  3. BANANAUSDT → BANANAUSDC → USDCUSDT
+  4. BTCUSDT → IOTABTC → IOTAUSDT
+  5. PHAUSDT → PHABTC → BTCUSDT
+  6. TUSDUSDT → ARBTUSD → ARBUSDT
+  7. ETHUSDT → LRCETH → LRCUSDT
+  8. ICXUSDT → ICXBTC → BTCUSDT
+  9. USDCUSDT → WUSDC → WUSDT
+ 10. BNBUSDT → SHELLBNB → SHELLUSDT
+ 11. FDUSDUSDT → ARBFDUSD → ARBUSDT
+ 12. MANAUSDT → MANABTC → BTCUSDT
+ 13. MANAUSDT → MANAETH → ETHUSDT
+ 14. LINKUSDT → LINKBNB → BNBUSDT
+ 15. FDUSDUSDT → LDOFDUSD → LDOUSDT
+2025-05-12T19:18:50.950348Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:103: Application completed successfully
+2025-05-12T19:21:20.419341Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:21:20.421249Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:21:20.421685Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT",
+  "excluded_fiats": [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "RUB",
+    "TRY"
+  ]
+}[0m
+2025-05-12T19:21:20.423449Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:21:20.423905Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:43: Connected to exchange: Binance Testnet
+2025-05-12T19:21:21.001136Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:47: Exchange is operational
+2025-05-12T19:21:23.151131Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 2.15s
+2025-05-12T19:21:23.152984Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:111: Found 396 symbols with USDT as quote
+2025-05-12T19:21:23.158125Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:213: Found 1362 potential triangular paths starting and ending with USDT
+2025-05-12T19:21:23.158713Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:230: Randomly selected 15 triangular paths
+2025-05-12T19:21:23.158755Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:235: Processed triangular paths in 5.795458ms
+2025-05-12T19:21:23.158765Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:79: total_paths: 15
+2025-05-12T19:21:23.158790Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:99: Example paths: 
+  1. COOKIEUSDT → COOKIEUSDC → USDCUSDT
+  2. AIUSDT → AIBTC → BTCUSDT
+  3. SOLUSDT → SOLMXN → USDTMXN
+  4. BANANAS31USDT → BANANAS31USDC → USDCUSDT
+  5. ACXUSDT → ACXFDUSD → FDUSDUSDT
+  6. ZENUSDT → ZENUSDC → USDCUSDT
+  7. USDCUSDT → CKBUSDC → CKBUSDT
+  8. BNBUSDT → CHZBNB → CHZUSDT
+  9. USDCUSDT → KERNELUSDC → KERNELUSDT
+ 10. BNBUSDT → POLBNB → POLUSDT
+ 11. MEUSDT → MEFDUSD → FDUSDUSDT
+ 12. SCRUSDT → SCRBTC → BTCUSDT
+ 13. WLDUSDT → WLDUSDC → USDCUSDT
+ 14. BTCUSDT → MINABTC → MINAUSDT
+ 15. EGLDUSDT → EGLDFDUSD → FDUSDUSDT
+2025-05-12T19:21:23.158802Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:104: Application completed successfully
+2025-05-12T19:36:12.282005Z  INFO main ThreadId(01) rust_arb_optimized::utils::logging: src/utils/logging.rs:129: Asynchronous logging initialized at level: Level(Info) log_dir=logs log_prefix=triangular-arbitrage
+2025-05-12T19:36:12.283755Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:15: 
+  _____   ____       _        _                 _                    _     _                             
+ |_   _| |  _ \     / \      (_)  ___     ___  | |_    __ _   _ __  | |_  (_)  _ __     __ _             
+   | |   | |_) |   / _ \     | | / __|   / __| | __|  / _` | | '__| | __| | | | '_ \   / _` |            
+   | |   |  _ <   / ___ \    | | \__ \   \__ \ | |_  | (_| | | |    | |_  | | | | | | | (_| |  _   _   _ 
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |___/  \__|  \__,_| |_|     \__| |_| |_| |_|  \__, | (_) (_) (_)
+                                                                                       |___/             
+
+2025-05-12T19:36:12.284156Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:9: 
+[4;34m[CONFIG][0m: [35m{
+  "debug": true,
+  "sbe_api_key": "Vq7cOAApxQltJBc5czuOOG3ikhhAmyJI8XbyKL7VxeacG6tNvq3Iqg8szkXmiHXf",
+  "fix_api": "",
+  "fix_secret": "",
+  "threshold": 0.05,
+  "max_triangles": 15,
+  "log_level": "info",
+  "log_config": {
+    "directory": "logs",
+    "filename_prefix": "triangular-arbitrage",
+    "rotation": "Hourly",
+    "max_files": 6
+  },
+  "base_asset": "USDT",
+  "excluded_fiats": [
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "RUB",
+    "TRY"
+  ]
+}[0m
+2025-05-12T19:36:12.285343Z  INFO main ThreadId(01) rust_arb_optimized::utils::console: src/utils/console.rs:21: 
+  _____   ____       _        _           ____    _____      _      ____    _____   _____   ____    _   _   _ 
+ |_   _| |  _ \     / \      (_)  ___    / ___|  |_   _|    / \    |  _ \  |_   _| | ____| |  _ \  | | | | | |
+   | |   | |_) |   / _ \     | | / __|   \___ \    | |     / _ \   | |_) |   | |   |  _|   | | | | | | | | | |
+   | |   |  _ <   / ___ \    | | \__ \    ___) |   | |    / ___ \  |  _ <    | |   | |___  | |_| | |_| |_| |_|
+   |_|   |_| \_\ /_/   \_\   |_| |___/   |____/    |_|   /_/   \_\ |_| \_\   |_|   |_____| |____/  (_) (_) (_)
+                                                                                                              
+
+2025-05-12T19:36:12.285736Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:43: Connected to exchange: Binance Testnet
+2025-05-12T19:36:13.347760Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:47: Exchange is operational
+2025-05-12T19:36:15.035090Z  INFO main ThreadId(01) rust_arb_optimized::exchange::binance: src/exchange/binance.rs:222: Fetched 1422 symbols from Binance in 1.69s
+2025-05-12T19:36:15.036987Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:111: Found 396 symbols with USDT as quote
+2025-05-12T19:36:15.042370Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:213: Found 1362 potential triangular paths starting and ending with USDT
+2025-05-12T19:36:15.042918Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:230: Randomly selected 15 triangular paths
+2025-05-12T19:36:15.042932Z  INFO main ThreadId(01) rust_arb_optimized::models::symbol_map: src/models/symbol_map.rs:235: Processed triangular paths in 5.968375ms
+2025-05-12T19:36:15.042946Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:79: total_paths: 15
+2025-05-12T19:36:15.042975Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:99: Example paths: 
+[35m  1. TUSDUSDT → ARBTUSD → ARBUSDT
+  2. POLUSDT → POLFDUSD → FDUSDUSDT
+  3. TAOUSDT → TAOBTC → BTCUSDT
+  4. BTCUSDT → CHZBTC → CHZUSDT
+  5. BTCUSDT → NEXOBTC → NEXOUSDT
+  6. POWRUSDT → POWRETH → ETHUSDT
+  7. BTCUSDT → LDOBTC → LDOUSDT
+  8. ETHUSDT → ETHFDUSD → FDUSDUSDT
+  9. FDUSDUSDT → XAIFDUSD → XAIUSDT
+ 10. CVCUSDT → CVCUSDC → USDCUSDT
+ 11. ETHFIUSDT → ETHFIFDUSD → FDUSDUSDT
+ 12. BTCUSDT → FLUXBTC → FLUXUSDT
+ 13. WLDUSDT → WLDUSDC → USDCUSDT
+ 14. ETHUSDT → AAVEETH → AAVEUSDT
+ 15. SFPUSDT → SFPBTC → BTCUSDT[0m
+2025-05-12T19:36:15.043001Z  INFO main ThreadId(01) rust_arb_optimized: src/main.rs:104: Application completed successfully
