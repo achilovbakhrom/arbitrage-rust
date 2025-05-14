@@ -4,6 +4,7 @@ mod enums;
 mod exchange;
 mod helpers;
 mod utils;
+mod sbe;
 mod models;
 mod orderbook;
 
