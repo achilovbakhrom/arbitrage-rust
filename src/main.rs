@@ -13,9 +13,9 @@ use models::symbol_map::SymbolMap;
 use tokio::time::timeout;
 
 use config::Config;
-use anyhow::{ Context, Result };
+use anyhow::{ anyhow, Context, Result };
 
-use exchange::{ binance::BinanceClient, client::ExchangeClient };
+use exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient };
 use tracing::{ error, info };
 use utils::{ console::{ print_app_started, print_app_starting, print_config }, logging };
 
@@ -99,44 +99,64 @@ async fn main() -> Result<()> {
         info!("Example paths: \n{}", examples.magenta());
     }
 
-    // This would scan prices for each path and execute trades when profitable
+    let client = BinanceSbeClient::new(config.fix_api);
+    let ws_stream = client.connect().await?;
+    let message_task = tokio::spawn(async move {
+        let symbols: Vec<String> = symbol_map
+            .get_all_symbols()
+            .map(|s| s.symbol.to_string())
+            .collect();
 
-    info!("Application completed successfully");
+        let channels: Vec<String> = vec!["depth".to_string()];
+        // &v.push("depth".to_string());
 
-    // // Check if the exchange is operational (with timeout)
-    // match timeout(API_TIMEOUT, client.is_operational()).await {
-    //     Ok(Ok(true)) => {
-    //         info!("Exchange is operational");
-    //     }
-    //     _ => {
-    //         error!("Exchange is not operational or timed out");
-    //         anyhow::bail!("Exchange is not operational");
+        client
+            .subscribe(ws_stream, symbols.iter().as_slice(), channels.iter().as_slice()).await
+            .unwrap();
+    });
+    // while let Some(msg_result) = read.next().await {
+    //     match msg_result {
+    //         Ok(msg) => {
+    //             match msg {
+    //                 Message::Text(text) => {
+    //                     println!("Received: {}", text);
+    //                 }
+    //                 Message::Binary(bin) => {
+    //                     println!("Received binary data: {} bytes", bin.len());
+    //                 }
+    //                 Message::Ping(data) => {
+    //                     println!("Received ping");
+    //                     // You might want to respond with a pong
+    //                     // if let Err(e) = write.send(Message::Pong(data)).await {
+    //                     //     eprintln!("Failed to send pong: {}", e);
+    //                     // }
+    //                 }
+    //                 Message::Pong(_) => {
+    //                     println!("Received pong");
+    //                 }
+    //                 Message::Close(frame) => {
+    //                     println!("Connection closed: {:?}", frame);
+    //                     break;
+    //                 }
+    //                 _ => {
+    //                     println!("Received other message type");
+    //                 }
+    //             }
+    //         }
+    //         Err(e) => {
+    //             eprintln!("Error receiving message: {}", e);
+    //             break;
+    //         }
     //     }
     // }
 
-    // config.print();
+    info!("\n Press Ctrl+C to exit");
+    tokio::signal::ctrl_c().await.map_err(|e| anyhow!("Failed to listen for Ctrl+C: {}", e))?;
 
-    // Logger::init(config.log_level.as_ref());
+    println!("Received Ctrl+C, shutting down...");
 
-    // let client = RestApiClient::new().unwrap();
+    // Clean up and exit
+    message_task.abort();
 
-    // let symbols = match client.fetch_all_trading_spot_symbols().await {
-    //     Result::Ok(symbols) => symbols,
-    //     Result::Err(e) => {
-    //         error!("Error fetching symbols: {}", e);
-    //         process::exit(1);
-    //     }
-    // };
-
-    // info!("symbols len: {}", symbols.len());
-
-    // let (triangles, used) = create_triangles_from_symbols(&symbols, config.pairs_count);
-
-    // info!("triangles: {}", triangles.len());
-    // info!("used: {}", used.len());
-
-    // println!("Press Ctrl+C to close the app...");
-    // tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
-    // info!("Shutting down");
     Ok(())
 }

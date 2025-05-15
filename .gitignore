@@ -1,1 +1,6 @@
 /target
+/keys
+/keys/*
+/logs
+
+.env

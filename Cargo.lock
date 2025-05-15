@@ -187,6 +187,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1407,6 +1413,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "byteorder",
+ "bytes",
  "chrono",
  "colored",
  "dashmap",
@@ -1429,6 +1437,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tungstenite",
  "uuid",
 ]
 
@@ -1961,7 +1970,9 @@ checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite",
 ]
 
@@ -2112,6 +2123,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.9.1",
  "sha1",
  "thiserror 2.0.12",
