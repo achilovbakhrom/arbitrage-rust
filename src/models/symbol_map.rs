@@ -220,7 +220,7 @@ impl SymbolMap {
         if all_paths.len() > max_paths {
             // Randomly select paths
             use rand::seq::SliceRandom;
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
 
             all_paths.shuffle(&mut rng);
             all_paths.truncate(max_paths);
@@ -266,5 +266,26 @@ impl SymbolMap {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.symbols.is_empty()
+    }
+
+    #[inline]
+    pub fn get_unique_symbols(&self) -> Vec<String> {
+        let mut result: Vec<String> = vec![];
+        self.triangular_paths.iter().for_each(|path| {
+            let first = path.first_symbol.to_string();
+            let second = path.second_symbol.to_string();
+            let third = path.third_symbol.to_string();
+            if !result.contains(&first) {
+                result.push(first);
+            }
+            if !result.contains(&second) {
+                result.push(second);
+            }
+            if !result.contains(&third) {
+                result.push(third);
+            }
+        });
+
+        return result;
     }
 }

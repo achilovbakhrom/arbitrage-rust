@@ -1,12 +1,21 @@
+use http::header;
 use tokio_tungstenite::{ connect_async, WebSocketStream };
 use futures::{ SinkExt, StreamExt };
 use tokio::net::TcpStream;
-use tungstenite::{ http, protocol::Message, Utf8Bytes };
+use tungstenite::{
+    client::IntoClientRequest,
+    handshake::client::Request,
+    protocol::Message,
+    Utf8Bytes,
+};
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
-use std::sync::Arc;
+use std::{ sync::Arc, time::{ Instant, SystemTime, UNIX_EPOCH } };
+use tungstenite::handshake::client::generate_key;
 
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
+
+// const BINANCE_SBE_URL: &str = "wss://stream.binance.com:9443";
 
 pub struct BinanceSbeClient {
     api_key: Arc<str>,
@@ -21,20 +30,59 @@ impl BinanceSbeClient {
         }
     }
 
+    // pub async fn connect(
+    //     &self
+    // ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>> {
+    //     info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
+
+    //     // Create a request and convert it to a client request
+    //     let request = Request::builder()
+    //         .uri(self.endpoint.as_str())
+    //         .header("X-MBX-APIKEY", self.api_key.as_ref())
+    //         .body(())
+    //         .context("Failed to build request")?;
+
+    //     // Convert to a proper WebSocket request (this handles the WebSocket headers)
+    //     let client_request = request
+    //         .into_client_request()
+    //         .context("Failed to convert to WebSocket request")?;
+
+    //     // Connect using the prepared WebSocket request
+    //     let (ws_stream, _) = connect_async(client_request).await.context(
+    //         "Failed to connect to Binance SBE WebSocket"
+    //     )?;
+
+    //     info!("Connected to Binance SBE WebSocket");
+
+    //     Ok(ws_stream)
+    // }
+
     pub async fn connect(
         &self
     ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>> {
         info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
 
-        // Create connection request with headers
-        let request = http::Request
-            ::builder()
+        // Create a request and convert it to a client request
+        let request = Request::builder()
             .uri(self.endpoint.as_str())
             .header("X-MBX-APIKEY", self.api_key.as_ref())
-            .body(())?;
+            .header("Sec-WebSocket-Key", generate_key())
+            .header("Sec-WebSocket-Version", "13")
+            .header("Host", "binance.com")
+            .header("Connection", "keep-alive, Upgrade")
+            .header("Upgrade", "websocket")
+            .body(())
+            .context("Failed to build request")?;
 
-        // Connect to WebSocket
-        let (ws_stream, _) = connect_async(request).await.context(
+        // Convert to a proper WebSocket request (this handles the WebSocket headers)
+        let client_request = request
+            .into_client_request()
+            .context("Failed to convert to WebSocket request")?;
+
+        println!("clientReq: {:?}", &client_request);
+
+        // Connect using the prepared WebSocket request
+        let (ws_stream, _) = connect_async(client_request).await.context(
             "Failed to connect to Binance SBE WebSocket"
         )?;
 
@@ -45,7 +93,7 @@ impl BinanceSbeClient {
 
     pub async fn subscribe(
         &self,
-        mut ws_stream: WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+        ws_stream: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
         symbols: &[String],
         channels: &[String]
     ) -> Result<()> {
@@ -54,6 +102,7 @@ impl BinanceSbeClient {
             serde_json::json!({
             "method": "SUBSCRIBE",
             "params": symbols.iter()
+            .take(1)
                 .flat_map(|symbol| {
                     channels.iter().map(move |channel| {
                         format!("{}@{}", symbol.to_lowercase(), channel)
@@ -62,6 +111,8 @@ impl BinanceSbeClient {
                 .collect::<Vec<String>>(),
             "id": 1
         }).to_string();
+
+        println!("subscription {}", &subscription);
 
         let utf8_bytes = Utf8Bytes::from(subscription);
 
@@ -94,9 +145,15 @@ impl BinanceSbeClient {
 
     pub async fn process_messages(
         &self,
-        mut ws_stream: WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>
+        ws_stream: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>
     ) -> Result<()> {
         while let Some(Ok(message)) = ws_stream.next().await {
+            // let start = SystemTime::now();
+            // let since_epoch = start.duration_since(UNIX_EPOCH).expect("Time went backwards");
+
+            // Convert to microseconds
+            // let micros = since_epoch.as_millis();
+
             match message {
                 Message::Binary(data) => {
                     self.handle_binary_message(&data)?;
@@ -115,7 +172,7 @@ impl BinanceSbeClient {
     }
 
     fn handle_binary_message(&self, data: &[u8]) -> Result<()> {
-        // Create a buffer for SBE decoding
+        // Create a buffer for SBE decodingc
         // let buf = std::io::Cursor::new(data);
 
         // // Read the SBE message header

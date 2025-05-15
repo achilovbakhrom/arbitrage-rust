@@ -82,7 +82,6 @@ async fn main() -> Result<()> {
         let examples = symbol_map
             .get_triangular_paths()
             .iter()
-            .take(config.max_triangles)
             .enumerate()
             .map(|(i, p)|
                 format!(
@@ -99,20 +98,20 @@ async fn main() -> Result<()> {
         info!("Example paths: \n{}", examples.magenta());
     }
 
-    let client = BinanceSbeClient::new(config.fix_api);
-    let ws_stream = client.connect().await?;
     let message_task = tokio::spawn(async move {
-        let symbols: Vec<String> = symbol_map
-            .get_all_symbols()
-            .map(|s| s.symbol.to_string())
-            .collect();
+        let client = BinanceSbeClient::new(config.sbe_api_key);
+        let mut ws_stream = client.connect().await.unwrap();
+
+        let symbols: Vec<String> = symbol_map.get_unique_symbols();
 
         let channels: Vec<String> = vec!["depth".to_string()];
         // &v.push("depth".to_string());
 
         client
-            .subscribe(ws_stream, symbols.iter().as_slice(), channels.iter().as_slice()).await
+            .subscribe(&mut ws_stream, symbols.iter().as_slice(), channels.iter().as_slice()).await
             .unwrap();
+
+        client.process_messages(&mut ws_stream).await.unwrap();
     });
     // while let Some(msg_result) = read.next().await {
     //     match msg_result {
