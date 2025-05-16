@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use anyhow::{ Context, Result };
 use reqwest::{ Client as HttpClient, Url };
 use serde::{ Deserialize, Serialize };
+use tokio::sync::RwLock;
 use tracing::{ debug, error, info };
 use std::time::{ Duration, Instant };
 use std::sync::Arc;
-use tokio::sync::RwLock;
+// use tokio::::RwLock;
 use rust_decimal::Decimal;
 
 use crate::models::symbol::Symbol;
@@ -229,7 +230,7 @@ impl ExchangeClient for BinanceClient {
     }
 
     async fn get_active_spot_symbols(&self) -> Result<Vec<Symbol>> {
-        let all_symbols = self.get_all_symbols().await?;
+        let all_symbols = self.get_all_symbols().await.unwrap();
 
         // Pre-allocate for efficiency
         let mut spot_symbols = Vec::with_capacity(all_symbols.len() / 2);
