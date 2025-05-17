@@ -2,10 +2,10 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{ debug, info };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::cell::RefCell;
 
 use crate::models::triangular_path::TriangularPath;
 use crate::models::level::Level;
@@ -47,7 +47,7 @@ pub struct ArbitrageDetector {
     /// Minimum profit threshold to report
     min_profit_threshold: Decimal,
     /// Cache for opportunities to reduce allocations
-    opportunity_cache: RefCell<Vec<ArbitrageOpportunity>>,
+    opportunity_cache: Mutex<Vec<ArbitrageOpportunity>>,
 }
 
 impl ArbitrageDetector {
@@ -63,21 +63,21 @@ impl ArbitrageDetector {
             fee_rate,
             one_minus_fee: dec!(1.0) - fee_rate,
             min_profit_threshold,
-            opportunity_cache: RefCell::new(Vec::with_capacity(100)),
+            opportunity_cache: Mutex::new(Vec::with_capacity(100)),
         }
     }
 
     /// Check a single triangular path for arbitrage opportunity
     #[inline]
-    pub fn check_path(
+    pub async fn check_path(
         &self,
         path: &Arc<TriangularPath>,
         start_amount: Decimal
     ) -> Option<ArbitrageOpportunity> {
         // Get orderbook top of book for each leg
-        let first_tob = self.orderbook_manager.get_top_of_book(&path.first_symbol)?;
-        let second_tob = self.orderbook_manager.get_top_of_book(&path.second_symbol)?;
-        let third_tob = self.orderbook_manager.get_top_of_book(&path.third_symbol)?;
+        let first_tob = self.orderbook_manager.get_top_of_book(&path.first_symbol).await?;
+        let second_tob = self.orderbook_manager.get_top_of_book(&path.second_symbol).await?;
+        let third_tob = self.orderbook_manager.get_top_of_book(&path.third_symbol).await?;
 
         // Extract prices based on trade direction (with early returns to avoid allocations)
         let first_price = if path.first_is_base_to_quote {
@@ -159,16 +159,16 @@ impl ArbitrageDetector {
 
     /// Scan multiple paths for arbitrage opportunities with minimal allocations
     /// Returns a Vec of opportunities found (owned, not borrowed)
-    pub fn scan_paths(
+    pub async fn scan_paths(
         &self,
         paths: &[Arc<TriangularPath>],
         start_amount: Decimal
     ) -> Vec<ArbitrageOpportunity> {
-        let mut opportunities = self.opportunity_cache.borrow_mut();
+        let mut opportunities = self.opportunity_cache.lock().await;
         opportunities.clear();
 
         for path in paths {
-            if let Some(opportunity) = self.check_path(path, start_amount) {
+            if let Some(opportunity) = self.check_path(path, start_amount).await {
                 // Only log occasionally to reduce allocations
                 if opportunities.len() < 3 {
                     debug!(
@@ -191,8 +191,8 @@ impl ArbitrageDetector {
 
     /// Get the top N opportunities from the last scan
     /// This avoids copying the entire vector when you only need a few items
-    pub fn top_opportunities(&self, n: usize) -> Vec<ArbitrageOpportunity> {
-        let opportunities = self.opportunity_cache.borrow();
+    pub async fn top_opportunities(&self, n: usize) -> Vec<ArbitrageOpportunity> {
+        let opportunities = self.opportunity_cache.lock().await;
         opportunities.iter().take(n).cloned().collect()
     }
 }

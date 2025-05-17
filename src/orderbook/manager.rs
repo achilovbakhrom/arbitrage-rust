@@ -1,8 +1,6 @@
-// src/orderbook/manager.rs
-
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
+use tokio::sync::RwLock;
 use tracing::{ debug, error, info, warn };
 
 use crate::models::level::{ Level, LevelUpdate };
@@ -30,21 +28,21 @@ impl OrderBookManager {
 
     /// Get or create an orderbook for a symbol (lock-free read path)
     #[inline]
-    pub fn get_book(&self, symbol: &Arc<str>) -> Option<OrderBook> {
-        let books = self.books.read();
+    pub async fn get_book(&self, symbol: &Arc<str>) -> Option<OrderBook> {
+        let books = self.books.read().await;
         books.get(symbol).cloned()
     }
 
     /// Apply a snapshot to initialize or reset an orderbook
     #[inline]
-    pub fn apply_snapshot(
+    pub async fn apply_snapshot(
         &self,
         symbol: Arc<str>,
         bids: &[(f64, f64)],
         asks: &[(f64, f64)],
         update_id: u64
     ) {
-        let mut books = self.books.write();
+        let mut books = self.books.write().await;
 
         let book = books.entry(symbol.clone()).or_insert_with(|| {
             debug!(?symbol, "Creating new orderbook for snapshot");
@@ -72,7 +70,7 @@ impl OrderBookManager {
 
     /// Apply updates to an existing orderbook (no allocation version)
     #[inline]
-    pub fn apply_update(
+    pub async fn apply_update(
         &self,
         symbol: &Arc<str>,
         side: Side,
@@ -80,7 +78,7 @@ impl OrderBookManager {
         quantity: f64,
         update_id: u64
     ) {
-        let mut books = self.books.write();
+        let mut books = self.books.write().await;
 
         if let Some(book) = books.get_mut(symbol) {
             if !book.valid {
@@ -93,14 +91,17 @@ impl OrderBookManager {
 
     /// Get the best bid and ask for a symbol (lock-free read)
     #[inline]
-    pub fn get_top_of_book(&self, symbol: &Arc<str>) -> Option<(Option<Level>, Option<Level>)> {
-        self.get_book(symbol).map(|book| book.snapshot())
+    pub async fn get_top_of_book(
+        &self,
+        symbol: &Arc<str>
+    ) -> Option<(Option<Level>, Option<Level>)> {
+        self.get_book(symbol).await.map(|book| book.snapshot())
     }
 
     /// Mark an orderbook as needing a refresh
     #[inline]
-    pub fn mark_dirty(&self, symbol: &Arc<str>) {
-        let mut books = self.books.write();
+    pub async fn mark_dirty(&self, symbol: &Arc<str>) {
+        let mut books = self.books.write().await;
 
         if let Some(book) = books.get_mut(symbol) {
             book.mark_dirty();

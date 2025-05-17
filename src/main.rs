@@ -1,165 +1,4 @@
-// mod arbitrage;
-// mod config;
-// mod constants;
-// mod enums;
-// mod exchange;
-// mod helpers;
-// mod utils;
-// mod models;
-// mod orderbook;
-
-// use std::time::Duration;
-// use colored::Colorize;
-// use models::symbol_map::SymbolMap;
-// use tokio::time::timeout;
-
-// use config::Config;
-// use anyhow::{ anyhow, Context, Result };
-
-// use exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient };
-// use tracing::{ error, info };
-// use utils::{ console::{ print_app_started, print_app_starting, print_config }, logging };
-
-// const API_TIMEOUT: Duration = Duration::from_secs(5);
-
-// #[tokio::main]
-// async fn main() -> Result<()> {
-//     let config = Config::from_env().context("Failed to load configuration from environment")?;
-
-//     logging
-//         ::init_logging(config.log_level, config.debug, &config.log_config)
-//         .context("Failed to initialize logging system")?;
-
-//     print_app_starting();
-//     print_config(&config);
-
-//     print_app_started();
-
-//     let client = BinanceClient::new(
-//         config.fix_api.clone(),
-//         config.fix_secret.clone(),
-//         config.debug
-//     )?;
-
-//     info!("Connected to exchange: {}", client.name());
-
-//     match timeout(API_TIMEOUT, client.is_operational()).await {
-//         Ok(Ok(true)) => {
-//             info!("Exchange is operational");
-//         }
-//         _ => {
-//             error!("Exchange is not operational or timed out");
-//             anyhow::bail!("Exchange is not operational");
-//         }
-//     }
-
-//     // Fetch all active spot trading symbols (with timeout)
-//     let symbols = match timeout(API_TIMEOUT, client.get_active_spot_symbols()).await {
-//         Ok(Ok(symbols)) => symbols,
-//         Ok(Err(e)) => {
-//             error!("Failed to fetch symbols: {}", e);
-//             anyhow::bail!("Failed to fetch symbols: {}", e);
-//         }
-//         Err(_) => {
-//             error!("Timed out while fetching symbols");
-//             anyhow::bail!("Timed out while fetching symbols");
-//         }
-//     };
-
-//     // Create symbol map
-//     let mut symbol_map = SymbolMap::from_symbols(symbols);
-
-//     symbol_map.find_targeted_triangular_paths(
-//         &config.base_asset,
-//         config.max_triangles,
-//         &config.excluded_fiats
-//     );
-
-//     let total_paths = symbol_map.get_triangular_paths().len();
-
-//     info!("total_paths: {}", total_paths);
-
-//     if total_paths > 0 {
-//         let examples = symbol_map
-//             .get_triangular_paths()
-//             .iter()
-//             .enumerate()
-//             .map(|(i, p)|
-//                 format!(
-//                     "{:3}. {} → {} → {}",
-//                     i + 1,
-//                     p.first_symbol,
-//                     p.second_symbol,
-//                     p.third_symbol
-//                 )
-//             )
-//             .collect::<Vec<_>>()
-//             .join("\n");
-
-//         info!("Example paths: \n{}", examples.magenta());
-//     }
-
-//     let message_task = tokio::spawn(async move {
-//         let client = BinanceSbeClient::new(config.sbe_api_key);
-//         let mut ws_stream = client.connect().await.unwrap();
-
-//         let symbols: Vec<String> = symbol_map.get_unique_symbols();
-
-//         let channels: Vec<String> = vec!["depth".to_string()];
-//         // &v.push("depth".to_string());
-
-//         client
-//             .subscribe(&mut ws_stream, symbols.iter().as_slice(), channels.iter().as_slice()).await
-//             .unwrap();
-
-//         client.process_messages(&mut ws_stream).await.unwrap();
-//     });
-//     // while let Some(msg_result) = read.next().await {
-//     //     match msg_result {
-//     //         Ok(msg) => {
-//     //             match msg {
-//     //                 Message::Text(text) => {
-//     //                     println!("Received: {}", text);
-//     //                 }
-//     //                 Message::Binary(bin) => {
-//     //                     println!("Received binary data: {} bytes", bin.len());
-//     //                 }
-//     //                 Message::Ping(data) => {
-//     //                     println!("Received ping");
-//     //                     // You might want to respond with a pong
-//     //                     // if let Err(e) = write.send(Message::Pong(data)).await {
-//     //                     //     eprintln!("Failed to send pong: {}", e);
-//     //                     // }
-//     //                 }
-//     //                 Message::Pong(_) => {
-//     //                     println!("Received pong");
-//     //                 }
-//     //                 Message::Close(frame) => {
-//     //                     println!("Connection closed: {:?}", frame);
-//     //                     break;
-//     //                 }
-//     //                 _ => {
-//     //                     println!("Received other message type");
-//     //                 }
-//     //             }
-//     //         }
-//     //         Err(e) => {
-//     //             eprintln!("Error receiving message: {}", e);
-//     //             break;
-//     //         }
-//     //     }
-//     // }
-
-//     info!("\n Press Ctrl+C to exit");
-//     tokio::signal::ctrl_c().await.map_err(|e| anyhow!("Failed to listen for Ctrl+C: {}", e))?;
-
-//     println!("Received Ctrl+C, shutting down...");
-
-//     // Clean up and exit
-//     message_task.abort();
-
-//     Ok(())
-// }
+// src/main.rs
 mod config;
 mod constants;
 mod enums;
@@ -177,13 +16,11 @@ use models::symbol_map::SymbolMap;
 use tokio::time::timeout;
 use rust_decimal_macros::dec;
 
-// Explicitly import RwLock from parking_lot
-
 use config::Config;
 use anyhow::{ anyhow, Context, Result };
 
 use exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient };
-use tracing::{ error, info, debug, warn };
+use tracing::{ error, info, warn };
 use utils::{ console::{ print_app_started, print_app_starting, print_config }, logging };
 use orderbook::manager::OrderBookManager;
 use arbitrage::detector::ArbitrageDetector;
@@ -254,7 +91,6 @@ async fn main() -> Result<()> {
         let examples = symbol_map
             .get_triangular_paths()
             .iter()
-            .take(5) // Show just first 5 for brevity
             .enumerate()
             .map(|(i, p)|
                 format!(
@@ -329,14 +165,21 @@ async fn main() -> Result<()> {
         // Subscribe to depth stream for each symbol
         let channels: Vec<String> = vec!["depth".to_string()];
 
+        // Get symbols for subscription (limit to 100 to avoid exceeding connection limits)
+        let subscription_symbols = paths_for_msg_task
+            .iter()
+            .take(100) // Binance recommends no more than 100-200 symbols per connection
+            .cloned()
+            .collect::<Vec<String>>();
+
         match
             client.subscribe(
                 &mut ws_stream,
-                paths_for_msg_task.iter().as_slice(),
+                &subscription_symbols,
                 channels.iter().as_slice()
             ).await
         {
-            Ok(_) => info!("Successfully subscribed to {} symbols", paths_for_msg_task.len()),
+            Ok(_) => info!("Successfully subscribed to {} symbols", subscription_symbols.len()),
             Err(e) => {
                 error!("Failed to subscribe: {}", e);
                 return;
@@ -346,24 +189,29 @@ async fn main() -> Result<()> {
         // Set depth callback for orderbook updates
         client.set_depth_callback(
             Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
-                let symbol_arc = Arc::from(symbol);
+                // Clone the data to avoid lifetime issues with the spawned task
+                let symbol_arc = Arc::from(symbol.to_string());
+                let bids_cloned: Vec<(f64, f64)> = bids.to_vec();
+                let asks_cloned: Vec<(f64, f64)> = asks.to_vec();
+                let manager = manager_for_msg_task.clone();
 
-                // Update orderbook with minimal allocations
-                manager_for_msg_task.apply_snapshot(symbol_arc, bids, asks, last_update_id);
+                // Create a task to update the orderbook without blocking the WebSocket
+                tokio::spawn(async move {
+                    // Update orderbook with cloned data
+                    manager.apply_snapshot(
+                        symbol_arc,
+                        &bids_cloned,
+                        &asks_cloned,
+                        last_update_id
+                    ).await;
 
-                // Log updates occasionally (to reduce allocations)
-                if last_update_id % 1000 == 0 {
-                    debug!(
-                        symbol,
-                        first_id = first_update_id,
-                        last_id = last_update_id,
-                        bids = bids.len(),
-                        asks = asks.len(),
-                        "Orderbook update"
-                    );
-                }
+                    // Log updates occasionally (to reduce allocations)
+                    if last_update_id % 1000 == 0 {
+                        info!("Orderbook update");
+                    }
+                });
             })
-        );
+        ).await;
 
         // Process WebSocket messages
         if let Err(e) = client.process_messages(&mut ws_stream).await {
@@ -400,7 +248,7 @@ async fn main() -> Result<()> {
             let opportunities = detector_for_task.scan_paths(
                 &arbitrage_paths,
                 dec!(100.0) // Start with 100 USDT
-            );
+            ).await;
             let scan_time = start_time.elapsed();
 
             scan_count += 1;

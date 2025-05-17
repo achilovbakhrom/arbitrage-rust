@@ -1,27 +1,21 @@
 use tokio_tungstenite::{ connect_async, WebSocketStream };
 use futures::{ SinkExt, StreamExt };
-use tokio::{ net::TcpStream, sync::RwLock };
-use tungstenite::{
-    client::IntoClientRequest,
-    handshake::client::Request,
-    protocol::Message,
-    Utf8Bytes,
-};
+use tokio::{ net::TcpStream, sync::RwLock, time::{ interval, Duration } };
+use tungstenite::{ client::IntoClientRequest, handshake::client::Request, protocol::Message };
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
-use std::{ ops::Deref, sync::Arc, time::{ Instant, SystemTime, UNIX_EPOCH } };
+use std::{ sync::Arc, time::{ SystemTime, UNIX_EPOCH } };
 use tungstenite::handshake::client::generate_key;
 
 use crate::models::sbe::{
     depth_diff_stream_event_codec::DepthDiffStreamEventDecoder,
     message_header_codec::{ self, MessageHeaderDecoder },
+    Decoder,
     ReadBuf,
-    Reader,
 };
 
+// Use the official endpoint as per Binance documentation
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
-
-// const BINANCE_SBE_URL: &str = "wss://stream.binance.com:9443";
 
 pub struct BinanceSbeClient {
     api_key: Arc<str>,
@@ -40,63 +34,36 @@ impl BinanceSbeClient {
         }
     }
 
-    // pub async fn connect(
-    //     &self
-    // ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>> {
-    //     info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
-
-    //     // Create a request and convert it to a client request
-    //     let request = Request::builder()
-    //         .uri(self.endpoint.as_str())
-    //         .header("X-MBX-APIKEY", self.api_key.as_ref())
-    //         .body(())
-    //         .context("Failed to build request")?;
-
-    //     // Convert to a proper WebSocket request (this handles the WebSocket headers)
-    //     let client_request = request
-    //         .into_client_request()
-    //         .context("Failed to convert to WebSocket request")?;
-
-    //     // Connect using the prepared WebSocket request
-    //     let (ws_stream, _) = connect_async(client_request).await.context(
-    //         "Failed to connect to Binance SBE WebSocket"
-    //     )?;
-
-    //     info!("Connected to Binance SBE WebSocket");
-
-    //     Ok(ws_stream)
-    // }
-
     pub async fn connect(
         &self
     ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>> {
         info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
 
-        // Create a request and convert it to a client request
+        // Create a request with proper headers as per Binance documentation
         let request = Request::builder()
             .uri(self.endpoint.as_str())
             .header("X-MBX-APIKEY", self.api_key.as_ref())
             .header("Sec-WebSocket-Key", generate_key())
             .header("Sec-WebSocket-Version", "13")
-            .header("Host", "binance.com")
-            .header("Connection", "keep-alive, Upgrade")
+            .header("Host", "stream-sbe.binance.com")
+            .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .body(())
             .context("Failed to build request")?;
 
-        // Convert to a proper WebSocket request (this handles the WebSocket headers)
+        // Convert to a proper WebSocket request
         let client_request = request
             .into_client_request()
             .context("Failed to convert to WebSocket request")?;
 
-        println!("clientReq: {:?}", &client_request);
+        debug!("Connecting with request: {:?}", &client_request);
 
         // Connect using the prepared WebSocket request
-        let (ws_stream, _) = connect_async(client_request).await.context(
+        let (ws_stream, response) = connect_async(client_request).await.context(
             "Failed to connect to Binance SBE WebSocket"
         )?;
 
-        info!("Connected to Binance SBE WebSocket");
+        info!("Connected to Binance SBE WebSocket with response: {:?}", response);
 
         Ok(ws_stream)
     }
@@ -108,76 +75,142 @@ impl BinanceSbeClient {
         channels: &[String]
     ) -> Result<()> {
         // Prepare subscription message
+        // Format is: <symbol>@<channel>
+        let params = symbols
+            .iter()
+            .flat_map(|symbol| {
+                channels
+                    .iter()
+                    .map(move |channel| { format!("{}@{}", symbol.to_lowercase(), channel) })
+            })
+            .collect::<Vec<String>>();
+
         let subscription =
             serde_json::json!({
             "method": "SUBSCRIBE",
-            "params": symbols.iter()
-            .take(1)
-                .flat_map(|symbol| {
-                    channels.iter().map(move |channel| {
-                        format!("{}@{}", symbol.to_lowercase(), channel)
-                    })
-                })
-                .collect::<Vec<String>>(),
+            "params": params,
             "id": 1
         }).to_string();
 
-        println!("subscription {}", &subscription);
-
-        let utf8_bytes = Utf8Bytes::from(subscription);
+        debug!("Subscription request: {}", &subscription);
 
         // Send subscription message
-        let message = Message::Text(utf8_bytes);
+        let message = Message::Text(subscription.into());
         ws_stream.send(message).await?;
 
         // Process subscription response
-        if let Some(Ok(message)) = ws_stream.next().await {
-            match message {
-                Message::Text(text) => {
-                    debug!("Subscription response: {}", text);
-                    if !text.contains("\"result\":null") {
-                        error!("Failed to subscribe: {}", text);
-                        anyhow::bail!("Failed to subscribe: {}", text);
+        if let Some(message_result) = ws_stream.next().await {
+            match message_result {
+                Ok(message) => {
+                    match message {
+                        Message::Text(text) => {
+                            debug!("Subscription response: {}", text);
+                            // Check for successful subscription (result: null indicates success)
+                            if !text.contains("\"result\":null") {
+                                error!("Failed to subscribe: {}", text);
+                                anyhow::bail!("Failed to subscribe: {}", text);
+                            }
+                            info!("Successfully subscribed to {} streams", params.len());
+                        }
+                        Message::Binary(_) => {
+                            // The subscription response should be a text message
+                            error!("Unexpected binary response to subscription");
+                            anyhow::bail!("Unexpected binary response to subscription");
+                        }
+                        _ => {}
                     }
-                    info!("Successfully subscribed to {} symbols", symbols.len());
                 }
-                Message::Binary(_) => {
-                    // The subscription response should be a text message
-                    error!("Unexpected binary response to subscription");
-                    anyhow::bail!("Unexpected binary response to subscription");
+                Err(e) => {
+                    error!("Error receiving subscription response: {}", e);
+                    anyhow::bail!("Failed to receive subscription response: {}", e);
                 }
-                _ => {}
             }
         }
 
         Ok(())
     }
 
+    // Start a ping-pong keepalive loop in a separate task
+    pub fn start_heartbeat(
+        ws_stream: Arc<tokio::sync::Mutex<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>>
+    ) {
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_secs(30));
+
+            loop {
+                interval.tick().await;
+
+                // Send ping with current timestamp
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_secs()
+                    .to_string();
+
+                let ping_msg = Message::Ping(now.into_bytes().into());
+
+                let mut locked_stream = ws_stream.lock().await;
+                if let Err(e) = locked_stream.send(ping_msg).await {
+                    error!("Failed to send ping: {}", e);
+                    break;
+                }
+
+                debug!("Sent heartbeat ping");
+            }
+        });
+    }
+
     pub async fn process_messages(
         &self,
         ws_stream: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>
     ) -> Result<()> {
-        while let Some(Ok(message)) = ws_stream.next().await {
-            // let start = SystemTime::now();
-            // let since_epoch = start.duration_since(UNIX_EPOCH).expect("Time went backwards");
+        // Create a shared websocket for the heartbeat
+        let shared_ws = Arc::new(tokio::sync::Mutex::new(ws_stream.get_ref().clone()));
 
-            // Convert to microseconds
-            // let micros = since_epoch.as_millis();
+        // Start heartbeat in the background
+        // Self::start_heartbeat(shared_ws);
 
-            match message {
-                Message::Binary(data) => {
-                    self.handle_binary_message(&data)?;
+        while let Some(message_result) = ws_stream.next().await {
+            match message_result {
+                Ok(message) => {
+                    match message {
+                        Message::Binary(data) => {
+                            // Handle the binary message with proper error handling
+                            if let Err(e) = self.handle_binary_message(&data).await {
+                                debug!("Error handling binary message: {}", e);
+                                // Continue processing messages instead of failing completely
+                            }
+                        }
+                        Message::Text(text) => {
+                            debug!("Received text message: {}", text);
+                        }
+                        Message::Ping(data) => {
+                            // Respond to ping with pong as required by the WebSocket protocol
+                            debug!("Received ping, responding with pong");
+                            if let Err(e) = ws_stream.send(Message::Pong(data.clone())).await {
+                                error!("Failed to send pong: {}", e);
+                                return Err(anyhow::anyhow!("WebSocket connection error: {}", e));
+                            }
+                        }
+                        Message::Pong(data) => {
+                            // Log pong responses
+                            debug!("Received pong response: {:?}", data);
+                        }
+                        Message::Close(frame) => {
+                            info!("WebSocket closed: {:?}", frame);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
-                Message::Text(text) => {
-                    debug!("Received text message: {}", text);
+                Err(e) => {
+                    error!("WebSocket message error: {}", e);
+                    return Err(anyhow::anyhow!("WebSocket error: {}", e));
                 }
-                Message::Ping(data) => {
-                    ws_stream.send(Message::Pong(data)).await?;
-                }
-                _ => {}
             }
         }
 
+        info!("WebSocket stream ended");
         Ok(())
     }
 
@@ -186,24 +219,53 @@ impl BinanceSbeClient {
         &self,
         callback: Box<dyn Fn(&str, &[(f64, f64)], &[(f64, f64)], u64, u64) + Send + Sync>
     ) {
-        let mut cb = self.depth_callback.write().await.unwrap();
-        cb = callback;
+        let mut cb = self.depth_callback.write().await;
+        *cb = Some(callback);
     }
 
     #[inline]
-    fn handle_binary_message(&self, data: &[u8]) -> Result<()> {
+    async fn handle_binary_message(&self, data: &[u8]) -> Result<()> {
         // Create a buffer for SBE decoding
         let buf_reader = ReadBuf::new(data);
 
+        // Safety check for minimum header size
+        if data.len() < message_header_codec::ENCODED_LENGTH {
+            debug!(
+                "Received binary message with insufficient length for header: {} bytes",
+                data.len()
+            );
+            return Ok(());
+        }
+
         // Read the SBE message header
-        let mut header = crate::models::sbe::message_header_codec::MessageHeaderDecoder
-            ::default()
-            .wrap(buf_reader, 0);
+        let mut header = MessageHeaderDecoder::default().wrap(buf_reader, 0);
         let block_length = header.block_length();
+        let template_id = header.template_id();
         let version = header.version();
 
+        // Validate message size
+        let expected_min_size = message_header_codec::ENCODED_LENGTH + (block_length as usize);
+        if data.len() < expected_min_size {
+            debug!(
+                "Message too small: expected at least {} bytes but got {} bytes (template_id: {})",
+                expected_min_size,
+                data.len(),
+                template_id
+            );
+            return Ok(());
+        }
+
+        // Debug output for message details
+        debug!(
+            "SBE Message: template_id={}, block_length={}, version={}, data_len={}",
+            template_id,
+            block_length,
+            version,
+            data.len()
+        );
+
         // Fast path for depth messages (10003)
-        if header.template_id() == 10003 {
+        if template_id == 10003 {
             // Stack-allocated arrays to avoid heap allocations in hot path
             let mut bids = [(0.0, 0.0); 50]; // Reasonable max size
             let mut asks = [(0.0, 0.0); 50]; // Reasonable max size
@@ -225,11 +287,29 @@ impl BinanceSbeClient {
             let price_exponent = depth_decoder.price_exponent();
             let qty_exponent = depth_decoder.qty_exponent();
 
+            // Safety check for reasonable update IDs
+            if first_update_id > last_update_id || last_update_id - first_update_id > 10000 {
+                debug!(
+                    "Suspicious update IDs: first={}, last={}, diff={}",
+                    first_update_id,
+                    last_update_id,
+                    last_update_id - first_update_id
+                );
+                // Still continue processing as this might be a valid case
+            }
+
             // Process the bids without allocating a Vec
             let mut bids_decoder = depth_decoder.bids_decoder();
-            let bids_count = bids_decoder.count() as usize;
-            let mut actual_bids_count = 0;
+            let bids_count = bids_decoder.count();
 
+            // Safety check for reasonable bids count - convert to usize safely
+            let bids_count_usize = bids_count as u32 as usize; // First convert to u32, then to usize
+            if bids_count_usize > 500 {
+                debug!("Unreasonable number of bids ({}), skipping message", bids_count_usize);
+                return Ok(());
+            }
+
+            let mut actual_bids_count = 0;
             while let Ok(Some(_)) = bids_decoder.advance() {
                 if actual_bids_count < bids.len() {
                     let price = bids_decoder.price();
@@ -251,9 +331,16 @@ impl BinanceSbeClient {
 
             // Process the asks without allocating a Vec
             let mut asks_decoder = depth_decoder.asks_decoder();
-            let asks_count = asks_decoder.count() as usize;
-            let mut actual_asks_count = 0;
+            let asks_count = asks_decoder.count();
 
+            // Safety check for reasonable asks count - convert to usize safely
+            let asks_count_usize = asks_count as u32 as usize; // First convert to u32, then to usize
+            if asks_count_usize > 500 {
+                debug!("Unreasonable number of asks ({}), skipping message", asks_count_usize);
+                return Ok(());
+            }
+
+            let mut actual_asks_count = 0;
             while let Ok(Some(_)) = asks_decoder.advance() {
                 if actual_asks_count < asks.len() {
                     let price = asks_decoder.price();
@@ -275,6 +362,18 @@ impl BinanceSbeClient {
 
             // Get symbol without allocation if possible
             let symbol_coordinates = depth_decoder.symbol_decoder();
+
+            // Verify symbol coordinates are within buffer bounds
+            if depth_decoder.get_limit() < symbol_coordinates.0 + symbol_coordinates.1 {
+                debug!(
+                    "Symbol coordinates out of bounds: offset={}, length={}, limit={}",
+                    symbol_coordinates.0,
+                    symbol_coordinates.1,
+                    depth_decoder.get_limit()
+                );
+                return Ok(());
+            }
+
             let symbol_bytes = depth_decoder.symbol_slice(symbol_coordinates);
 
             // Extract the symbol with minimal allocations
@@ -283,11 +382,13 @@ impl BinanceSbeClient {
                 s.trim_end_matches('\0')
             } else {
                 // Fallback with allocation only if necessary
-                return Ok(()); // Skip invalid symbols
+                debug!("Invalid UTF-8 in symbol");
+                return Ok(());
             };
 
             // Call the callback if set, using only slices of our arrays
-            if let Some(cb) = self.depth_callback.read().await.unwrap().deref() {
+            let cb_guard = self.depth_callback.read().await;
+            if let Some(cb) = cb_guard.as_ref() {
                 cb(
                     symbol,
                     &bids[0..actual_bids_count],
@@ -298,6 +399,9 @@ impl BinanceSbeClient {
             }
 
             return Ok(());
+        } else {
+            // Log other SBE message types
+            debug!("Received unsupported SBE message type: {}", template_id);
         }
 
         Ok(())
