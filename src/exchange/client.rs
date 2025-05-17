@@ -1,6 +1,13 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::models::symbol::Symbol;
+use crate::models::{ level::Level, symbol::Symbol };
+
+#[derive(Debug, Clone)]
+pub struct DepthResponse {
+    pub bids: Vec<Level>,
+    pub asks: Vec<Level>,
+    pub last_update_id: u64,
+}
 
 /// Exchange client trait that defines common operations for all exchanges
 #[async_trait]
@@ -19,4 +26,6 @@ pub trait ExchangeClient: Send + Sync {
 
     /// Check if the exchange is operational
     async fn is_operational(&self) -> Result<bool>;
+
+    async fn fetch_depth(&self, symbol: &str, limit: usize) -> Result<DepthResponse>;
 }

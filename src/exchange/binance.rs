@@ -3,14 +3,14 @@ use anyhow::{ Context, Result };
 use reqwest::{ Client as HttpClient, Url };
 use serde::Deserialize;
 use tokio::sync::RwLock;
-use tracing::{ debug, error, info };
+use tracing::{ debug, error, info, warn };
 use std::time::{ Duration, Instant };
 use std::sync::Arc;
-// use tokio::::RwLock;
 use rust_decimal::Decimal;
 
+use crate::models::level::Level;
 use crate::models::symbol::Symbol;
-use crate::exchange::client::ExchangeClient;
+use crate::exchange::client::{ DepthResponse, ExchangeClient };
 
 // Shared singleton client for connection pooling
 lazy_static::lazy_static! {
@@ -23,6 +23,14 @@ lazy_static::lazy_static! {
         .build()
         .expect("Failed to create HTTP client");
 }
+
+#[derive(Debug, Deserialize)]
+struct BinanceDepthResponse {
+    lastUpdateId: u64,
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
+}
+
 pub struct BinanceClient {
     /// Base URL for API requests
     base_url: Url,
@@ -282,5 +290,108 @@ impl ExchangeClient for BinanceClient {
             Ok(res) => Ok(res.status().is_success()),
             Err(_) => Ok(false),
         }
+    }
+
+    async fn fetch_depth(&self, symbol: &str, limit: usize) -> Result<DepthResponse> {
+        // Build the URL for the depth endpoint
+
+        if symbol.trim().is_empty() {
+            return Err(anyhow::anyhow!("Symbol parameter cannot be empty"));
+        }
+
+        let limit = limit.min(1000); // Binance max is 1000
+        let url = self.base_url
+            .join(&format!("v3/depth?symbol={}&limit={}", symbol, limit))
+            .context("Failed to build depth API URL")?;
+
+        debug!(
+            symbol = %symbol, 
+            limit = limit,
+            url = %url.as_str(),
+            "Fetching orderbook depth"
+        );
+
+        // Start timing the request
+        let start = Instant::now();
+
+        // Make the request with connection pooling and proper timeouts
+        let response = HTTP_CLIENT.get(url.clone())
+            .header("X-MBX-APIKEY", self.api_key.as_ref())
+            .timeout(Duration::from_secs(5))
+            .send().await
+            .context(format!("Failed to fetch depth from Binance for symbol {}", symbol))?;
+
+        // Check if the request was successful
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            error!(
+                symbol = %symbol, 
+                status = %status, 
+                response = %text,
+                "Binance depth API error"
+            );
+            anyhow::bail!("Binance depth API error for {}: {} - {}", symbol, status, text);
+        }
+
+        // Parse the response
+        let depth: BinanceDepthResponse = response
+            .json().await
+            .context(format!("Failed to parse Binance depth response for {}", symbol))?;
+
+        // Convert string arrays to Level structs
+        let bids = depth.bids
+            .iter()
+            .filter_map(|bid| {
+                match (bid[0].parse::<f64>(), bid[1].parse::<f64>()) {
+                    (Ok(price), Ok(qty)) => Some(Level { price, quantity: qty }),
+                    _ => {
+                        warn!(
+                            symbol = %symbol, 
+                            price = %bid[0], 
+                            qty = %bid[1],
+                            "Failed to parse bid price/quantity"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<Level>>();
+
+        let asks = depth.asks
+            .iter()
+            .filter_map(|ask| {
+                match (ask[0].parse::<f64>(), ask[1].parse::<f64>()) {
+                    (Ok(price), Ok(qty)) => Some(Level { price, quantity: qty }),
+                    _ => {
+                        warn!(
+                            symbol = %symbol, 
+                            price = %ask[0], 
+                            qty = %ask[1],
+                            "Failed to parse ask price/quantity"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<Level>>();
+
+        let elapsed = start.elapsed();
+
+        // Log the response details
+        debug!(
+            symbol = %symbol,
+            last_update_id = depth.lastUpdateId,
+            bid_count = bids.len(),
+            ask_count = asks.len(),
+            elapsed_ms = %elapsed.as_millis(),
+            "Successfully fetched orderbook depth"
+        );
+
+        Ok(DepthResponse {
+            bids,
+            asks,
+            last_update_id: depth.lastUpdateId,
+        })
     }
 }
