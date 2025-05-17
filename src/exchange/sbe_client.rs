@@ -225,25 +225,28 @@ impl BinanceSbeClient {
 
     #[inline]
     async fn handle_binary_message(&self, data: &[u8]) -> Result<()> {
+        // Safety check for minimum header size first
+        if data.len() < message_header_codec::ENCODED_LENGTH {
+            debug!("Message too small for SBE header: {} bytes", data.len());
+            return Ok(()); // Return ok but don't process further
+        }
+
         // Create a buffer for SBE decoding
         let buf_reader = ReadBuf::new(data);
 
-        // Safety check for minimum header size
-        if data.len() < message_header_codec::ENCODED_LENGTH {
-            debug!(
-                "Received binary message with insufficient length for header: {} bytes",
-                data.len()
-            );
-            return Ok(());
-        }
-
-        // Read the SBE message header
+        // Try to read the SBE message header with safety checks
         let mut header = MessageHeaderDecoder::default().wrap(buf_reader, 0);
         let block_length = header.block_length();
         let template_id = header.template_id();
         let version = header.version();
 
-        // Validate message size
+        // Sanity check on block_length to avoid huge allocations or out-of-bounds
+        if block_length > 10000 {
+            debug!("Suspicious block_length: {}, ignoring message", block_length);
+            return Ok(());
+        }
+
+        // Validate expected message size before proceeding
         let expected_min_size = message_header_codec::ENCODED_LENGTH + (block_length as usize);
         if data.len() < expected_min_size {
             debug!(
@@ -255,7 +258,7 @@ impl BinanceSbeClient {
             return Ok(());
         }
 
-        // Debug output for message details
+        // Debug output for message details (keep this as is - useful for debugging)
         debug!(
             "SBE Message: template_id={}, block_length={}, version={}, data_len={}",
             template_id,
@@ -266,14 +269,23 @@ impl BinanceSbeClient {
 
         // Fast path for depth messages (10003)
         if template_id == 10003 {
-            // Stack-allocated arrays to avoid heap allocations in hot path
-            let mut bids = [(0.0, 0.0); 50]; // Reasonable max size
-            let mut asks = [(0.0, 0.0); 50]; // Reasonable max size
+            // Use fixed-size arrays to avoid heap allocations in hot path
+            // Increase max size for safety (based on your mention of the 54946 issue)
+            let mut bids = [(0.0, 0.0); 100]; // Increased max size
+            let mut asks = [(0.0, 0.0); 100]; // Increased max size
 
             let mut depth_decoder = DepthDiffStreamEventDecoder::default();
 
-            // Properly position the decoder
-            let buf_reader = header.parent()?;
+            // Try to get parent buffer with error handling
+            let parent_result = header.parent();
+            if parent_result.is_err() {
+                debug!("Failed to get parent buffer from header");
+                return Ok(());
+            }
+
+            let buf_reader = parent_result.unwrap();
+
+            // Wrap depth decoder with careful positioning
             depth_decoder = depth_decoder.wrap(
                 buf_reader,
                 message_header_codec::ENCODED_LENGTH,
@@ -281,11 +293,27 @@ impl BinanceSbeClient {
                 version
             );
 
+            // Get basic message fields
             let event_time = depth_decoder.event_time();
             let first_update_id = depth_decoder.first_book_update_id();
             let last_update_id = depth_decoder.last_book_update_id();
             let price_exponent = depth_decoder.price_exponent();
             let qty_exponent = depth_decoder.qty_exponent();
+
+            // Sanity check on exponents
+            if
+                price_exponent < -10 ||
+                price_exponent > 10 ||
+                qty_exponent < -10 ||
+                qty_exponent > 10
+            {
+                debug!(
+                    "Suspicious exponents: price_exp={}, qty_exp={}",
+                    price_exponent,
+                    qty_exponent
+                );
+                return Ok(());
+            }
 
             // Safety check for reasonable update IDs
             if first_update_id > last_update_id || last_update_id - first_update_id > 10000 {
@@ -295,72 +323,150 @@ impl BinanceSbeClient {
                     last_update_id,
                     last_update_id - first_update_id
                 );
-                // Still continue processing as this might be a valid case
+                // We'll continue but with caution
             }
 
-            // Process the bids without allocating a Vec
+            // Process the bids with careful error handling
             let mut bids_decoder = depth_decoder.bids_decoder();
             let bids_count = bids_decoder.count();
 
-            // Safety check for reasonable bids count - convert to usize safely
-            let bids_count_usize = bids_count as u32 as usize; // First convert to u32, then to usize
-            if bids_count_usize > 500 {
-                debug!("Unreasonable number of bids ({}), skipping message", bids_count_usize);
-                return Ok(());
+            // Sanity check on bid count
+            let bids_count_usize = bids_count as u32 as usize; // Convert via u32 for safety
+            if bids_count_usize > bids.len() || bids_count_usize > 1000 {
+                debug!("Unreasonable number of bids ({}), truncating or skipping", bids_count_usize);
+                if bids_count_usize > 1000 {
+                    return Ok(());
+                }
+                // Otherwise we'll process within our array limits
             }
 
             let mut actual_bids_count = 0;
-            while let Ok(Some(_)) = bids_decoder.advance() {
-                if actual_bids_count < bids.len() {
-                    let price = bids_decoder.price();
-                    let qty = bids_decoder.qty();
+            while actual_bids_count < bids.len() {
+                match bids_decoder.advance() {
+                    Ok(Some(_)) => {
+                        // Get price and quantity with error checking
+                        let price = bids_decoder.price();
+                        let qty = bids_decoder.qty();
 
-                    // Convert using exponents
-                    let real_price = (price as f64) * (10f64).powi(price_exponent as i32);
-                    let real_qty = (qty as f64) * (10f64).powi(qty_exponent as i32);
+                        // Convert using exponents with basic overflow protection
+                        let real_price = if price_exponent.abs() > 10 {
+                            debug!("Extreme price exponent: {}", price_exponent);
+                            0.0 // Protect against extreme exponents
+                        } else {
+                            (price as f64) * (10f64).powi(price_exponent as i32)
+                        };
 
-                    bids[actual_bids_count] = (real_price, real_qty);
-                    actual_bids_count += 1;
-                } else {
-                    break;
+                        let real_qty = if qty_exponent.abs() > 10 {
+                            debug!("Extreme quantity exponent: {}", qty_exponent);
+                            0.0 // Protect against extreme exponents
+                        } else {
+                            (qty as f64) * (10f64).powi(qty_exponent as i32)
+                        };
+
+                        // Check for unreasonable values (NaN, infinity, etc.)
+                        if !real_price.is_finite() || !real_qty.is_finite() {
+                            debug!(
+                                "Non-finite price or quantity calculated: price={}, qty={}",
+                                real_price,
+                                real_qty
+                            );
+                            continue; // Skip this level
+                        }
+
+                        // Store in our pre-allocated array
+                        bids[actual_bids_count] = (real_price, real_qty);
+                        actual_bids_count += 1;
+                    }
+                    Ok(None) => {
+                        break;
+                    } // No more bids
+                    Err(e) => {
+                        debug!("Error advancing bids decoder: {:?}", e);
+                        break;
+                    }
                 }
             }
 
-            // Get the parent back to process asks
-            let depth_decoder = bids_decoder.parent()?;
-
-            // Process the asks without allocating a Vec
-            let mut asks_decoder = depth_decoder.asks_decoder();
-            let asks_count = asks_decoder.count();
-
-            // Safety check for reasonable asks count - convert to usize safely
-            let asks_count_usize = asks_count as u32 as usize; // First convert to u32, then to usize
-            if asks_count_usize > 500 {
-                debug!("Unreasonable number of asks ({}), skipping message", asks_count_usize);
+            // Try to get parent for asks processing
+            let parent_result = bids_decoder.parent();
+            if parent_result.is_err() {
+                debug!("Failed to get parent from bids decoder");
                 return Ok(());
             }
 
+            let depth_decoder = parent_result.unwrap();
+
+            // Process the asks with careful error handling
+            let mut asks_decoder = depth_decoder.asks_decoder();
+            let asks_count = asks_decoder.count();
+
+            // Sanity check on ask count
+            let asks_count_usize = asks_count as u32 as usize; // Convert via u32 for safety
+            if asks_count_usize > asks.len() || asks_count_usize > 1000 {
+                debug!("Unreasonable number of asks ({}), truncating or skipping", asks_count_usize);
+                if asks_count_usize > 1000 {
+                    return Ok(());
+                }
+                // Otherwise we'll process within our array limits
+            }
+
             let mut actual_asks_count = 0;
-            while let Ok(Some(_)) = asks_decoder.advance() {
-                if actual_asks_count < asks.len() {
-                    let price = asks_decoder.price();
-                    let qty = asks_decoder.qty();
+            while actual_asks_count < asks.len() {
+                match asks_decoder.advance() {
+                    Ok(Some(_)) => {
+                        // Get price and quantity with error checking
+                        let price = asks_decoder.price();
+                        let qty = asks_decoder.qty();
 
-                    // Convert using exponents
-                    let real_price = (price as f64) * (10f64).powi(price_exponent as i32);
-                    let real_qty = (qty as f64) * (10f64).powi(qty_exponent as i32);
+                        // Convert using exponents with basic overflow protection
+                        let real_price = if price_exponent.abs() > 10 {
+                            debug!("Extreme price exponent: {}", price_exponent);
+                            0.0 // Protect against extreme exponents
+                        } else {
+                            (price as f64) * (10f64).powi(price_exponent as i32)
+                        };
 
-                    asks[actual_asks_count] = (real_price, real_qty);
-                    actual_asks_count += 1;
-                } else {
-                    break;
+                        let real_qty = if qty_exponent.abs() > 10 {
+                            debug!("Extreme quantity exponent: {}", qty_exponent);
+                            0.0 // Protect against extreme exponents
+                        } else {
+                            (qty as f64) * (10f64).powi(qty_exponent as i32)
+                        };
+
+                        // Check for unreasonable values (NaN, infinity, etc.)
+                        if !real_price.is_finite() || !real_qty.is_finite() {
+                            debug!(
+                                "Non-finite price or quantity calculated: price={}, qty={}",
+                                real_price,
+                                real_qty
+                            );
+                            continue; // Skip this level
+                        }
+
+                        // Store in our pre-allocated array
+                        asks[actual_asks_count] = (real_price, real_qty);
+                        actual_asks_count += 1;
+                    }
+                    Ok(None) => {
+                        break;
+                    } // No more asks
+                    Err(e) => {
+                        debug!("Error advancing asks decoder: {:?}", e);
+                        break;
+                    }
                 }
             }
 
-            // Get the parent back to process symbol
-            let mut depth_decoder = asks_decoder.parent()?;
+            // Try to get parent for symbol processing
+            let parent_result = asks_decoder.parent();
+            if parent_result.is_err() {
+                debug!("Failed to get parent from asks decoder");
+                return Ok(());
+            }
 
-            // Get symbol without allocation if possible
+            let mut depth_decoder = parent_result.unwrap();
+
+            // Carefully extract symbol
             let symbol_coordinates = depth_decoder.symbol_decoder();
 
             // Verify symbol coordinates are within buffer bounds
@@ -374,25 +480,31 @@ impl BinanceSbeClient {
                 return Ok(());
             }
 
+            // Sanity check on symbol length
+            if symbol_coordinates.1 > 20 {
+                debug!("Symbol length suspiciously long: {}", symbol_coordinates.1);
+                return Ok(());
+            }
+
+            // Get symbol bytes with bound checking
             let symbol_bytes = depth_decoder.symbol_slice(symbol_coordinates);
 
-            // Extract the symbol with minimal allocations
-            let symbol = if let Ok(s) = std::str::from_utf8(symbol_bytes) {
-                // Zero-copy if valid UTF-8
-                s.trim_end_matches('\0')
-            } else {
-                // Fallback with allocation only if necessary
-                debug!("Invalid UTF-8 in symbol");
-                return Ok(());
+            // Extract symbol string with error handling
+            let symbol = match std::str::from_utf8(symbol_bytes) {
+                Ok(s) => s.trim_end_matches('\0'),
+                Err(_) => {
+                    debug!("Invalid UTF-8 in symbol bytes");
+                    return Ok(());
+                }
             };
 
-            // Call the callback if set, using only slices of our arrays
+            // Finally, call the callback if set
             let cb_guard = self.depth_callback.read().await;
             if let Some(cb) = cb_guard.as_ref() {
                 cb(
                     symbol,
-                    &bids[0..actual_bids_count],
-                    &asks[0..actual_asks_count],
+                    &bids[0..actual_bids_count.min(bids.len())], // Ensure we don't exceed array bounds
+                    &asks[0..actual_asks_count.min(asks.len())], // Ensure we don't exceed array bounds
                     first_update_id as u64,
                     last_update_id as u64
                 );
@@ -400,7 +512,7 @@ impl BinanceSbeClient {
 
             return Ok(());
         } else {
-            // Log other SBE message types
+            // Just log other message types
             debug!("Received unsupported SBE message type: {}", template_id);
         }
 
