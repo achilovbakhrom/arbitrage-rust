@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     };
 
     // Create symbol map and find triangular paths
-    let mut symbol_map = SymbolMap::from_symbols(symbols);
+    let mut symbol_map = SymbolMap::from_symbols(symbols.clone());
 
     symbol_map.find_targeted_triangular_paths(
         &config.base_asset,
@@ -183,33 +183,6 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Set depth callback for orderbook updates
-        // client.set_depth_callback(
-        //     Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
-        //         // Clone the data to avoid lifetime issues with the spawned task
-        //         let symbol_arc = Arc::from(symbol.to_string());
-        //         let bids_cloned: Vec<(f64, f64)> = bids.to_vec();
-        //         let asks_cloned: Vec<(f64, f64)> = asks.to_vec();
-        //         let manager = manager_for_msg_task.clone();
-
-        //         // Create a task to update the orderbook without blocking the WebSocket
-        //         tokio::spawn(async move {
-        //             // Update orderbook with cloned data
-        //             manager.apply_snapshot(
-        //                 symbol_arc,
-        //                 &bids_cloned,
-        //                 &asks_cloned,
-        //                 last_update_id
-        //             ).await;
-
-        //             // Log updates occasionally (to reduce allocations)
-        //             if last_update_id % 1000 == 0 {
-        //                 info!("Orderbook update");
-        //             }
-        //         });
-        //     })
-        // ).await;
-
         client.set_depth_callback(
             Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
                 if symbol.trim().is_empty() {
@@ -250,9 +223,58 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait a moment for initial data to populate orderbooks
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    info!("Starting arbitrage scanner...");
+    let unique_symbols: Vec<Arc<str>> = symbols
+        .iter()
+        .map(|symbol| Arc::from(symbol.symbol.to_string()))
+        .collect();
+
+    info!("Monitoring {} unique symbols for orderbooks", unique_symbols.len());
+
+    // Pre-create orderbooks for each symbol
+    for symbol in &unique_symbols {
+        let book = orderbook_manager.get_or_create_book(symbol).await;
+        debug!("Pre-created orderbook for symbol: {}", symbol);
+    }
+
+    // Fetch initial snapshots explicitly for each symbol
+    info!("Fetching initial snapshots for all symbols...");
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    for symbol in &unique_symbols {
+        match orderbook_manager.fetch_snapshot(symbol.as_ref()).await {
+            Ok((bids, asks, last_update_id)) => {
+                orderbook_manager.apply_snapshot(
+                    symbol.clone(),
+                    &bids,
+                    &asks,
+                    last_update_id
+                ).await;
+                success_count += 1;
+                debug!("Fetched initial snapshot for {}", symbol);
+            }
+            Err(e) => {
+                error!("Failed to fetch snapshot for {}: {}", symbol, e);
+                fail_count += 1;
+            }
+        }
+
+        // Add a small delay to avoid rate limiting
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    info!("Initial snapshots: {} succeeded, {} failed", success_count, fail_count);
+
+    // Log the current state of the orderbooks
+    let book_stats = orderbook_manager.get_stats().await;
+    info!(
+        "Current orderbook stats: {} total, {} synchronized",
+        book_stats.len(),
+        book_stats
+            .iter()
+            .filter(|(_, (is_synced, _))| *is_synced)
+            .count()
+    );
 
     // Share the paths between tasks
     let arbitrage_paths = Arc::new(triangular_paths);

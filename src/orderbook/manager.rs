@@ -4,21 +4,19 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{ RwLock, Mutex };
-use tracing::{ debug, error, info, warn };
+use tracing::{ debug, error, warn };
 use anyhow::{ Result, Context };
 use std::time::{ Duration, Instant };
 
-use crate::models::level::{ Level, LevelUpdate };
+use crate::models::level::Level;
 use crate::enums::side::Side;
 use crate::exchange::client::ExchangeClient;
-use crate::exchange::client::DepthResponse;
 use super::orderbook::OrderBook;
-use super::orderbook::OrderBookState;
 
 /// Manages multiple orderbooks for different symbols
 pub struct OrderBookManager {
     /// Maps symbol to orderbook
-    books: RwLock<HashMap<Arc<str>, Arc<OrderBook>>>,
+    pub books: RwLock<HashMap<Arc<str>, Arc<OrderBook>>>,
     /// Default depth to use for new orderbooks
     default_depth: usize,
     /// Exchange client for API requests

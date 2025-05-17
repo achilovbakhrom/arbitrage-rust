@@ -1,11 +1,10 @@
 // src/orderbook/orderbook.rs
 use std::collections::BTreeMap;
-use std::sync::atomic::{ AtomicBool, AtomicU64, AtomicU8, Ordering };
-use crate::enums::side::Side;
+use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use ordered_float::OrderedFloat;
-use crate::models::level::{ Level, LevelUpdate };
+use crate::models::level::Level;
 use tokio::sync::{ RwLock, Mutex };
-use tracing::{ debug, error, info, warn };
+use tracing::{ debug, info };
 use std::fmt;
 
 /// Current state of the orderbook
@@ -37,14 +36,16 @@ pub struct OrderBook {
     update_mutex: Mutex<()>,
 }
 
-// Manual Debug implementation for OrderBook
 impl fmt::Debug for OrderBook {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OrderBook")
+            .field("bids", &self.bids)
+            .field("asks", &self.asks)
+            .field("first_update_id", &self.first_update_id)
+            .field("last_update_id", &self.last_update_id)
             .field("max_depth", &self.max_depth)
-            .field("first_update_id", &self.first_update_id.load(Ordering::Relaxed))
-            .field("last_update_id", &self.last_update_id.load(Ordering::Relaxed))
-            .field("state", &self.get_state())
+            .field("state", &self.state)
+            .field("update_mutex", &self.update_mutex)
             .finish()
     }
 }
@@ -133,7 +134,7 @@ impl OrderBook {
         self.last_update_id.store(last_update_id, Ordering::Release);
         self.first_update_id.store(last_update_id, Ordering::Release);
         self.set_state(OrderBookState::Synced);
-
+        info!("bids: {}, asks: {}", self.bids.read().await.len(), self.asks.read().await.len());
         debug!("Applied full orderbook snapshot with last_update_id: {}", last_update_id);
     }
 
@@ -239,7 +240,7 @@ impl OrderBook {
 
         // Update last update ID after successful application (release ordering)
         self.last_update_id.store(last_update_id, Ordering::Release);
-
+        info!("bids: {}, asks: {}", self.bids.read().await.len(), self.asks.read().await.len());
         Ok(true)
     }
 
