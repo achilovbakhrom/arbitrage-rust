@@ -3,12 +3,11 @@
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{ debug, info };
+use tracing::debug;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::models::triangular_path::TriangularPath;
-use crate::models::level::Level;
 use crate::orderbook::manager::OrderBookManager;
 
 /// Represents an arbitrage opportunity

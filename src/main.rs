@@ -3,7 +3,6 @@ mod config;
 mod constants;
 mod enums;
 mod exchange;
-mod helpers;
 mod utils;
 mod models;
 mod orderbook;
@@ -79,7 +78,7 @@ async fn main() -> Result<()> {
     symbol_map.find_targeted_triangular_paths(
         &config.base_asset,
         config.max_triangles,
-        &config.excluded_fiats
+        &config.excluded_coins
     );
 
     let total_paths = symbol_map.get_triangular_paths().len();

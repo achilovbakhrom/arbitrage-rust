@@ -1,10 +1,10 @@
 use tokio_tungstenite::{ connect_async, WebSocketStream };
 use futures::{ SinkExt, StreamExt };
-use tokio::{ net::TcpStream, sync::RwLock, time::{ interval, Duration } };
+use tokio::{ net::TcpStream, sync::RwLock };
 use tungstenite::{ client::IntoClientRequest, handshake::client::Request, protocol::Message };
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
-use std::{ sync::Arc, time::{ SystemTime, UNIX_EPOCH } };
+use std::sync::Arc;
 use tungstenite::handshake::client::generate_key;
 
 use crate::models::sbe::{
@@ -130,46 +130,10 @@ impl BinanceSbeClient {
         Ok(())
     }
 
-    // Start a ping-pong keepalive loop in a separate task
-    pub fn start_heartbeat(
-        ws_stream: Arc<tokio::sync::Mutex<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>>
-    ) {
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(30));
-
-            loop {
-                interval.tick().await;
-
-                // Send ping with current timestamp
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_secs()
-                    .to_string();
-
-                let ping_msg = Message::Ping(now.into_bytes().into());
-
-                let mut locked_stream = ws_stream.lock().await;
-                if let Err(e) = locked_stream.send(ping_msg).await {
-                    error!("Failed to send ping: {}", e);
-                    break;
-                }
-
-                debug!("Sent heartbeat ping");
-            }
-        });
-    }
-
     pub async fn process_messages(
         &self,
         ws_stream: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>
     ) -> Result<()> {
-        // Create a shared websocket for the heartbeat
-        let shared_ws = Arc::new(tokio::sync::Mutex::new(ws_stream.get_ref().clone()));
-
-        // Start heartbeat in the background
-        // Self::start_heartbeat(shared_ws);
-
         while let Some(message_result) = ws_stream.next().await {
             match message_result {
                 Ok(message) => {
@@ -518,13 +482,4 @@ impl BinanceSbeClient {
 
         Ok(())
     }
-}
-
-// Helper functions to convert numeric values with exponents
-fn convert_price(value: i64, exponent: i8) -> f64 {
-    (value as f64) * (10f64).powi(exponent as i32)
-}
-
-fn convert_quantity(value: i64, exponent: i8) -> f64 {
-    (value as f64) * (10f64).powi(exponent as i32)
 }

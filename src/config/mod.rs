@@ -20,7 +20,7 @@ pub struct Config {
     pub log_config: LogConfig,
 
     pub base_asset: String,
-    pub excluded_fiats: Vec<String>,
+    pub excluded_coins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,8 +117,8 @@ impl Config {
         let base_asset = env::var("BASE_ASSET").unwrap_or_else(|_| "USDT".to_string());
 
         let default_fiats = "USD,EUR,GBP,JPY,AUD,CAD,CHF,CNY,RUB,TRY";
-        let excluded_fiats = env
-            ::var("EXCLUDED_FIATS")
+        let excluded_coins = env
+            ::var("EXCLUDED_COINS")
             .unwrap_or_else(|_| default_fiats.to_string())
             .split(',')
             .map(|s| s.trim().to_string())
@@ -134,7 +134,7 @@ impl Config {
             log_level,
             log_config,
             base_asset,
-            excluded_fiats,
+            excluded_coins,
         })
     }
 }

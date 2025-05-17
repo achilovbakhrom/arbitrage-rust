@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::{ Context, Result };
 use reqwest::{ Client as HttpClient, Url };
-use serde::{ Deserialize, Serialize };
+use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{ debug, error, info };
 use std::time::{ Duration, Instant };
@@ -84,7 +84,8 @@ impl BinanceClient {
     pub fn new(api_key: String, api_secret: String, testnet: bool) -> Result<Self> {
         // Set the base URL based on whether testnet is enabled
         let base_url = if testnet {
-            Url::parse("https://testnet.binance.vision/api/").context("Invalid testnet URL")?
+            // Url::parse("https://testnet.binance.vision/api/").context("Invalid testnet URL")?
+            Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
         } else {
             Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
         };
