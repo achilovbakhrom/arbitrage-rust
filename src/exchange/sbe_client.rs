@@ -98,35 +98,6 @@ impl BinanceSbeClient {
         let message = Message::Text(subscription.into());
         ws_stream.send(message).await?;
 
-        // Process subscription response
-        if let Some(message_result) = ws_stream.next().await {
-            match message_result {
-                Ok(message) => {
-                    match message {
-                        Message::Text(text) => {
-                            debug!("Subscription response: {}", text);
-                            // Check for successful subscription (result: null indicates success)
-                            if !text.contains("\"result\":null") {
-                                error!("Failed to subscribe: {}", text);
-                                anyhow::bail!("Failed to subscribe: {}", text);
-                            }
-                            info!("Successfully subscribed to {} streams", params.len());
-                        }
-                        Message::Binary(_) => {
-                            // The subscription response should be a text message
-                            error!("Unexpected binary response to subscription");
-                            anyhow::bail!("Unexpected binary response to subscription");
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    error!("Error receiving subscription response: {}", e);
-                    anyhow::bail!("Failed to receive subscription response: {}", e);
-                }
-            }
-        }
-
         Ok(())
     }
 

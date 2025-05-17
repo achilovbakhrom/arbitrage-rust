@@ -1,0 +1,139 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'rust-arb-optimized'",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=rust-arb-optimized",
+          "--package=rust-arb-optimized"
+        ],
+        "filter": {
+          "name": "rust-arb-optimized",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "DEBUG": "true",
+        "SBE_API_KEY": "${env:SBE_API_KEY}",
+        "FIX_API": "${env:FIX_API}",
+        "FIX_SECRET": "${env:FIX_SECRET}",
+        "THRESHOLD": "0.05",
+        "MAX_TRIANGLES": "15",
+        "DEPTH": "20",
+        "EXCLUDED_COINS": "USD,EUR,GBP,JPY,AUD,CAD,CHF,CNY,RUB,TRY",
+        "LOG_LEVEL": "debug",
+        "LOG_DIRECTORY": "${workspaceFolder}/logs",
+        "LOG_FILENAME_PREFIX": "triangular-arbitrage",
+        "LOG_ROTATION": "hourly",
+        "LOG_MAX_FILES": "6",
+        "BASE_ASSET": "USDT"
+      },
+      "sourceLanguages": ["rust"],
+      "sourceMap": {
+        "/rustc/*": "${env:HOME}/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust"
+      },
+      "terminal": "integrated"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug with test environment",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=rust-arb-optimized",
+          "--package=rust-arb-optimized"
+        ],
+        "filter": {
+          "name": "rust-arb-optimized",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "DEBUG": "true",
+        "SBE_API_KEY": "test_api_key",
+        "FIX_API": "test_fix_api",
+        "FIX_SECRET": "test_fix_secret",
+        "THRESHOLD": "0.05",
+        "MAX_TRIANGLES": "5",
+        "DEPTH": "10",
+        "EXCLUDED_COINS": "USD,EUR,GBP,JPY,AUD,CAD,CHF,CNY,RUB,TRY",
+        "LOG_LEVEL": "trace",
+        "LOG_DIRECTORY": "${workspaceFolder}/logs",
+        "LOG_FILENAME_PREFIX": "triangular-arbitrage-test",
+        "LOG_ROTATION": "never",
+        "LOG_MAX_FILES": "2",
+        "BASE_ASSET": "USDT"
+      },
+      "sourceLanguages": ["rust"],
+      "terminal": "integrated"
+    },
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach to running process",
+      "program": "${workspaceFolder}/target/debug/rust-arb-optimized",
+      "pid": "${command:pickProcess}",
+      "waitFor": true,
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=rust-arb-optimized"],
+        "filter": {
+          "name": "rust-arb-optimized",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug specific test file",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--test=${input:testName}",
+          "--package=rust-arb-optimized"
+        ],
+        "filter": {
+          "name": "${input:testName}",
+          "kind": "test"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "sourceLanguages": ["rust"]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "Name of the test file to debug"
+    }
+  ]
+}

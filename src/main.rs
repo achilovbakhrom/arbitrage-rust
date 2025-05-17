@@ -230,12 +230,6 @@ async fn main() -> Result<()> {
 
     info!("Monitoring {} unique symbols for orderbooks", unique_symbols.len());
 
-    // Pre-create orderbooks for each symbol
-    for symbol in &unique_symbols {
-        let book = orderbook_manager.get_or_create_book(symbol).await;
-        debug!("Pre-created orderbook for symbol: {}", symbol);
-    }
-
     // Fetch initial snapshots explicitly for each symbol
     info!("Fetching initial snapshots for all symbols...");
     let mut success_count = 0;
