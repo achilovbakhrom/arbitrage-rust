@@ -134,7 +134,6 @@ impl OrderBook {
         self.last_update_id.store(last_update_id, Ordering::Release);
         self.first_update_id.store(last_update_id, Ordering::Release);
         self.set_state(OrderBookState::Synced);
-        info!("bids: {}, asks: {}", self.bids.read().await.len(), self.asks.read().await.len());
         debug!("Applied full orderbook snapshot with last_update_id: {}", last_update_id);
     }
 
@@ -240,7 +239,6 @@ impl OrderBook {
 
         // Update last update ID after successful application (release ordering)
         self.last_update_id.store(last_update_id, Ordering::Release);
-        info!("bids: {}, asks: {}", self.bids.read().await.len(), self.asks.read().await.len());
         Ok(true)
     }
 
