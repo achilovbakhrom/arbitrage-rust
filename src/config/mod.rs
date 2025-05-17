@@ -13,6 +13,7 @@ pub struct Config {
     pub fix_api: String,
     pub fix_secret: String,
     pub threshold: f64,
+    pub depth: usize,
     pub max_triangles: usize,
 
     #[serde(serialize_with = "serialize_level", deserialize_with = "deserialize_level")]
@@ -67,6 +68,13 @@ impl Config {
             .unwrap_or_else(|_| "0.5".to_string())
             .parse::<f64>()
             .context("Failed to parse THRESHOLD environment variable")?;
+
+        // Parse DEPTH
+        let depth = env
+            ::var("DEPTH")
+            .unwrap_or_else(|_| "20".to_string())
+            .parse::<usize>()
+            .context("Failed to parse DEPTH environment variable")?;
 
         // Parse PAIRS_COUNT
         let max_triangles: usize = env
@@ -130,6 +138,7 @@ impl Config {
             fix_api,
             fix_secret,
             threshold,
+            depth,
             max_triangles,
             log_level,
             log_config,

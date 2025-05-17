@@ -19,7 +19,7 @@ use config::Config;
 use anyhow::{ anyhow, Context, Result };
 
 use exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient };
-use tracing::{ error, info, warn };
+use tracing::{ debug, error, info, warn };
 use utils::{ console::{ print_app_started, print_app_starting, print_config }, logging };
 use orderbook::manager::OrderBookManager;
 use arbitrage::detector::ArbitrageDetector;
@@ -40,11 +40,9 @@ async fn main() -> Result<()> {
     print_app_started();
 
     // Initialize exchange client
-    let client = BinanceClient::new(
-        config.fix_api.clone(),
-        config.fix_secret.clone(),
-        config.debug
-    )?;
+    let client = Arc::new(
+        BinanceClient::new(config.fix_api.clone(), config.fix_secret.clone(), config.debug)?
+    );
 
     info!("Connected to exchange: {}", client.name());
 
@@ -117,7 +115,7 @@ async fn main() -> Result<()> {
         .collect();
 
     // Create the shared orderbook manager
-    let orderbook_manager = Arc::new(OrderBookManager::new(20)); // Keep 20 levels per side
+    let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client)); // Keep 20 levels per side
 
     // Create the arbitrage detector with specified thresholds
     let arbitrage_detector = Arc::new(
@@ -186,8 +184,39 @@ async fn main() -> Result<()> {
         }
 
         // Set depth callback for orderbook updates
+        // client.set_depth_callback(
+        //     Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
+        //         // Clone the data to avoid lifetime issues with the spawned task
+        //         let symbol_arc = Arc::from(symbol.to_string());
+        //         let bids_cloned: Vec<(f64, f64)> = bids.to_vec();
+        //         let asks_cloned: Vec<(f64, f64)> = asks.to_vec();
+        //         let manager = manager_for_msg_task.clone();
+
+        //         // Create a task to update the orderbook without blocking the WebSocket
+        //         tokio::spawn(async move {
+        //             // Update orderbook with cloned data
+        //             manager.apply_snapshot(
+        //                 symbol_arc,
+        //                 &bids_cloned,
+        //                 &asks_cloned,
+        //                 last_update_id
+        //             ).await;
+
+        //             // Log updates occasionally (to reduce allocations)
+        //             if last_update_id % 1000 == 0 {
+        //                 info!("Orderbook update");
+        //             }
+        //         });
+        //     })
+        // ).await;
+
         client.set_depth_callback(
             Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
+                if symbol.trim().is_empty() {
+                    error!("Received empty symbol in depth update");
+                    return;
+                }
+
                 // Clone the data to avoid lifetime issues with the spawned task
                 let symbol_arc = Arc::from(symbol.to_string());
                 let bids_cloned: Vec<(f64, f64)> = bids.to_vec();
@@ -196,17 +225,20 @@ async fn main() -> Result<()> {
 
                 // Create a task to update the orderbook without blocking the WebSocket
                 tokio::spawn(async move {
-                    // Update orderbook with cloned data
-                    manager.apply_snapshot(
-                        symbol_arc,
+                    // Apply depth update (fast path)
+                    manager.apply_depth_update(
+                        &symbol_arc,
                         &bids_cloned,
                         &asks_cloned,
+                        first_update_id,
                         last_update_id
                     ).await;
 
+                    // No need to handle recovery here - it's triggered automatically by apply_depth_update
+
                     // Log updates occasionally (to reduce allocations)
-                    if last_update_id % 1000 == 0 {
-                        info!("Orderbook update");
+                    if last_update_id % 10000 == 0 {
+                        debug!(?symbol_arc, last_update_id, "Processed orderbook update");
                     }
                 });
             })
