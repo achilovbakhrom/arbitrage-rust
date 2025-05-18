@@ -3,7 +3,7 @@ use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use ordered_float::OrderedFloat;
 use crate::models::level::Level;
 use tokio::sync::{ RwLock, Mutex };
-use tracing::debug;
+use tracing::{ debug, warn };
 use std::fmt;
 
 /// Current state of the orderbook
@@ -33,6 +33,8 @@ pub struct OrderBook {
     pub state: AtomicU8,
     /// Mutex for operations that need exclusive access (like reset)
     update_mutex: Mutex<()>,
+    /// Buffer for events that arrive before the snapshot
+    event_buffer: RwLock<Vec<(u64, u64, Vec<(f64, f64)>, Vec<(f64, f64)>)>>,
 }
 
 impl fmt::Debug for OrderBook {
@@ -61,6 +63,7 @@ impl OrderBook {
             max_depth,
             state: AtomicU8::new(OrderBookState::Uninitialized as u8),
             update_mutex: Mutex::new(()),
+            event_buffer: RwLock::new(Vec::with_capacity(100)), // Pre-allocate a reasonable buffer
         }
     }
 
@@ -80,15 +83,30 @@ impl OrderBook {
         self.state.store(state as u8, Ordering::Release);
     }
 
-    // Fix for apply_snapshot method in src/orderbook/orderbook.rs
-
     // Updated src/orderbook/orderbook.rs
-    pub async fn apply_snapshot(&self, bids: Vec<Level>, asks: Vec<Level>, last_update_id: u64) {
+    pub async fn apply_snapshot(
+        &self,
+        bids: Vec<Level>,
+        asks: Vec<Level>,
+        snapshot_last_update_id: u64
+    ) {
         // Acquire exclusive lock for the snapshot operation
         let _lock = self.update_mutex.lock().await;
 
-        // Update state to uninitialized while we apply the snapshot
-        self.set_state(OrderBookState::Uninitialized);
+        // First - check if we already have a valid state (to avoid reprocessing)
+        if
+            self.get_state() == OrderBookState::Synced &&
+            self.last_update_id.load(Ordering::Acquire) >= snapshot_last_update_id
+        {
+            debug!(
+                "Snapshot skipped - already have newer data. Snapshot lastUpdateId: {}, current lastUpdateId: {}",
+                snapshot_last_update_id,
+                self.last_update_id.load(Ordering::Acquire)
+            );
+            return;
+        }
+
+        debug!("Applying orderbook snapshot with lastUpdateId: {}", snapshot_last_update_id);
 
         // Reset and update bids
         {
@@ -117,15 +135,93 @@ impl OrderBook {
         }
 
         // Update state after successful snapshot application
-        // According to Binance docs, we set our lastUpdateId to the snapshot's lastUpdateId
-        self.last_update_id.store(last_update_id, Ordering::Release);
-        self.set_state(OrderBookState::Synced);
+        self.last_update_id.store(snapshot_last_update_id, Ordering::Release);
+
+        // Get a copy of buffered events before processing
+        let buffered_events = {
+            let buffer = self.event_buffer.read().await;
+            buffer.clone()
+        };
 
         debug!(
-            "Applied full orderbook snapshot with last_update_id: {} {:#?}",
-            last_update_id,
-            self.get_state()
+            "Processing {} buffered events after snapshot with lastUpdateId: {}",
+            buffered_events.len(),
+            snapshot_last_update_id
         );
+
+        // Keep track of whether we processed the first valid event after the snapshot
+        let mut first_processed = false;
+        let mut last_processed_id = snapshot_last_update_id;
+
+        // Process buffered events
+        for (first_id, last_id, bids, asks) in buffered_events {
+            // Rule 4: Drop any event where u (last_id) <= lastUpdateId in the snapshot
+            if last_id <= snapshot_last_update_id {
+                debug!(
+                    "Dropping buffered event: last_id={} <= snapshot_last_id={}",
+                    last_id,
+                    snapshot_last_update_id
+                );
+                continue;
+            }
+
+            // If this is the first event we're processing
+            if !first_processed {
+                // Rule 5: First event must have U (first_id) <= lastUpdateId AND u (last_id) > lastUpdateId
+                if first_id <= snapshot_last_update_id && last_id > snapshot_last_update_id {
+                    // Process this event
+                    self.process_price_updates(&bids, &asks).await;
+                    last_processed_id = last_id;
+                    first_processed = true;
+                    debug!(
+                        "Processed first valid event: first_id={}, last_id={}",
+                        first_id,
+                        last_id
+                    );
+                } else {
+                    // If the first event doesn't match criteria, we need to restart
+                    warn!(
+                        "First event after snapshot doesn't match criteria: first_id={}, last_id={}, snapshot_id={}",
+                        first_id,
+                        last_id,
+                        snapshot_last_update_id
+                    );
+                    // Keep state as uninitialized - we need a new snapshot
+                    return;
+                }
+            } else {
+                // For subsequent events, Rule 6: U (first_id) should be equal to the previous event's u+1
+                if first_id != last_processed_id + 1 {
+                    warn!(
+                        "Gap in update IDs: first_id={} != last_processed_id+1={}",
+                        first_id,
+                        last_processed_id + 1
+                    );
+                    // Keep state as uninitialized - we need a new snapshot
+                    return;
+                }
+
+                // Process this event
+                self.process_price_updates(&bids, &asks).await;
+                last_processed_id = last_id;
+                debug!("Processed subsequent event: first_id={}, last_id={}", first_id, last_id);
+            }
+        }
+
+        // Set final state only if everything processed successfully
+        if first_processed {
+            // Store the final processed update ID
+            self.last_update_id.store(last_processed_id, Ordering::Release);
+
+            // Clear the buffer now that we've processed it
+            let mut buffer = self.event_buffer.write().await;
+            buffer.clear();
+
+            debug!("All buffered events processed, orderbook synced with lastUpdateId: {}", last_processed_id);
+        }
+
+        // Set the state to synced
+        self.set_state(OrderBookState::Synced);
     }
 
     pub async fn apply_depth_update(
@@ -135,13 +231,25 @@ impl OrderBook {
         first_update_id: u64, // 'U' in Binance docs
         last_update_id: u64 // 'u' in Binance docs
     ) -> Result<bool, ()> {
-        // Check if we're synced
+        // If we're not initialized or synced, buffer the event for later processing
         if self.get_state() != OrderBookState::Synced {
-            debug!("Order book not synced, cannot apply update");
+            debug!(
+                "Book not synced (state={:?}), buffering update: first_id={}, last_id={}",
+                self.get_state(),
+                first_update_id,
+                last_update_id
+            );
+
+            // Clone the data to avoid lifetime issues
+            let bids_clone = bids.to_vec();
+            let asks_clone = asks.to_vec();
+
+            // Buffer the event
+            self.buffer_event(first_update_id, last_update_id, bids_clone, asks_clone).await;
             return Ok(false);
         }
 
-        // Get current lastUpdateId from our book
+        // We are synced - check if update is still relevant
         let current_last_id = self.last_update_id.load(Ordering::Acquire);
 
         // Rule 4: Drop any event where u <= lastUpdateId
@@ -154,27 +262,72 @@ impl OrderBook {
             return Ok(true); // Successfully processed (by dropping)
         }
 
-        if current_last_id > first_update_id {
-            debug!(
-                "Out of sequence event: first_id={}, last_id={}, book_last_id={}",
+        // Rule 6: Check if this event continues the sequence (U = previous u + 1)
+        if first_update_id != current_last_id + 1 {
+            warn!(
+                "Gap in update IDs: first_id={} != book_last_id+1={}",
                 first_update_id,
-                last_update_id,
-                current_last_id
+                current_last_id + 1
             );
             self.set_state(OrderBookState::OutOfSync);
             return Ok(false);
         }
-
-        // Rule 6: For later updates, each event's U should be equal to previous event's u+1
-        // We can't fully implement this logic here as we process events one by one
-        // Instead, we just check that the update makes sense with our current state
 
         // Process the price updates
         self.process_price_updates(bids, asks).await;
 
         // Update our last update ID
         self.last_update_id.store(last_update_id, Ordering::Release);
+
+        debug!(
+            "Applied update: first_id={}, last_id={}, new_book_last_id={}",
+            first_update_id,
+            last_update_id,
+            last_update_id
+        );
+
         Ok(true)
+    }
+
+    pub async fn buffer_event(
+        &self,
+        first_update_id: u64,
+        last_update_id: u64,
+        bids: Vec<(f64, f64)>,
+        asks: Vec<(f64, f64)>
+    ) {
+        // Only buffer if we're not synced
+        if self.get_state() == OrderBookState::Synced {
+            return;
+        }
+
+        let mut buffer = self.event_buffer.write().await;
+
+        // Buffer management: limit size to avoid memory issues
+        if buffer.len() >= 1000 {
+            // Strategy: remove oldest events, but try to maintain sequence
+            debug!("Event buffer full (1000 events), removing oldest events");
+
+            // Sort by first_update_id to ensure we remove oldest
+            buffer.sort_by_key(|&(first_id, _, _, _)| first_id);
+
+            // Remove oldest 10% to make room
+            let to_remove = buffer.len() / 10;
+            buffer.drain(0..to_remove);
+        }
+
+        // Add the event to the buffer
+        buffer.push((first_update_id, last_update_id, bids, asks));
+
+        // Sort by first_update_id to ensure events are in order
+        buffer.sort_by_key(|&(first_id, _, _, _)| first_id);
+
+        debug!(
+            "Buffered event: first_id={}, last_id={}, buffer_size={}",
+            first_update_id,
+            last_update_id,
+            buffer.len()
+        );
     }
 
     async fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
