@@ -7,6 +7,7 @@ mod utils;
 mod models;
 mod orderbook;
 mod arbitrage;
+mod performance;
 
 use std::time::Duration;
 use std::sync::Arc;
@@ -29,8 +30,22 @@ use orderbook::manager::OrderBookManager;
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_BUFFER_SIZE: usize = 100;
 
+// Define command line arguments enum
+#[derive(Debug)]
+enum Command {
+    Run,
+    PerformanceTest,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse command line arguments
+    let command = if std::env::args().nth(1).as_deref() == Some("perf-test") {
+        Command::PerformanceTest
+    } else {
+        Command::Run
+    };
+
     // Load configuration with helpful error messages
     let config = Config::from_env().context(
         "Failed to load configuration from environment. Make sure you have a .env file with required variables."
@@ -41,6 +56,13 @@ async fn main() -> Result<()> {
         ::init_logging(config.log_level, config.debug, &config.log_config)
         .context("Failed to initialize logging system")?;
 
+    match command {
+        Command::Run => run_normal_mode(config).await,
+        Command::PerformanceTest => run_performance_test(config).await,
+    }
+}
+
+async fn run_normal_mode(config: Config) -> Result<()> {
     // Display startup information
     print_app_starting();
     print_config(&config);
@@ -255,5 +277,119 @@ async fn main() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
 
     info!("Triangular arbitrage system stopped");
+    Ok(())
+}
+
+async fn run_performance_test(config: Config) -> Result<()> {
+    // Output information
+    info!("Starting performance test for triangular arbitrage system");
+    info!("Test duration: 120 seconds");
+
+    // Create output directory
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let output_dir = format!("./performance_results/{}", timestamp);
+    std::fs
+        ::create_dir_all(&output_dir)
+        .context(format!("Failed to create output directory: {}", output_dir))?;
+
+    let output_file = format!("{}/performance_results.csv", output_dir);
+    info!("Results will be saved to: {}", output_file);
+
+    // Initialize exchange client
+    let client = Arc::new(
+        BinanceClient::new(config.fix_api.clone(), config.fix_secret.clone(), config.debug).context(
+            "Failed to create Binance client"
+        )?
+    );
+
+    // Verify exchange connectivity
+    match timeout(API_TIMEOUT, client.is_operational()).await {
+        Ok(Ok(true)) => {
+            info!("✓ Exchange is operational");
+        }
+        _ => {
+            error!("❌ Exchange is not operational or timed out");
+            return Err(anyhow!("Exchange is not operational"));
+        }
+    }
+
+    // Fetch symbols
+    let symbols = match timeout(API_TIMEOUT, client.get_active_spot_symbols()).await {
+        Ok(Ok(symbols)) => symbols,
+        Ok(Err(e)) => {
+            error!("Failed to fetch symbols: {}", e);
+            return Err(anyhow!("Failed to fetch symbols: {}", e));
+        }
+        Err(_) => {
+            error!("Timed out while fetching symbols");
+            return Err(anyhow!("Timed out while fetching symbols"));
+        }
+    };
+
+    info!("✓ Fetched {} symbols from exchange", symbols.len());
+
+    // Create symbol map and find triangular paths
+    let mut symbol_map = SymbolMap::from_symbols(symbols.clone());
+
+    info!("Finding triangular arbitrage paths starting with {}...", config.base_asset);
+    symbol_map.find_targeted_triangular_paths(
+        &config.base_asset,
+        config.max_triangles,
+        &config.excluded_coins
+    );
+
+    let total_paths = symbol_map.get_triangular_paths().len();
+
+    if total_paths == 0 {
+        error!("No triangular paths found. Cannot continue.");
+        return Err(anyhow!("No triangular paths found. Cannot continue."));
+    }
+
+    info!("Found {} potential triangular arbitrage paths", total_paths);
+
+    // Get unique symbols for market data
+    let unique_symbols = symbol_map.get_unique_symbols();
+
+    // Create orderbook manager
+    let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
+
+    // Convert paths to Arc for zero-copy sharing
+    let triangular_paths: Vec<Arc<_>> = symbol_map
+        .get_triangular_paths()
+        .iter()
+        .map(|p| Arc::new(p.clone()))
+        .collect();
+
+    // Create arbitrage detector
+    let detector = arbitrage::detector::create_event_driven_detector(
+        orderbook_manager.clone(),
+        dec!(0.001), // 0.1% fee
+        Decimal::from_f64(config.threshold).unwrap(),
+        triangular_paths,
+        dec!(100.0) // Start with 100 USDT
+    ).await;
+
+    info!("Created arbitrage detector. Starting performance test...");
+
+    // Run the performance test for 120 seconds
+    let test_result = performance::run_performance_test(
+        config.sbe_api_key,
+        unique_symbols,
+        orderbook_manager.clone(),
+        detector.clone(),
+        120, // 2 minutes
+        output_file
+    ).await;
+
+    match test_result {
+        Ok(_) => {
+            info!("Performance test completed successfully!");
+        }
+        Err(e) => {
+            error!("Performance test failed: {}", e);
+            return Err(e);
+        }
+    }
+
     Ok(())
 }
