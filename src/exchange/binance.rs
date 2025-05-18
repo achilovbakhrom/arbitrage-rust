@@ -299,7 +299,6 @@ impl ExchangeClient for BinanceClient {
             return Err(anyhow::anyhow!("Symbol parameter cannot be empty"));
         }
 
-        let limit = limit.min(1000); // Binance max is 1000
         let url = self.base_url
             .join(&format!("v3/depth?symbol={}&limit={}", symbol, limit))
             .context("Failed to build depth API URL")?;

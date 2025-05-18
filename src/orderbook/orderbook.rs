@@ -1,4 +1,3 @@
-// src/orderbook/orderbook.rs
 use std::collections::BTreeMap;
 use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use ordered_float::OrderedFloat;
@@ -68,7 +67,7 @@ impl OrderBook {
     /// Get current state of the orderbook
     #[inline]
     pub fn get_state(&self) -> OrderBookState {
-        match self.state.load(Ordering::Relaxed) {
+        match self.state.load(Ordering::Acquire) {
             0 => OrderBookState::Uninitialized,
             1 => OrderBookState::Synced,
             _ => OrderBookState::OutOfSync,
@@ -78,29 +77,18 @@ impl OrderBook {
     /// Set the state of the orderbook
     #[inline]
     fn set_state(&self, state: OrderBookState) {
-        self.state.store(state as u8, Ordering::Relaxed);
+        self.state.store(state as u8, Ordering::Release);
     }
 
-    /// Initialize the book from a full snapshot
-    pub async fn apply_snapshot(&self, bids: Vec<Level>, asks: Vec<Level>, last_update_id: u64) {
-        // Fast check - if already synced and update_id is older than our current, skip
-        if
-            self.get_state() == OrderBookState::Synced &&
-            last_update_id < self.last_update_id.load(Ordering::Relaxed)
-        {
-            return;
-        }
+    // Fix for apply_snapshot method in src/orderbook/orderbook.rs
 
-        // Acquire exclusive lock for the reset operation
+    // Updated src/orderbook/orderbook.rs
+    pub async fn apply_snapshot(&self, bids: Vec<Level>, asks: Vec<Level>, last_update_id: u64) {
+        // Acquire exclusive lock for the snapshot operation
         let _lock = self.update_mutex.lock().await;
 
-        // Double-check after lock acquisition
-        if
-            self.get_state() == OrderBookState::Synced &&
-            last_update_id < self.last_update_id.load(Ordering::Relaxed)
-        {
-            return;
-        }
+        // Update state to uninitialized while we apply the snapshot
+        self.set_state(OrderBookState::Uninitialized);
 
         // Reset and update bids
         {
@@ -110,7 +98,6 @@ impl OrderBook {
             // Insert bids (highest first for quick access to best bid)
             for lvl in bids.into_iter().take(self.max_depth) {
                 if lvl.quantity > 0.0 {
-                    // Only insert valid levels
                     bids_map.insert(OrderedFloat(lvl.price), lvl.quantity);
                 }
             }
@@ -124,60 +111,81 @@ impl OrderBook {
             // Insert asks (lowest first for quick access to best ask)
             for lvl in asks.into_iter().take(self.max_depth) {
                 if lvl.quantity > 0.0 {
-                    // Only insert valid levels
                     asks_map.insert(OrderedFloat(lvl.price), lvl.quantity);
                 }
             }
         }
 
         // Update state after successful snapshot application
+        // According to Binance docs, we set our lastUpdateId to the snapshot's lastUpdateId
         self.last_update_id.store(last_update_id, Ordering::Release);
-        self.first_update_id.store(last_update_id, Ordering::Release);
         self.set_state(OrderBookState::Synced);
-        debug!("Applied full orderbook snapshot with last_update_id: {}", last_update_id);
+
+        debug!(
+            "Applied full orderbook snapshot with last_update_id: {} {:#?}",
+            last_update_id,
+            self.get_state()
+        );
     }
 
-    /// Apply incremental depth update - fast path without locking mutex
-    /// Returns: Ok(true) if update was applied, Ok(false) if needs snapshot, Err if fatal error
     pub async fn apply_depth_update(
         &self,
         bids: &[(f64, f64)],
         asks: &[(f64, f64)],
-        first_update_id: u64,
-        last_update_id: u64
+        first_update_id: u64, // 'U' in Binance docs
+        last_update_id: u64 // 'u' in Binance docs
     ) -> Result<bool, ()> {
-        // Fast path: Check state without mutex
-        let state = self.get_state();
-        if state != OrderBookState::Synced {
-            // Not synced, need snapshot
+        debug!("apply_depth_update {:?}", self.get_state());
+        // Check if we're synced
+        if self.get_state() != OrderBookState::Synced {
+            debug!("Order book not synced, cannot apply update");
             return Ok(false);
         }
 
-        // Fast path: Check update sequence without mutex
+        // Get current lastUpdateId from our book
         let current_last_id = self.last_update_id.load(Ordering::Acquire);
 
-        // Outdated update - skip
+        // Rule 4: Drop any event where u <= lastUpdateId
         if last_update_id <= current_last_id {
-            return Ok(true);
+            debug!(
+                "Dropping outdated event: event_last_id={}, book_last_id={}",
+                last_update_id,
+                current_last_id
+            );
+            return Ok(true); // Successfully processed (by dropping)
         }
 
-        // Version check: Ensure this update is next in sequence
-        // According to Binance docs, the first processed event should have:
-        // U <= lastUpdateId+1 AND u >= lastUpdateId+1
-        if first_update_id > current_last_id + 1 {
-            // We missed some updates, mark out of sync
+        if current_last_id > first_update_id {
+            debug!(
+                "Out of sequence event: first_id={}, last_id={}, book_last_id={}",
+                first_update_id,
+                last_update_id,
+                current_last_id
+            );
             self.set_state(OrderBookState::OutOfSync);
             return Ok(false);
         }
 
-        // Fast path for processing updates (no mutex needed)
+        // Rule 6: For later updates, each event's U should be equal to previous event's u+1
+        // We can't fully implement this logic here as we process events one by one
+        // Instead, we just check that the update makes sense with our current state
 
+        // Process the price updates
+        self.process_price_updates(bids, asks).await;
+
+        // Update our last update ID
+        self.last_update_id.store(last_update_id, Ordering::Release);
+        Ok(true)
+    }
+
+    async fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
         // Apply bid updates
         {
             let mut bids_map = self.bids.write().await;
             for &(price, quantity) in bids {
                 let key = OrderedFloat(price);
 
+                // Rule 7 & 8: If the quantity is 0, remove the price level
                 if quantity == 0.0 {
                     // Remove price level
                     bids_map.remove(&key);
@@ -187,21 +195,16 @@ impl OrderBook {
                 }
             }
 
-            // Enforce depth limit for bids - use efficient truncation
+            // Enforce depth limit for bids - we want to keep highest bids
             if bids_map.len() > self.max_depth {
-                let excess = bids_map.len() - self.max_depth;
-                let mut to_remove = Vec::with_capacity(excess);
+                // Sort in ascending order and truncate the first (lowest) elements
+                let mut prices: Vec<_> = bids_map.keys().cloned().collect();
+                prices.sort(); // Ascending order
 
-                for (i, key) in bids_map.keys().enumerate() {
-                    if i < excess {
-                        to_remove.push(*key);
-                    } else {
-                        break;
-                    }
-                }
-
-                for key in to_remove {
-                    bids_map.remove(&key);
+                // Remove lowest bids to maintain max depth
+                let remove_count = bids_map.len() - self.max_depth;
+                for i in 0..remove_count {
+                    bids_map.remove(&prices[i]);
                 }
             }
         }
@@ -212,6 +215,7 @@ impl OrderBook {
             for &(price, quantity) in asks {
                 let key = OrderedFloat(price);
 
+                // Rule 7 & 8: If the quantity is 0, remove the price level
                 if quantity == 0.0 {
                     // Remove price level
                     asks_map.remove(&key);
@@ -221,31 +225,19 @@ impl OrderBook {
                 }
             }
 
-            // Enforce depth limit for asks - use efficient truncation
+            // Enforce depth limit for asks - we want to keep lowest asks
             if asks_map.len() > self.max_depth {
-                let excess = asks_map.len() - self.max_depth;
-                let to_remove: Vec<_> = asks_map
-                    .keys()
-                    .rev() // Start from highest asks
-                    .take(excess)
-                    .cloned()
-                    .collect();
+                // Sort in descending order and truncate the first (highest) elements
+                let mut prices: Vec<_> = asks_map.keys().cloned().collect();
+                prices.sort_by(|a, b| b.cmp(a)); // Descending order
 
-                for key in to_remove {
-                    asks_map.remove(&key);
+                // Remove highest asks to maintain max depth
+                let remove_count = asks_map.len() - self.max_depth;
+                for i in 0..remove_count {
+                    asks_map.remove(&prices[i]);
                 }
             }
         }
-
-        // Update last update ID after successful application (release ordering)
-        self.last_update_id.store(last_update_id, Ordering::Release);
-        Ok(true)
-    }
-
-    /// Mark orderbook as needing a fresh snapshot
-    #[inline]
-    pub fn mark_out_of_sync(&self) {
-        self.set_state(OrderBookState::OutOfSync);
     }
 
     /// Best (highest) bid - zero allocation

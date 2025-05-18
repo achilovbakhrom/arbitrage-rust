@@ -3,12 +3,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{ RwLock, Mutex };
-use tracing::{ debug, error, warn };
+use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
 use std::time::{ Duration, Instant };
 
 use crate::models::level::Level;
-use crate::enums::side::Side;
 use crate::exchange::client::ExchangeClient;
 use super::orderbook::OrderBook;
 
@@ -98,8 +97,7 @@ impl OrderBookManager {
         }
     }
 
-    /// Apply a snapshot to initialize or reset an orderbook
-    #[inline]
+    // Updated src/orderbook/manager.rs
     pub async fn apply_snapshot(
         &self,
         symbol: Arc<str>,
@@ -107,28 +105,19 @@ impl OrderBookManager {
         asks: &[(f64, f64)],
         last_update_id: u64
     ) {
-        // Fast check first - do we have any callbacks?
-        let has_callbacks = {
-            let callbacks = self.update_callbacks.read().await;
-            !callbacks.is_empty()
-        };
-
+        // Get or create the orderbook
         let book = self.get_or_create_book(&symbol).await;
 
-        // Convert to Level structs with pre-allocation
-        let bids_len = bids.len().min(self.default_depth);
-        let asks_len = asks.len().min(self.default_depth);
+        // Convert to Level structs
+        let bids_levels: Vec<Level> = bids
+            .iter()
+            .map(|(price, qty)| Level { price: *price, quantity: *qty })
+            .collect();
 
-        let mut bids_levels = Vec::with_capacity(bids_len);
-        let mut asks_levels = Vec::with_capacity(asks_len);
-
-        for (price, qty) in bids.iter().take(bids_len) {
-            bids_levels.push(Level { price: *price, quantity: *qty });
-        }
-
-        for (price, qty) in asks.iter().take(asks_len) {
-            asks_levels.push(Level { price: *price, quantity: *qty });
-        }
+        let asks_levels: Vec<Level> = asks
+            .iter()
+            .map(|(price, qty)| Level { price: *price, quantity: *qty })
+            .collect();
 
         // Apply the snapshot
         book.apply_snapshot(bids_levels, asks_levels, last_update_id).await;
@@ -139,99 +128,18 @@ impl OrderBookManager {
             last_recovery.remove(&symbol);
         }
 
-        // Notify callbacks about the update if we have any
-        if has_callbacks {
-            self.notify_update(&symbol, &book).await;
-        }
+        // Notify callbacks about the update
+        self.notify_update(&symbol, &book).await;
 
-        // Log the snapshot application
         debug!(
             symbol = %symbol,
             update_id = last_update_id,
-            bid_count = bids_len,
-            ask_count = asks_len,
+            bid_count = bids.len(),
+            ask_count = asks.len(),
             "Applied orderbook snapshot"
         );
     }
 
-    /// Apply incremental depth update - high performance implementation
-    #[inline]
-    pub async fn apply_depth_update(
-        &self,
-        symbol: &Arc<str>,
-        bids: &[(f64, f64)],
-        asks: &[(f64, f64)],
-        first_update_id: u64,
-        last_update_id: u64
-    ) -> bool {
-        // Fast check first - do we have any callbacks?
-        let has_callbacks = {
-            let callbacks = self.update_callbacks.read().await;
-            !callbacks.is_empty()
-        };
-
-        // Get existing book without creating if missing
-        let books = self.books.read().await;
-        let book = match books.get(symbol) {
-            Some(book) => book.clone(), // Clone Arc, not the data
-            None => {
-                // If book doesn't exist, we trigger recovery process
-                drop(books); // Release lock first
-                self.trigger_recovery(symbol).await;
-                return false;
-            }
-        };
-
-        // Release the read lock before applying the update
-        drop(books);
-
-        // Try to apply the update (fast path)
-        match book.apply_depth_update(bids, asks, first_update_id, last_update_id).await {
-            Ok(true) => {
-                // Update applied successfully - only notify if we have callbacks
-                if has_callbacks {
-                    self.notify_update(symbol, &book).await;
-                }
-                true
-            }
-            Ok(false) => {
-                // Book needs recovery, trigger async recovery
-                self.trigger_recovery(symbol).await;
-                false
-            }
-            Err(_) => {
-                // Fatal error, trigger recovery
-                self.trigger_recovery(symbol).await;
-                false
-            }
-        }
-    }
-
-    /// Apply a single update - simplified interface for individual price level updates
-    #[inline]
-    pub async fn apply_single_update(
-        &self,
-        symbol: &Arc<str>,
-        side: Side,
-        price: f64,
-        quantity: f64
-    ) {
-        // Create a single-item update
-        let updates = vec![(price, quantity)];
-
-        // Use the same mechanism as regular depth updates
-        match side {
-            Side::Bid => {
-                self.apply_depth_update(symbol, &updates, &[], u64::MAX - 1, u64::MAX).await;
-            }
-            Side::Ask => {
-                self.apply_depth_update(symbol, &[], &updates, u64::MAX - 1, u64::MAX).await;
-            }
-        }
-    }
-
-    /// Trigger recovery process but don't wait for it to complete
-    /// Uses rate limiting to avoid excessive recovery attempts
     pub async fn trigger_recovery(&self, symbol: &Arc<str>) {
         if symbol.as_ref().trim().is_empty() {
             error!("Cannot trigger recovery for empty symbol");
@@ -242,8 +150,12 @@ impl OrderBookManager {
         {
             let last_recovery = self.last_recovery.read().await;
             if let Some(last_time) = last_recovery.get(symbol) {
-                if last_time.elapsed() < Duration::from_secs(5) {
-                    // Skip recovery if attempted in last 5 seconds
+                if last_time.elapsed() < Duration::from_secs(3) {
+                    debug!(
+                        symbol = %symbol,
+                        "Skipping recovery, too soon since last attempt: {:?}",
+                        last_time.elapsed()
+                    );
                     return;
                 }
             }
@@ -261,71 +173,122 @@ impl OrderBookManager {
 
         // Launch async task for recovery
         tokio::spawn(async move {
+            // Add some jitter to avoid all symbols recovering at the same time
+            let jitter = rand::random::<u64>() % 200;
+            tokio::time::sleep(Duration::from_millis(jitter)).await;
+
             // Use a short timeout for the lock to avoid blocking other symbols
             let lock_result = tokio::time::timeout(
-                Duration::from_millis(100),
+                Duration::from_millis(500),
                 manager.recovery_mutex.lock()
             ).await;
 
             let _lock = match lock_result {
                 Ok(lock) => lock,
                 Err(_) => {
-                    // Couldn't get lock in time, another recovery is in progress
-                    debug!(?symbol_clone, "Skipping orderbook recovery due to lock timeout");
+                    debug!(
+                        symbol = %symbol_clone,
+                        "Skipping orderbook recovery due to lock timeout"
+                    );
                     return;
                 }
             };
 
-            // Double check if we still need recovery
-            let book = manager.get_or_create_book(&symbol_clone).await;
-            if book.is_synced() {
-                return; // No longer needs recovery
-            }
-
-            debug!(
+            info!(
                 symbol = %symbol_clone,
                 "Starting orderbook recovery process"
             );
 
-            // Fetch snapshot (with retry logic)
-            for attempt in 1..=3 {
-                match manager.fetch_snapshot(symbol_clone.as_ref()).await {
-                    Ok((snapshot_bids, snapshot_asks, snapshot_last_id)) => {
-                        // Apply the snapshot
-                        manager.apply_snapshot(
-                            symbol_clone.clone(),
-                            &snapshot_bids,
-                            &snapshot_asks,
-                            snapshot_last_id
-                        ).await;
-
-                        debug!(
-                            symbol = %symbol_clone,
-                            "Orderbook recovery completed successfully"
-                        );
-
-                        return; // Success
+            // Fetch snapshot from REST API
+            match manager.fetch_snapshot(symbol_clone.as_ref()).await {
+                Ok((snapshot_bids, snapshot_asks, snapshot_last_id)) => {
+                    if snapshot_bids.is_empty() || snapshot_asks.is_empty() {
+                        warn!(
+                        symbol = %symbol_clone,
+                        "Empty orderbook snapshot received"
+                    );
+                        return;
                     }
-                    Err(e) => {
-                        if attempt < 3 {
-                            warn!(
-                                symbol = %symbol_clone,
-                                error = %e,
-                                attempt = attempt,
-                                "Orderbook recovery snapshot fetch failed, retrying"
-                            );
-                            tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
-                        } else {
-                            error!(
-                                symbol = %symbol_clone,
-                                error = %e,
-                                "Orderbook recovery failed after all retry attempts"
-                            );
-                        }
-                    }
+
+                    // Apply the snapshot
+                    manager.apply_snapshot(
+                        symbol_clone.clone(),
+                        &snapshot_bids,
+                        &snapshot_asks,
+                        snapshot_last_id
+                    ).await;
+
+                    info!(
+                        symbol = %symbol_clone,
+                        "Orderbook recovery completed successfully"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        symbol = %symbol_clone,
+                        error = %e,
+                        "Failed to fetch orderbook snapshot"
+                    );
                 }
             }
         });
+    }
+
+    pub async fn apply_depth_update(
+        &self,
+        symbol: &Arc<str>,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+        first_update_id: u64,
+        last_update_id: u64
+    ) -> bool {
+        // Get existing book without creating if missing
+        let book = {
+            let books = self.books.read().await;
+            match books.get(symbol) {
+                Some(book) => book.clone(),
+                None => {
+                    // If book doesn't exist, we trigger recovery process
+                    drop(books);
+                    debug!(
+                        symbol = %symbol,
+                        "Book doesn't exist, triggering recovery"
+                    );
+                    self.trigger_recovery(symbol).await;
+                    return false;
+                }
+            }
+        };
+
+        // Try to apply the update
+        match book.apply_depth_update(bids, asks, first_update_id, last_update_id).await {
+            Ok(true) => {
+                // Update applied successfully
+                self.notify_update(symbol, &book).await;
+                true
+            }
+            Ok(false) => {
+                // Book out of sync, need recovery
+                debug!(
+                    symbol = %symbol,
+                    first_id = first_update_id,
+                    last_id = last_update_id,
+                    book_last_id = book.get_last_update_id(),
+                    "Book out of sync, triggering recovery"
+                );
+                self.trigger_recovery(symbol).await;
+                false
+            }
+            Err(_) => {
+                // Error applying update
+                warn!(
+                    symbol = %symbol,
+                    "Error applying depth update, triggering recovery"
+                );
+                self.trigger_recovery(symbol).await;
+                false
+            }
+        }
     }
 
     /// Get the best bid and ask for a symbol - fast path optimized
