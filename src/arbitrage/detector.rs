@@ -186,7 +186,6 @@ impl ArbitrageDetectorState {
             return None;
         }
 
-        // Compute execution time
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
         // Create the opportunity
@@ -258,6 +257,8 @@ impl ArbitrageDetectorState {
                     let mut opportunities = Vec::new();
 
                     for path in &paths_to_check {
+                        // Inside the path checking loop, add for each path:
+
                         if let Some(opportunity) = state.check_path(path, start_amount).await {
                             opportunities.push(opportunity);
                         }

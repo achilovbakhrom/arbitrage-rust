@@ -46,6 +46,7 @@ strum_macros = "0.27.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
+tracing-timing = "0.6.0"
 
 # Decimal arithmetic for money
 rust_decimal = { version = "1.33.1", features = ["serde"] }
