@@ -4,3 +4,4 @@
 /logs
 /performance_results
 .env
+.analyze
