@@ -16,7 +16,6 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::time::{ sleep, timeout };
-// use rust_decimal_macros::dec;
 use tokio::signal;
 
 use config::Config;
@@ -26,12 +25,9 @@ use exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::Bina
 use tracing::{ debug, error, info, warn };
 use utils::{ console::{ print_app_started, print_app_starting, print_config }, logging };
 use orderbook::manager::OrderBookManager;
-use arbitrage::detector::{ ArbitrageDetector, ArbitrageOpportunity };
 
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_BUFFER_SIZE: usize = 100;
-const SCAN_INTERVAL_MS: u64 = 250; // Milliseconds between scans
-const STATS_INTERVAL_SECS: u64 = 60; // Seconds between printing stats
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -123,29 +119,11 @@ async fn main() -> Result<()> {
         return Err(anyhow!("No triangular paths found. Cannot continue."));
     }
 
-    // Convert paths to Arc for zero-copy sharing
-    let triangular_paths: Vec<Arc<_>> = symbol_map
-        .get_triangular_paths()
-        .iter()
-        .map(|p| Arc::new(p.clone()))
-        .collect();
+    // Get unique symbols for market data
+    let unique_symbols = symbol_map.get_unique_symbols();
 
     // Create the shared orderbook manager with optimal depth
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
-
-    // Create the arbitrage detector with specified thresholds
-    let arbitrage_detector = Arc::new(
-        ArbitrageDetector::new(
-            orderbook_manager.clone(),
-            dec!(0.001), // 0.1% fee
-            Decimal::from_f64(config.threshold).unwrap() // Configured minimum profit threshold
-        )
-    );
-
-    info!("Created arbitrage detector with threshold: {:.2}%", config.threshold * 100.0);
-
-    // Get unique symbols for market data
-    let unique_symbols = symbol_map.get_unique_symbols();
 
     // Initialize orderbooks with snapshots for faster startup
     info!("Pre-loading orderbook snapshots for {} symbols...", unique_symbols.len());
@@ -167,7 +145,7 @@ async fn main() -> Result<()> {
             // Acquire permit from semaphore (limits concurrent requests)
             let _permit = semaphore.acquire().await.unwrap();
 
-            match client.fetch_depth(symbol_arc.as_ref(), config.max_triangles).await {
+            match client.fetch_depth(symbol_arc.as_ref(), config.depth).await {
                 Ok(depth) => {
                     // Convert to the format expected by apply_snapshot
                     let bids = depth.bids
@@ -213,11 +191,31 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Simple success message without colored formatting to avoid issues
     info!(
         "Initial orderbook loading: {} succeeded, {} failed",
         success_count,
         unique_symbols.len() - success_count
+    );
+
+    // Convert paths to Arc for zero-copy sharing
+    let triangular_paths: Vec<Arc<_>> = symbol_map
+        .get_triangular_paths()
+        .iter()
+        .map(|p| Arc::new(p.clone()))
+        .collect();
+
+    // Create the event-driven arbitrage detector
+    let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
+        orderbook_manager.clone(),
+        dec!(0.001), // 0.1% fee
+        Decimal::from_f64(config.threshold).unwrap(), // Configured minimum profit threshold
+        triangular_paths,
+        dec!(100.0) // Start with 100 USDT
+    ).await;
+
+    info!(
+        "Created high-performance event-driven arbitrage detector with threshold: {:.2}%",
+        config.threshold * 100.0
     );
 
     // Start WebSocket connection for real-time market data
@@ -295,7 +293,7 @@ async fn main() -> Result<()> {
 
                     // Spawn a task to update the orderbook without blocking the WebSocket
                     tokio::spawn(async move {
-                        // Apply depth update
+                        // Apply depth update - this will trigger the arbitrage detector via callbacks
                         manager.apply_depth_update(
                             &symbol_arc,
                             &bids_cloned,
@@ -314,112 +312,20 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Share the paths between tasks
-    let arbitrage_paths = Arc::new(triangular_paths);
-    let detector_for_task = arbitrage_detector.clone();
-
-    // Start monitoring for arbitrage opportunities
-    info!("Starting arbitrage monitoring...");
+    // Print startup complete message
     print_app_started();
-
-    // Create a task to scan for arbitrage opportunities
-    let arbitrage_task = tokio::spawn(async move {
-        // Track statistics
-        let mut scan_count = 0u64;
-        let mut last_stat_time = std::time::Instant::now();
-        let mut total_opportunities_found = 0u64;
-        let mut total_scan_time_ms = 0u64;
-
-        // Use a sliding window interval to avoid lock contention
-        let mut interval = tokio::time::interval(Duration::from_millis(SCAN_INTERVAL_MS));
-
-        loop {
-            interval.tick().await;
-
-            // Use standard scan_paths method for now (we'll update this later)
-            let start_time = std::time::Instant::now();
-            let opportunities = detector_for_task.scan_paths(
-                &arbitrage_paths,
-                dec!(100.0) // Start with 100 USDT
-            ).await;
-            let scan_time = start_time.elapsed();
-
-            // Update stats
-            scan_count += 1;
-            total_scan_time_ms += scan_time.as_millis() as u64;
-            total_opportunities_found += opportunities.len() as u64;
-
-            // Print arbitrage opportunities that exceed the threshold
-            if !opportunities.is_empty() {
-                print_arbitrage_opportunities(&opportunities);
-            }
-
-            // Log performance stats periodically
-            if last_stat_time.elapsed() > Duration::from_secs(STATS_INTERVAL_SECS) {
-                let elapsed_secs = last_stat_time.elapsed().as_secs_f64();
-                let scans_per_second = (scan_count as f64) / elapsed_secs;
-                let avg_scan_time = (total_scan_time_ms as f64) / (scan_count as f64);
-
-                info!(
-                    "Stats: {} scans ({:.2}/sec), avg time {:.2}ms, found {} opportunities",
-                    scan_count,
-                    scans_per_second,
-                    avg_scan_time,
-                    total_opportunities_found
-                );
-
-                // Reset counters
-                scan_count = 0;
-                total_scan_time_ms = 0;
-                total_opportunities_found = 0;
-                last_stat_time = std::time::Instant::now();
-            }
-        }
-    });
-
-    // Wait for CTRL+C signal for graceful shutdown
     info!("\n Press Ctrl+C to exit");
 
-    // Use tokio's ctrl_c signal handler
+    // Wait for CTRL+C signal for graceful shutdown
     tokio::signal::ctrl_c().await?;
     info!("Received Ctrl+C, shutting down...");
 
     // Clean up and exit
     message_task.abort();
-    arbitrage_task.abort();
 
     // Give tasks a moment to clean up
     sleep(Duration::from_millis(200)).await;
 
     info!("Triangular arbitrage system stopped");
     Ok(())
-}
-
-/// Helper function to print detected arbitrage opportunities in a nice format
-fn print_arbitrage_opportunities(opportunities: &[ArbitrageOpportunity]) {
-    if opportunities.is_empty() {
-        return;
-    }
-
-    info!("\n=== ARBITRAGE OPPORTUNITIES ===");
-
-    for (i, opp) in opportunities.iter().enumerate() {
-        // Calculate profit percentage for display
-        let profit_pct = (opp.profit_ratio - dec!(1.0)) * dec!(100.0);
-
-        info!(
-            "#{}: {} → {} → {} | Profit: {}% | Start: {} {} | End: {} {}",
-            i + 1,
-            opp.path.first_symbol,
-            opp.path.second_symbol,
-            opp.path.third_symbol,
-            profit_pct,
-            opp.start_amount,
-            opp.path.start_asset,
-            opp.end_amount,
-            opp.path.end_asset
-        );
-    }
-
-    println!("================================\n");
 }

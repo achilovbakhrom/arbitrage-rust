@@ -3,18 +3,28 @@
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use std::sync::atomic::{ AtomicUsize, Ordering };
+use tokio::sync::{ Mutex, mpsc, Semaphore };
 use futures::{ stream, StreamExt };
 use tracing::{ debug, info, warn };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use colored::Colorize;
+use std::collections::{ HashSet, HashMap };
+use dashmap::DashMap; // Use DashMap for concurrent access without locks
 
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
+use crate::orderbook::orderbook::OrderBook;
 
-/// Maximum number of concurrent path checks for performance optimization
-const MAX_CONCURRENT_CHECKS: usize = 16;
+/// Maximum number of paths to check concurrently
+const MAX_CONCURRENT_CHECKS: usize = 32;
+
+/// Maximum batch size for scanning
+const MAX_BATCH_SIZE: usize = 128;
+
+/// Symbol cooldown in milliseconds (to avoid processing the same symbol too frequently)
+const SYMBOL_COOLDOWN_MS: u64 = 100;
 
 /// Represents an arbitrage opportunity
 #[derive(Debug, Clone)]
@@ -58,37 +68,21 @@ fn f64_to_decimal(value: f64) -> Decimal {
     Decimal::from_str(&value.to_string()).unwrap_or(Decimal::ZERO)
 }
 
-/// Detects arbitrage opportunities from orderbooks
-pub struct ArbitrageDetector {
-    /// Orderbook manager
-    orderbook_manager: Arc<OrderBookManager>,
-    /// Fee rate to consider in calculations
-    fee_rate: Decimal,
-    /// One minus fee rate (cached for performance)
-    one_minus_fee: Decimal,
-    /// Minimum profit threshold to report
-    min_profit_threshold: Decimal,
-    /// Cache for opportunities to reduce allocations
-    opportunity_cache: Mutex<Vec<ArbitrageOpportunity>>,
+/// State for the arbitrage detector
+pub struct ArbitrageDetectorState {
+    pub orderbook_manager: Arc<OrderBookManager>,
+    pub fee_rate: Decimal,
+    pub one_minus_fee: Decimal,
+    pub min_profit_threshold: Decimal,
+    pub symbol_to_paths: Arc<DashMap<String, Vec<usize>>>,
+    pub all_paths: Arc<Vec<Arc<TriangularPath>>>,
+    pub processed_symbols: Arc<DashMap<String, Instant>>,
+    pub stats_counter: Arc<AtomicUsize>,
+    pub profit_counter: Arc<AtomicUsize>,
+    pub start_amount: Decimal,
 }
 
-impl ArbitrageDetector {
-    /// Create a new arbitrage detector
-    #[inline]
-    pub fn new(
-        orderbook_manager: Arc<OrderBookManager>,
-        fee_rate: Decimal,
-        min_profit_threshold: Decimal
-    ) -> Self {
-        Self {
-            orderbook_manager,
-            fee_rate,
-            one_minus_fee: dec!(1.0) - fee_rate,
-            min_profit_threshold,
-            opportunity_cache: Mutex::new(Vec::with_capacity(100)),
-        }
-    }
-
+impl ArbitrageDetectorState {
     /// Check a single triangular path for arbitrage opportunity
     #[inline]
     pub async fn check_path(
@@ -98,10 +92,30 @@ impl ArbitrageDetector {
     ) -> Option<ArbitrageOpportunity> {
         let start_time = Instant::now();
 
-        // Get orderbook top of book for each leg
-        let first_tob = self.orderbook_manager.get_top_of_book(&path.first_symbol).await?;
-        let second_tob = self.orderbook_manager.get_top_of_book(&path.second_symbol).await?;
-        let third_tob = self.orderbook_manager.get_top_of_book(&path.third_symbol).await?;
+        // Get orderbooks for each symbol in the path
+        let books = self.orderbook_manager.books.read().await;
+        let first_book = books.get(&path.first_symbol)?.clone();
+        let second_book = books.get(&path.second_symbol)?.clone();
+        let third_book = books.get(&path.third_symbol)?.clone();
+
+        // Drop the read lock early
+        drop(books);
+        info!("fbook {}", first_book.asks.read().await.len());
+        info!(
+            "synced {} {} {}",
+            first_book.is_synced(),
+            second_book.is_synced(),
+            third_book.is_synced()
+        );
+        // Check if all books are synced
+        if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
+            return None;
+        }
+
+        // Get current snapshots (top of book)
+        let first_tob = first_book.snapshot().await;
+        let second_tob = second_book.snapshot().await;
+        let third_tob = third_book.snapshot().await;
 
         // Extract prices based on trade direction (with early returns to avoid allocations)
         let first_price = if path.first_is_base_to_quote {
@@ -128,7 +142,7 @@ impl ArbitrageDetector {
             third_tob.1.as_ref().map(|l| f64_to_decimal(l.price))?
         };
 
-        // Calculate amounts through the path
+        // Fast calculation path
         let mut amount = start_amount;
 
         // First leg
@@ -166,113 +180,243 @@ impl ArbitrageDetector {
 
         // Calculate profit ratio
         let profit_ratio = amount / start_amount;
+        info!("profit: {}, amount: {}", profit_ratio, amount);
+        // Fast path: check if profitable early to avoid creating ArbitrageOpportunity
+        if profit_ratio <= dec!(1.0) + self.min_profit_threshold {
+            return None;
+        }
 
         // Compute execution time
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
-        // Check if profitable (threshold comparison)
-        if profit_ratio > dec!(1.0) + self.min_profit_threshold {
-            Some(ArbitrageOpportunity {
-                path: Arc::clone(path),
-                profit_ratio,
-                start_amount,
-                end_amount: amount,
-                fee_adjusted: true,
-                execution_time_ms,
-            })
-        } else {
-            None
-        }
+        // Create the opportunity
+        Some(ArbitrageOpportunity {
+            path: Arc::clone(path),
+            profit_ratio,
+            start_amount,
+            end_amount: amount,
+            fee_adjusted: true,
+            execution_time_ms,
+        })
     }
 
-    /// High-performance scan of multiple paths for arbitrage opportunities
-    /// Uses parallel processing for maximum throughput
-    pub async fn scan_paths_parallel(
-        &self,
-        paths: &[Arc<TriangularPath>],
-        start_amount: Decimal
-    ) -> Vec<ArbitrageOpportunity> {
-        let start_time = Instant::now();
-
-        // Create concurrent stream of path checks
-        let opportunities = stream
-            ::iter(paths)
-            .map(|path| {
-                let path_clone = Arc::clone(path);
-                let detector = self;
-                async move { detector.check_path(&path_clone, start_amount).await }
-            })
-            .buffer_unordered(MAX_CONCURRENT_CHECKS) // Process multiple paths concurrently
-            .filter_map(|result| async move { result }) // Filter out None results
-            .collect::<Vec<_>>().await;
-
-        // Sort by profit ratio descending
-        let mut sorted_opportunities = opportunities;
-        sorted_opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
-
-        let scan_time = start_time.elapsed();
-        debug!(
-            "Scanned {} paths in {:.2?}, found {} opportunities",
-            paths.len(),
-            scan_time,
-            sorted_opportunities.len()
-        );
-
-        sorted_opportunities
-    }
-
-    /// Scan multiple paths for arbitrage opportunities (sequential version)
-    /// Returns a Vec of opportunities found (owned, not borrowed)
-    pub async fn scan_paths(
-        &self,
-        paths: &[Arc<TriangularPath>],
-        start_amount: Decimal
-    ) -> Vec<ArbitrageOpportunity> {
-        let mut opportunities = self.opportunity_cache.lock().await;
-        opportunities.clear();
-
-        for path in paths {
-            if let Some(opportunity) = self.check_path(path, start_amount).await {
-                // Only log occasionally to reduce allocations
-                if opportunities.len() < 3 {
-                    debug!(
-                        path = ?opportunity.path.first_symbol,
-                        profit_pct = %opportunity.profit_percentage(),
-                        "Found arbitrage opportunity"
-                    );
-                }
-                opportunities.push(opportunity);
-            }
-        }
-
-        // Sort by profit ratio descending
-        opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
-
-        // Return a clone of the opportunities (avoids the reference issue)
-        // This is a bit less efficient but still reuses the same allocation
-        opportunities.clone()
-    }
-
-    /// Get the top N opportunities
-    pub fn top_opportunities(
-        opportunities: &[ArbitrageOpportunity],
-        n: usize
-    ) -> Vec<&ArbitrageOpportunity> {
-        opportunities.iter().take(n).collect()
-    }
-
-    /// Print arbitrage opportunities that exceed threshold
-    pub fn print_opportunities(&self, opportunities: &[ArbitrageOpportunity]) {
-        if opportunities.is_empty() {
+    /// Handle an orderbook update
+    pub fn handle_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
+        // Skip if book not synced
+        if !book.is_synced() {
             return;
         }
 
-        println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
+        let symbol_str = symbol.to_string();
 
-        for (i, opp) in opportunities.iter().enumerate() {
-            println!("#{}: {}", i + 1, opp.display());
+        // Skip if recently processed
+        let now = Instant::now();
+        {
+            if let Some(last_processed) = self.processed_symbols.get(&symbol_str) {
+                if last_processed.elapsed().as_millis() < (SYMBOL_COOLDOWN_MS as u128) {
+                    return;
+                }
+            }
+            // Update processed timestamp
+            self.processed_symbols.insert(symbol_str.clone(), now);
         }
 
-        println!("{}\n", "=============================".bright_purple().bold());
+        // Find affected paths and process them
+        if let Some(path_indices) = self.symbol_to_paths.get(&symbol_str) {
+            let indices = path_indices.clone(); // Clone the small Vec of indices
+
+            // Drop the reference to unblock the map
+            drop(path_indices);
+
+            // Only spawn a task if we actually have paths to check
+            if !indices.is_empty() {
+                // Increment the stats counter
+                self.stats_counter.fetch_add(1, Ordering::Relaxed);
+
+                // Clone context for the task
+                let state = self.clone();
+                let start_amount = self.start_amount;
+
+                // Spawn lightweight task to avoid blocking the callback
+                tokio::spawn(async move {
+                    // Create a temporary buffer for path references
+                    let mut paths_to_check = Vec::with_capacity(indices.len());
+
+                    // Get paths to check
+                    for &idx in &indices {
+                        if let Some(path) = state.all_paths.get(idx) {
+                            paths_to_check.push(Arc::clone(path));
+                        }
+                    }
+
+                    // Skip if no paths to check
+                    if paths_to_check.is_empty() {
+                        return;
+                    }
+
+                    // Scan the affected paths
+                    let mut opportunities = Vec::new();
+
+                    for path in &paths_to_check {
+                        if let Some(opportunity) = state.check_path(path, start_amount).await {
+                            opportunities.push(opportunity);
+                        }
+                        info!("check {:?}", path);
+                    }
+
+                    // Process opportunities
+                    if !opportunities.is_empty() {
+                        // Increment profit counter
+                        state.profit_counter.fetch_add(opportunities.len(), Ordering::Relaxed);
+
+                        // Sort by profit ratio descending
+                        opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
+
+                        // Print opportunities
+                        if !opportunities.is_empty() {
+                            println!(
+                                "\n{}",
+                                "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold()
+                            );
+
+                            for (i, opp) in opportunities.iter().enumerate() {
+                                println!("#{}: {}", i + 1, opp.display());
+                            }
+
+                            println!(
+                                "{}\n",
+                                "=============================".bright_purple().bold()
+                            );
+                        }
+                    }
+                });
+            }
+        }
     }
+
+    /// Run a periodic task to print statistics
+    pub async fn run_stats_task(&self) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+
+        loop {
+            interval.tick().await;
+
+            let scans = self.stats_counter.swap(0, Ordering::Relaxed);
+            let profits = self.profit_counter.swap(0, Ordering::Relaxed);
+
+            info!(
+                "Arbitrage stats: {} update triggers processed, {} profitable opportunities found",
+                scans,
+                profits
+            );
+        }
+    }
+}
+
+// Make state cloneable
+impl Clone for ArbitrageDetectorState {
+    fn clone(&self) -> Self {
+        Self {
+            orderbook_manager: self.orderbook_manager.clone(),
+            fee_rate: self.fee_rate,
+            one_minus_fee: self.one_minus_fee,
+            min_profit_threshold: self.min_profit_threshold,
+            symbol_to_paths: self.symbol_to_paths.clone(),
+            all_paths: self.all_paths.clone(),
+            processed_symbols: self.processed_symbols.clone(),
+            stats_counter: self.stats_counter.clone(),
+            profit_counter: self.profit_counter.clone(),
+            start_amount: self.start_amount,
+        }
+    }
+}
+
+/// Create a new event-driven arbitrage detector
+pub async fn create_event_driven_detector(
+    orderbook_manager: Arc<OrderBookManager>,
+    fee_rate: Decimal,
+    min_profit_threshold: Decimal,
+    paths: Vec<Arc<TriangularPath>>,
+    start_amount: Decimal
+) -> Arc<ArbitrageDetectorState> {
+    // Build symbol to paths mapping with pre-allocation
+    let symbol_to_paths = Arc::new(DashMap::with_capacity(paths.len() * 3));
+
+    // Build symbol to paths mapping
+    for (i, path) in paths.iter().enumerate() {
+        let first = path.first_symbol.to_string();
+        let second = path.second_symbol.to_string();
+        let third = path.third_symbol.to_string();
+
+        symbol_to_paths
+            .entry(first)
+            .or_insert_with(|| Vec::with_capacity(10))
+            .push(i);
+        symbol_to_paths
+            .entry(second)
+            .or_insert_with(|| Vec::with_capacity(10))
+            .push(i);
+        symbol_to_paths
+            .entry(third)
+            .or_insert_with(|| Vec::with_capacity(10))
+            .push(i);
+    }
+
+    let processed_symbols = Arc::new(DashMap::with_capacity(1000));
+    let all_paths = Arc::new(paths);
+    let stats_counter = Arc::new(AtomicUsize::new(0));
+    let profit_counter = Arc::new(AtomicUsize::new(0));
+
+    let detector_state = Arc::new(ArbitrageDetectorState {
+        orderbook_manager: orderbook_manager.clone(),
+        fee_rate,
+        one_minus_fee: dec!(1.0) - fee_rate,
+        min_profit_threshold,
+        symbol_to_paths: symbol_to_paths.clone(),
+        all_paths: all_paths.clone(),
+        processed_symbols: processed_symbols.clone(),
+        stats_counter: stats_counter.clone(),
+        profit_counter: profit_counter.clone(),
+        start_amount,
+    });
+
+    // Register callback with orderbook manager
+    let callback_state = detector_state.clone();
+    orderbook_manager.register_update_callback(
+        Arc::new(move |symbol, book| {
+            callback_state.handle_update(symbol, book);
+        })
+    ).await;
+
+    // Start a task to periodically print stats
+    let stats_state = detector_state.clone();
+    tokio::spawn(async move {
+        stats_state.run_stats_task().await;
+    });
+
+    // Return the detector state
+    detector_state
+}
+
+/// Print arbitrage opportunities that exceed threshold
+pub fn print_opportunities(opportunities: &[ArbitrageOpportunity]) {
+    if opportunities.is_empty() {
+        return;
+    }
+
+    println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
+
+    for (i, opp) in opportunities.iter().enumerate() {
+        println!("#{}: {}", i + 1, opp.display());
+    }
+
+    println!("{}\n", "=============================".bright_purple().bold());
+}
+
+/// Get the top N opportunities
+pub fn top_opportunities(
+    opportunities: &[ArbitrageOpportunity],
+    n: usize
+) -> Vec<&ArbitrageOpportunity> {
+    opportunities.iter().take(n).collect()
 }

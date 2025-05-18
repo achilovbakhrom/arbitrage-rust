@@ -1,7 +1,6 @@
 // src/orderbook/manager.rs
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{ RwLock, Mutex };
 use tracing::{ debug, error, warn };
@@ -13,7 +12,9 @@ use crate::enums::side::Side;
 use crate::exchange::client::ExchangeClient;
 use super::orderbook::OrderBook;
 
-/// Manages multiple orderbooks for different symbols
+// Use a trait object callback for maximum flexibility and zero overhead
+pub type OrderbookUpdateCallback = Arc<dyn Fn(&Arc<str>, &Arc<OrderBook>) + Send + Sync>;
+
 pub struct OrderBookManager {
     /// Maps symbol to orderbook
     pub books: RwLock<HashMap<Arc<str>, Arc<OrderBook>>>,
@@ -25,6 +26,9 @@ pub struct OrderBookManager {
     recovery_mutex: Mutex<()>,
     /// Tracks last recovery attempt per symbol to avoid too frequent retries
     last_recovery: RwLock<HashMap<Arc<str>, Instant>>,
+
+    // New field: update callbacks
+    update_callbacks: RwLock<Vec<OrderbookUpdateCallback>>,
 }
 
 impl OrderBookManager {
@@ -35,11 +39,37 @@ impl OrderBookManager {
         exchange_client: Arc<dyn ExchangeClient + Send + Sync>
     ) -> Self {
         Self {
-            books: RwLock::new(HashMap::with_capacity(100)),
+            books: RwLock::new(HashMap::with_capacity(1000)), // Pre-allocate capacity
             default_depth,
             exchange_client,
             recovery_mutex: Mutex::new(()),
-            last_recovery: RwLock::new(HashMap::new()),
+            last_recovery: RwLock::new(HashMap::with_capacity(1000)), // Pre-allocate
+            update_callbacks: RwLock::new(Vec::with_capacity(10)), // Typically few callbacks
+        }
+    }
+
+    /// Register a callback to be notified when an orderbook is updated
+    #[inline]
+    pub async fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
+        let mut callbacks = self.update_callbacks.write().await;
+        callbacks.push(callback);
+    }
+
+    /// Notify all registered callbacks about an orderbook update
+    /// Optimized to avoid unnecessary locking and cloning
+    #[inline]
+    async fn notify_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
+        // Fast path: first check if we have any callbacks at all
+        {
+            let callbacks = self.update_callbacks.read().await;
+            if callbacks.is_empty() {
+                return;
+            }
+
+            // Execute callbacks without holding the lock
+            for callback in callbacks.iter() {
+                callback(symbol, book);
+            }
         }
     }
 
@@ -69,6 +99,7 @@ impl OrderBookManager {
     }
 
     /// Apply a snapshot to initialize or reset an orderbook
+    #[inline]
     pub async fn apply_snapshot(
         &self,
         symbol: Arc<str>,
@@ -76,37 +107,55 @@ impl OrderBookManager {
         asks: &[(f64, f64)],
         last_update_id: u64
     ) {
+        // Fast check first - do we have any callbacks?
+        let has_callbacks = {
+            let callbacks = self.update_callbacks.read().await;
+            !callbacks.is_empty()
+        };
+
         let book = self.get_or_create_book(&symbol).await;
 
-        // Convert to Level structs
-        let bids_levels: Vec<Level> = bids
-            .iter()
-            .map(|(price, qty)| Level { price: *price, quantity: *qty })
-            .collect();
+        // Convert to Level structs with pre-allocation
+        let bids_len = bids.len().min(self.default_depth);
+        let asks_len = asks.len().min(self.default_depth);
 
-        let asks_levels: Vec<Level> = asks
-            .iter()
-            .map(|(price, qty)| Level { price: *price, quantity: *qty })
-            .collect();
+        let mut bids_levels = Vec::with_capacity(bids_len);
+        let mut asks_levels = Vec::with_capacity(asks_len);
+
+        for (price, qty) in bids.iter().take(bids_len) {
+            bids_levels.push(Level { price: *price, quantity: *qty });
+        }
+
+        for (price, qty) in asks.iter().take(asks_len) {
+            asks_levels.push(Level { price: *price, quantity: *qty });
+        }
 
         // Apply the snapshot
         book.apply_snapshot(bids_levels, asks_levels, last_update_id).await;
 
         // Reset recovery tracker
-        let mut last_recovery = self.last_recovery.write().await;
-        last_recovery.remove(&symbol);
+        {
+            let mut last_recovery = self.last_recovery.write().await;
+            last_recovery.remove(&symbol);
+        }
+
+        // Notify callbacks about the update if we have any
+        if has_callbacks {
+            self.notify_update(&symbol, &book).await;
+        }
 
         // Log the snapshot application
         debug!(
             symbol = %symbol,
             update_id = last_update_id,
-            bid_count = bids.len(),
-            ask_count = asks.len(),
+            bid_count = bids_len,
+            ask_count = asks_len,
             "Applied orderbook snapshot"
         );
     }
 
-    /// Apply incremental depth update - optimized fast path
+    /// Apply incremental depth update - high performance implementation
+    #[inline]
     pub async fn apply_depth_update(
         &self,
         symbol: &Arc<str>,
@@ -115,10 +164,16 @@ impl OrderBookManager {
         first_update_id: u64,
         last_update_id: u64
     ) -> bool {
+        // Fast check first - do we have any callbacks?
+        let has_callbacks = {
+            let callbacks = self.update_callbacks.read().await;
+            !callbacks.is_empty()
+        };
+
         // Get existing book without creating if missing
         let books = self.books.read().await;
         let book = match books.get(symbol) {
-            Some(book) => book,
+            Some(book) => book.clone(), // Clone Arc, not the data
             None => {
                 // If book doesn't exist, we trigger recovery process
                 drop(books); // Release lock first
@@ -127,9 +182,18 @@ impl OrderBookManager {
             }
         };
 
+        // Release the read lock before applying the update
+        drop(books);
+
         // Try to apply the update (fast path)
         match book.apply_depth_update(bids, asks, first_update_id, last_update_id).await {
-            Ok(true) => true, // Update applied successfully
+            Ok(true) => {
+                // Update applied successfully - only notify if we have callbacks
+                if has_callbacks {
+                    self.notify_update(symbol, &book).await;
+                }
+                true
+            }
             Ok(false) => {
                 // Book needs recovery, trigger async recovery
                 self.trigger_recovery(symbol).await;
@@ -423,18 +487,7 @@ impl Clone for OrderBookManager {
             exchange_client: self.exchange_client.clone(), // Clone the Arc
             recovery_mutex: Mutex::new(()), // Create new mutex
             last_recovery: RwLock::new(HashMap::new()), // Create new map
+            update_callbacks: RwLock::new(Vec::new()), // Create new callbacks list
         }
-    }
-}
-
-impl fmt::Debug for OrderBookManager {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OrderBookManager")
-            .field("books", &self.books)
-            .field("default_depth", &self.default_depth)
-            .field("exchange_client", &"<dyn ExchangeClient>")
-            .field("recovery_mutex", &self.recovery_mutex)
-            .field("last_recovery", &self.last_recovery)
-            .finish()
     }
 }
