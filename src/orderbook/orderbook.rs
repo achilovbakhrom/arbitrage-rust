@@ -3,7 +3,7 @@ use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use ordered_float::OrderedFloat;
 use crate::models::level::Level;
 use tokio::sync::{ RwLock, Mutex };
-use tracing::{ debug, info };
+use tracing::debug;
 use std::fmt;
 
 /// Current state of the orderbook
@@ -135,7 +135,6 @@ impl OrderBook {
         first_update_id: u64, // 'U' in Binance docs
         last_update_id: u64 // 'u' in Binance docs
     ) -> Result<bool, ()> {
-        debug!("apply_depth_update {:?}", self.get_state());
         // Check if we're synced
         if self.get_state() != OrderBookState::Synced {
             debug!("Order book not synced, cannot apply update");

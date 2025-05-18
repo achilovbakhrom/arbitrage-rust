@@ -1,5 +1,3 @@
-// src/orderbook/manager.rs
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{ RwLock, Mutex };
@@ -16,18 +14,18 @@ pub type OrderbookUpdateCallback = Arc<dyn Fn(&Arc<str>, &Arc<OrderBook>) + Send
 
 pub struct OrderBookManager {
     /// Maps symbol to orderbook
-    pub books: RwLock<HashMap<Arc<str>, Arc<OrderBook>>>,
+    pub books: Arc<RwLock<HashMap<Arc<str>, Arc<OrderBook>>>>,
     /// Default depth to use for new orderbooks
     default_depth: usize,
     /// Exchange client for API requests
     exchange_client: Arc<dyn ExchangeClient + Send + Sync>,
     /// Mutex for the recovery process
-    recovery_mutex: Mutex<()>,
+    recovery_mutex: Arc<Mutex<()>>,
     /// Tracks last recovery attempt per symbol to avoid too frequent retries
-    last_recovery: RwLock<HashMap<Arc<str>, Instant>>,
+    last_recovery: Arc<RwLock<HashMap<Arc<str>, Instant>>>,
 
     // New field: update callbacks
-    update_callbacks: RwLock<Vec<OrderbookUpdateCallback>>,
+    update_callbacks: Arc<RwLock<Vec<OrderbookUpdateCallback>>>,
 }
 
 impl OrderBookManager {
@@ -38,12 +36,12 @@ impl OrderBookManager {
         exchange_client: Arc<dyn ExchangeClient + Send + Sync>
     ) -> Self {
         Self {
-            books: RwLock::new(HashMap::with_capacity(1000)), // Pre-allocate capacity
+            books: Arc::new(RwLock::new(HashMap::with_capacity(1000))), // Pre-allocate capacity
             default_depth,
             exchange_client,
-            recovery_mutex: Mutex::new(()),
-            last_recovery: RwLock::new(HashMap::with_capacity(1000)), // Pre-allocate
-            update_callbacks: RwLock::new(Vec::with_capacity(10)), // Typically few callbacks
+            recovery_mutex: Arc::new(Mutex::new(())),
+            last_recovery: Arc::new(RwLock::new(HashMap::with_capacity(1000))), // Pre-allocate
+            update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))), // Typically few callbacks
         }
     }
 
@@ -97,7 +95,6 @@ impl OrderBookManager {
         }
     }
 
-    // Updated src/orderbook/manager.rs
     pub async fn apply_snapshot(
         &self,
         symbol: Arc<str>,
@@ -441,16 +438,16 @@ impl OrderBookManager {
     }
 }
 
-// Clone implementation for OrderBookManager to use in async tasks
+// Proper Clone implementation for OrderBookManager that preserves all data
 impl Clone for OrderBookManager {
     fn clone(&self) -> Self {
         Self {
-            books: RwLock::new(HashMap::new()), // Create new empty map
+            books: self.books.clone(), // Clone Arc, not creating new empty map
             default_depth: self.default_depth,
-            exchange_client: self.exchange_client.clone(), // Clone the Arc
-            recovery_mutex: Mutex::new(()), // Create new mutex
-            last_recovery: RwLock::new(HashMap::new()), // Create new map
-            update_callbacks: RwLock::new(Vec::new()), // Create new callbacks list
+            exchange_client: self.exchange_client.clone(),
+            recovery_mutex: self.recovery_mutex.clone(), // Clone Arc<Mutex>
+            last_recovery: self.last_recovery.clone(), // Clone Arc, not creating new empty map
+            update_callbacks: self.update_callbacks.clone(), // Clone Arc, not creating new empty vector
         }
     }
 }
