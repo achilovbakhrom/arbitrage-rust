@@ -17,15 +17,18 @@ use crate::models::sbe::{
 // Use the official endpoint as per Binance documentation
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
 
-pub struct BinanceSbeClient {
+type DepthCallback<F> = F;
+
+pub struct BinanceSbeClient<F>
+    where F: Fn(&str, [(f64, f64); 100], [(f64, f64); 100], u64, u64) + Send + Sync + 'static {
     api_key: Arc<str>,
     endpoint: String,
-    depth_callback: RwLock<
-        Option<Box<dyn Fn(&str, &[(f64, f64)], &[(f64, f64)], u64, u64) + Send + Sync>>
-    >,
+    depth_callback: RwLock<Option<F>>,
 }
 
-impl BinanceSbeClient {
+impl<F> BinanceSbeClient<F>
+    where F: Fn(&str, [(f64, f64); 100], [(f64, f64); 100], u64, u64) + Send + Sync + 'static
+{
     pub fn new(api_key: String) -> Self {
         Self {
             api_key: api_key.into(),
@@ -150,16 +153,13 @@ impl BinanceSbeClient {
     }
 
     #[inline]
-    pub async fn set_depth_callback(
-        &self,
-        callback: Box<dyn Fn(&str, &[(f64, f64)], &[(f64, f64)], u64, u64) + Send + Sync>
-    ) {
+    pub async fn set_depth_callback(&self, callback: F) {
         let mut cb = self.depth_callback.write().await;
         *cb = Some(callback);
     }
 
-    #[inline]
-    async fn handle_binary_message(&self, data: &[u8]) -> Result<()> {
+    // Private implementation that can fail
+    async fn handle_binary_message_inner(&self, data: &[u8]) -> Result<()> {
         // Safety check for minimum header size first
         if data.len() < message_header_codec::ENCODED_LENGTH {
             debug!("Message too small for SBE header: {} bytes", data.len());
@@ -435,11 +435,14 @@ impl BinanceSbeClient {
 
             // Finally, call the callback if set
             let cb_guard = self.depth_callback.read().await;
+
             if let Some(cb) = cb_guard.as_ref() {
                 cb(
                     symbol,
-                    &bids[0..actual_bids_count.min(bids.len())], // Ensure we don't exceed array bounds
-                    &asks[0..actual_asks_count.min(asks.len())], // Ensure we don't exceed array bounds
+                    // bids[0..actual_bids_count.min(bids.len())], // Ensure we don't exceed array bounds
+                    // asks[0..actual_asks_count.min(asks.len())], // Ensure we don't exceed array bounds
+                    bids,
+                    asks,
                     first_update_id as u64,
                     last_update_id as u64
                 );
@@ -452,5 +455,17 @@ impl BinanceSbeClient {
         }
 
         Ok(())
+    }
+
+    #[inline]
+    async fn handle_binary_message(&self, data: &[u8]) -> Result<()> {
+        match self.handle_binary_message_inner(data).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Log the error but don't propagate it
+                debug!("Error in message handling, continuing: {:?}", e);
+                Ok(())
+            }
+        }
     }
 }

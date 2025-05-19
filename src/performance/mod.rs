@@ -491,80 +491,78 @@ pub async fn run_performance_test(
     let test_state_for_cb = test_state.clone();
     let orderbook_manager_clone = orderbook_manager.clone();
 
-    client.set_depth_callback(
-        Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
-            // Skip if test is complete
-            if test_state_for_cb.is_complete() {
-                return;
+    client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
+        // Skip if test is complete
+        if test_state_for_cb.is_complete() {
+            return;
+        }
+
+        let test_state = test_state_for_cb.clone();
+        let detection_times = detection_times_for_cb.clone();
+        let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
+        let bids_cloned = bids.to_vec();
+        let asks_cloned = asks.to_vec();
+        let symbol_str = symbol.to_string();
+        let orderbook_manager = orderbook_manager_clone.clone();
+
+        // Record the time measurements in a separate task
+        tokio::spawn(async move {
+            // Start measuring total processing time
+            let total_start = Instant::now();
+
+            // Measure SBE receive time (estimate - we can't measure this exactly)
+            let sbe_receive_time = Duration::from_micros(200); // Estimated value
+
+            // Measure orderbook update time
+            let orderbook_update_start = Instant::now();
+
+            // Apply the update to orderbook
+            let _ = orderbook_manager.apply_depth_update(
+                &symbol_arc,
+                &bids_cloned,
+                &asks_cloned,
+                first_update_id,
+                last_update_id
+            ).await;
+
+            let orderbook_update_time = orderbook_update_start.elapsed();
+
+            // Retrieve the arbitrage detection time
+            let arbitrage_detection_time;
+            {
+                let times = detection_times.lock().await;
+                if let Some((_, time)) = times.get(&symbol_str) {
+                    arbitrage_detection_time = *time;
+                } else {
+                    // If no detection time was recorded, use a default value
+                    arbitrage_detection_time = Duration::from_micros(50);
+                }
             }
 
-            let test_state = test_state_for_cb.clone();
-            let detection_times = detection_times_for_cb.clone();
-            let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
-            let bids_cloned = bids.to_vec();
-            let asks_cloned = asks.to_vec();
-            let symbol_str = symbol.to_string();
-            let orderbook_manager = orderbook_manager_clone.clone();
+            // Get opportunity data
+            let opportunity_data = test_state.get_opportunity_data(&symbol_str).await;
 
-            // Record the time measurements in a separate task
-            tokio::spawn(async move {
-                // Start measuring total processing time
-                let total_start = Instant::now();
+            // Total processing time
+            let total_processing_time = total_start.elapsed();
 
-                // Measure SBE receive time (estimate - we can't measure this exactly)
-                let sbe_receive_time = Duration::from_micros(200); // Estimated value
+            // Create measurement record
+            let measurement = PerformanceMeasurement {
+                timestamp: chrono::Local::now(),
+                sbe_receive_time_us: sbe_receive_time.as_micros() as u64,
+                orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
+                arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
+                total_processing_time_us: total_processing_time.as_micros() as u64,
+                updates_processed: 1,
+                opportunities_found: opportunity_data.count,
+                best_profit_percentage: opportunity_data.best_profit,
+                avg_profit_percentage: opportunity_data.avg_profit,
+                symbol: symbol_str,
+            };
 
-                // Measure orderbook update time
-                let orderbook_update_start = Instant::now();
-
-                // Apply the update to orderbook
-                let _ = orderbook_manager.apply_depth_update(
-                    &symbol_arc,
-                    &bids_cloned,
-                    &asks_cloned,
-                    first_update_id,
-                    last_update_id
-                ).await;
-
-                let orderbook_update_time = orderbook_update_start.elapsed();
-
-                // Retrieve the arbitrage detection time
-                let arbitrage_detection_time;
-                {
-                    let times = detection_times.lock().await;
-                    if let Some((_, time)) = times.get(&symbol_str) {
-                        arbitrage_detection_time = *time;
-                    } else {
-                        // If no detection time was recorded, use a default value
-                        arbitrage_detection_time = Duration::from_micros(50);
-                    }
-                }
-
-                // Get opportunity data
-                let opportunity_data = test_state.get_opportunity_data(&symbol_str).await;
-
-                // Total processing time
-                let total_processing_time = total_start.elapsed();
-
-                // Create measurement record
-                let measurement = PerformanceMeasurement {
-                    timestamp: chrono::Local::now(),
-                    sbe_receive_time_us: sbe_receive_time.as_micros() as u64,
-                    orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
-                    arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
-                    total_processing_time_us: total_processing_time.as_micros() as u64,
-                    updates_processed: 1,
-                    opportunities_found: opportunity_data.count,
-                    best_profit_percentage: opportunity_data.best_profit,
-                    avg_profit_percentage: opportunity_data.avg_profit,
-                    symbol: symbol_str,
-                };
-
-                // Record the measurement
-                test_state.record_measurement(measurement).await;
-            });
-        })
-    ).await;
+            // Record the measurement
+            test_state.record_measurement(measurement).await;
+        });
+    }).await;
 
     // Connect to WebSocket
     let mut ws_stream = client.connect().await?;

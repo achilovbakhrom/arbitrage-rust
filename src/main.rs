@@ -11,19 +11,17 @@ mod performance;
 
 use std::time::Duration;
 use std::sync::Arc;
-use colored::Colorize;
 use models::symbol_map::SymbolMap;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::time::{ sleep, timeout };
-use tokio::signal;
 
 use config::Config;
 use anyhow::{ anyhow, Context, Result };
 
 use exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient };
-use tracing::{ debug, error, info, warn };
+use tracing::{ error, info, warn };
 use utils::{ console::{ print_app_started, print_app_starting, print_config }, logging };
 use orderbook::manager::OrderBookManager;
 
@@ -228,32 +226,23 @@ async fn run_normal_mode(config: Config) -> Result<()> {
             }
 
             // Set up depth update callback
-            client.set_depth_callback(
-                Box::new(move |symbol, bids, asks, first_update_id, last_update_id| {
-                    if symbol.trim().is_empty() {
-                        error!("Received empty symbol in depth update");
-                        return;
-                    }
+            client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
+                // Clone the data to avoid lifetime issues with the spawned task
+                let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
+                let manager = manager_for_msg_task.clone();
 
-                    // Clone the data to avoid lifetime issues with the spawned task
-                    let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
-                    let bids_cloned = bids.to_vec();
-                    let asks_cloned = asks.to_vec();
-                    let manager = manager_for_msg_task.clone();
-
-                    // Spawn a task to update the orderbook without blocking the WebSocket
-                    tokio::spawn(async move {
-                        // Apply depth update - this will trigger the arbitrage detector via callbacks
-                        manager.apply_depth_update(
-                            &symbol_arc,
-                            &bids_cloned,
-                            &asks_cloned,
-                            first_update_id,
-                            last_update_id
-                        ).await;
-                    });
-                })
-            ).await;
+                // Spawn a task to update the orderbook without blocking the WebSocket
+                tokio::spawn(async move {
+                    // Apply depth update - this will trigger the arbitrage detector via callbacks
+                    manager.apply_depth_update(
+                        &symbol_arc,
+                        &bids,
+                        &asks,
+                        first_update_id,
+                        last_update_id
+                    ).await;
+                });
+            }).await;
 
             // Process WebSocket messages
             if let Err(e) = client.process_messages(&mut ws_stream).await {
