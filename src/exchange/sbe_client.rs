@@ -17,8 +17,6 @@ use crate::models::sbe::{
 // Use the official endpoint as per Binance documentation
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
 
-type DepthCallback<F> = F;
-
 pub struct BinanceSbeClient<F>
     where F: Fn(&str, [(f64, f64); 100], [(f64, f64); 100], u64, u64) + Send + Sync + 'static {
     api_key: Arc<str>,

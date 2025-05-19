@@ -93,13 +93,10 @@ impl ArbitrageDetectorState {
         let start_time = Instant::now();
 
         // Get orderbooks for each symbol in the path
-        let books = self.orderbook_manager.books.read().await;
+        let books = &self.orderbook_manager.books;
         let first_book = books.get(&path.first_symbol)?.clone();
         let second_book = books.get(&path.second_symbol)?.clone();
         let third_book = books.get(&path.third_symbol)?.clone();
-
-        // Drop the read lock early
-        drop(books);
 
         // Check if all books are synced
         if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
