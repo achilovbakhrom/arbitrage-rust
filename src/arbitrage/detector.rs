@@ -100,13 +100,7 @@ impl ArbitrageDetectorState {
 
         // Drop the read lock early
         drop(books);
-        info!("fbook {}", first_book.asks.read().await.len());
-        info!(
-            "synced {} {} {}",
-            first_book.is_synced(),
-            second_book.is_synced(),
-            third_book.is_synced()
-        );
+
         // Check if all books are synced
         if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
             return None;
@@ -180,7 +174,6 @@ impl ArbitrageDetectorState {
 
         // Calculate profit ratio
         let profit_ratio = amount / start_amount;
-        info!("profit: {}, amount: {}", profit_ratio, amount);
         // Fast path: check if profitable early to avoid creating ArbitrageOpportunity
         if profit_ratio <= dec!(1.0) + self.min_profit_threshold {
             return None;
