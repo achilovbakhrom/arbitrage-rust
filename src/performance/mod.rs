@@ -3,18 +3,18 @@ use std::sync::Arc;
 use std::time::{ Duration, Instant };
 use std::fs::File;
 use std::io::Write;
-use std::collections::{ VecDeque, HashMap };
+use std::collections::VecDeque;
 use std::path::Path;
 use tokio::sync::Mutex;
 use std::process::Command;
 
-use chrono::Local;
 use ordered_float::OrderedFloat;
-use tracing::{ info, warn, error };
+use tracing::{ info, warn };
 
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
-use crate::arbitrage::detector::{ ArbitrageDetectorState, ArbitrageOpportunity };
+use crate::arbitrage::detector::ArbitrageDetectorState;
+use dashmap::DashMap;
 
 // Represents a single performance measurement
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ pub struct PerformanceTestState {
     pub output_file: String,
 
     // Store opportunity tracker for each symbol
-    pub opportunity_tracking: Arc<Mutex<HashMap<String, Vec<f64>>>>,
+    pub opportunity_tracking: Arc<DashMap<String, Vec<f64>>>,
 }
 
 impl PerformanceTestState {
@@ -90,7 +90,7 @@ impl PerformanceTestState {
             start_time: Instant::now(),
             duration: Duration::from_secs(duration_secs),
             output_file,
-            opportunity_tracking: Arc::new(Mutex::new(HashMap::new())),
+            opportunity_tracking: Arc::new(DashMap::new()),
         }
     }
 
@@ -102,17 +102,16 @@ impl PerformanceTestState {
 
     // Track arbitrage opportunities for a symbol
     pub async fn track_opportunity(&self, symbol: &str, profit_percentage: f64) {
-        let mut tracking = self.opportunity_tracking.lock().await;
-
-        // Find existing entry for this symbol or create new one
-        tracking.entry(symbol.to_string()).or_insert_with(Vec::new).push(profit_percentage);
+        self.opportunity_tracking
+            .entry(symbol.to_string())
+            .or_insert_with(Vec::new)
+            .push(profit_percentage);
     }
 
     // Get opportunity data for a symbol
-    pub async fn get_opportunity_data(&self, symbol: &str) -> OpportunityData {
-        let tracking = self.opportunity_tracking.lock().await;
-
-        if let Some(profits) = tracking.get(symbol) {
+    async fn get_opportunity_data(&self, symbol: &str) -> OpportunityData {
+        if let Some(profits_ref) = self.opportunity_tracking.get(symbol) {
+            let profits = &*profits_ref; // Dereference the DashMap reference
             let count = profits.len() as u64;
 
             if !profits.is_empty() {
@@ -185,7 +184,7 @@ impl PerformanceTestState {
         }
 
         // Save the Python analysis script in the same directory
-        let script_path = self.save_analysis_scripts()?;
+        // let script_path = self.save_analysis_scripts()?;
 
         info!(
             "Performance test results saved to: {}. Collected {} measurements over {} seconds",
@@ -259,50 +258,50 @@ impl PerformanceTestState {
     }
 
     // Save the Python analysis script in the performance results directory
-    fn save_analysis_scripts(&self) -> std::io::Result<String> {
-        if let Some(dir) = Path::new(&self.output_file).parent() {
-            // Path to the Python script
-            let python_script_path = dir.join("analyze_performance.py");
-            let bash_script_path = dir.join("analyze_performance.sh");
+    // fn save_analysis_scripts(&self) -> std::io::Result<String> {
+    //     if let Some(dir) = Path::new(&self.output_file).parent() {
+    //         // Path to the Python script
+    //         let python_script_path = dir.join("analyze_performance.py");
+    //         let bash_script_path = dir.join("analyze_performance.sh");
 
-            // Write Python script
-            let mut file = File::create(&python_script_path)?;
-            file.write_all(include_str!("../python_script_content.txt").as_bytes())?;
+    //         // Write Python script
+    //         let mut file = File::create(&python_script_path)?;
+    //         file.write_all(include_str!("../python_script_content.txt").as_bytes())?;
 
-            // Make Python script executable
-            #[cfg(not(windows))]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&python_script_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&python_script_path, perms)?;
-            }
+    //         // Make Python script executable
+    //         #[cfg(not(windows))]
+    //         {
+    //             use std::os::unix::fs::PermissionsExt;
+    //             let mut perms = std::fs::metadata(&python_script_path)?.permissions();
+    //             perms.set_mode(0o755);
+    //             std::fs::set_permissions(&python_script_path, perms)?;
+    //         }
 
-            // Write Bash script
-            let mut bash_file = File::create(&bash_script_path)?;
-            bash_file.write_all(include_str!("../bash_script_content.txt").as_bytes())?;
+    //         // Write Bash script
+    //         let mut bash_file = File::create(&bash_script_path)?;
+    //         bash_file.write_all(include_str!("../bash_script_content.txt").as_bytes())?;
 
-            // Make Bash script executable
-            #[cfg(not(windows))]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&bash_script_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&bash_script_path, perms)?;
-            }
+    //         // Make Bash script executable
+    //         #[cfg(not(windows))]
+    //         {
+    //             use std::os::unix::fs::PermissionsExt;
+    //             let mut perms = std::fs::metadata(&bash_script_path)?.permissions();
+    //             perms.set_mode(0o755);
+    //             std::fs::set_permissions(&bash_script_path, perms)?;
+    //         }
 
-            info!("Analysis scripts saved to: {}", dir.display());
+    //         info!("Analysis scripts saved to: {}", dir.display());
 
-            return Ok(python_script_path.to_string_lossy().to_string());
-        }
+    //         return Ok(python_script_path.to_string_lossy().to_string());
+    //     }
 
-        Err(
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Could not determine parent directory for scripts"
-            )
-        )
-    }
+    //     Err(
+    //         std::io::Error::new(
+    //             std::io::ErrorKind::Other,
+    //             "Could not determine parent directory for scripts"
+    //         )
+    //     )
+    // }
 
     // Try to run the Python analysis script
     fn try_run_analysis(&self, csv_path: &str) -> std::io::Result<()> {
@@ -433,9 +432,7 @@ pub async fn run_performance_test(
     let client = BinanceSbeClient::new(api_key);
 
     // Storage for tracking detection times
-    let detection_times: Arc<Mutex<HashMap<String, (Instant, Duration)>>> = Arc::new(
-        Mutex::new(HashMap::new())
-    );
+    let detection_times: Arc<DashMap<String, (Instant, Duration)>> = Arc::new(DashMap::new());
 
     // Create a custom callback for tracking arbitrage opportunities
     let opportunity_callback = {
@@ -463,11 +460,7 @@ pub async fn run_performance_test(
             // a simpler approach to generate a "random" opportunity
             tokio::spawn(async move {
                 // Store or update the detection time for this symbol
-                let mut times = detection_times.lock().await;
-                times.insert(symbol_str.clone(), (detection_start, detection_time));
-
-                // Drop the lock before we do more work
-                drop(times);
+                detection_times.insert(symbol_str.clone(), (detection_start, detection_time));
 
                 // Use nanoseconds as a source of "randomness" - if it's divisible by 20,
                 // we'll consider it an opportunity (approximately 5% chance)
@@ -530,9 +523,8 @@ pub async fn run_performance_test(
             // Retrieve the arbitrage detection time
             let arbitrage_detection_time;
             {
-                let times = detection_times.lock().await;
-                if let Some((_, time)) = times.get(&symbol_str) {
-                    arbitrage_detection_time = *time;
+                if let Some(entry) = detection_times.get(&symbol_str) {
+                    arbitrage_detection_time = entry.1;
                 } else {
                     // If no detection time was recorded, use a default value
                     arbitrage_detection_time = Duration::from_micros(50);

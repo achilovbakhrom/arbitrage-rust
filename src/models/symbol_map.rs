@@ -1,12 +1,12 @@
 use std::{ collections::{ HashMap, HashSet }, sync::Arc };
 
 use super::{ symbol::Symbol, triangular_path::TriangularPath };
-
+use dashmap::DashMap;
 #[derive(Debug, Clone)]
 pub struct SymbolMap {
-    symbols: HashMap<Arc<str>, Symbol>,
-    by_base: HashMap<Arc<str>, Vec<Symbol>>,
-    by_quote: HashMap<Arc<str>, Vec<Symbol>>,
+    symbols: DashMap<Arc<str>, Symbol>,
+    by_base: DashMap<Arc<str>, Vec<Symbol>>,
+    by_quote: DashMap<Arc<str>, Vec<Symbol>>,
     /// Pre-computed triangular paths
     triangular_paths: Vec<TriangularPath>,
 }
@@ -15,9 +15,9 @@ impl SymbolMap {
     #[inline]
     pub fn new() -> Self {
         Self {
-            symbols: HashMap::with_capacity(1000), // Pre-allocate for typical exchange size
-            by_base: HashMap::with_capacity(200),
-            by_quote: HashMap::with_capacity(50),
+            symbols: DashMap::with_capacity(1000), // Pre-allocate for typical exchange size
+            by_base: DashMap::with_capacity(200),
+            by_quote: DashMap::with_capacity(50),
             triangular_paths: Vec::with_capacity(5000), // Pre-allocate for paths
         }
     }
@@ -55,24 +55,26 @@ impl SymbolMap {
     }
 
     #[inline]
-    pub fn get(&self, symbol: &str) -> Option<&Symbol> {
-        self.symbols.get(symbol)
+    pub fn get(&self, symbol: &str) -> Option<Symbol> {
+        // DashMap get returns a reference, so we need to clone
+        self.symbols.get(symbol).map(|entry| entry.clone())
     }
 
     #[inline]
-    pub fn get_by_base(&self, base_asset: &str) -> &[Symbol] {
+    pub fn get_by_base(&self, base_asset: &str) -> Vec<Symbol> {
         self.by_base
             .get(base_asset)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+            .map(|entry| entry.clone())
+            .unwrap_or_else(Vec::new)
     }
 
     #[inline]
-    pub fn get_by_quote(&self, quote_asset: &str) -> &[Symbol] {
+    pub fn get_by_quote(&self, quote_asset: &str) -> Vec<Symbol> {
+        // DashMap get, converting to Vec since we can't return a reference to internal data
         self.by_quote
             .get(quote_asset)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+            .map(|entry| entry.clone())
+            .unwrap_or_else(Vec::new)
     }
 
     /// Find triangular paths that start and end with a specific asset
@@ -101,7 +103,7 @@ impl SymbolMap {
 
         // Find all paths starting with base_asset (like USDT)
         let base_symbols = match self.by_quote.get(base_asset) {
-            Some(symbols) => symbols.as_slice(),
+            Some(symbols) => symbols,
             None => {
                 tracing::warn!("Base asset {} not found as quote in any symbol", base_asset);
                 return;
@@ -111,7 +113,7 @@ impl SymbolMap {
         tracing::info!("Found {} symbols with {} as quote", base_symbols.len(), base_asset);
 
         // For each starting pair (USDT → X)
-        for first_symbol in base_symbols {
+        for first_symbol in base_symbols.as_slice() {
             let second_asset = &first_symbol.base_asset;
 
             // Skip if second asset is a fiat currency
@@ -245,17 +247,20 @@ impl SymbolMap {
     pub fn get_all_assets(&self) -> Vec<Arc<str>> {
         let mut assets = HashSet::new();
 
-        for symbol in self.symbols.values() {
-            assets.insert(symbol.base_asset.clone());
-            assets.insert(symbol.quote_asset.clone());
+        for entry in self.symbols.iter() {
+            assets.insert(entry.base_asset.clone());
+            assets.insert(entry.quote_asset.clone());
         }
 
         assets.into_iter().collect()
     }
 
     #[inline]
-    pub fn get_all_symbols(&self) -> impl Iterator<Item = &Symbol> {
-        self.symbols.values()
+    pub fn get_all_symbols(&self) -> Vec<Symbol> {
+        self.symbols
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     #[inline]
@@ -285,6 +290,7 @@ impl SymbolMap {
                 result.push(third);
             }
         });
+        println!("Unique symbols: {:?}", result);
 
         return result;
     }

@@ -4,6 +4,7 @@ use tokio::sync::{ RwLock, Mutex };
 use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
 use std::time::{ Duration, Instant };
+use dashmap::DashMap;
 
 use crate::models::level::Level;
 use crate::exchange::client::ExchangeClient;
@@ -14,7 +15,7 @@ pub type OrderbookUpdateCallback = Arc<dyn Fn(&Arc<str>, &Arc<OrderBook>) + Send
 
 pub struct OrderBookManager {
     /// Maps symbol to orderbook
-    pub books: Arc<RwLock<HashMap<Arc<str>, Arc<OrderBook>>>>,
+    pub books: Arc<DashMap<Arc<str>, Arc<OrderBook>>>,
     /// Default depth to use for new orderbooks
     default_depth: usize,
     /// Exchange client for API requests
@@ -22,7 +23,7 @@ pub struct OrderBookManager {
     /// Mutex for the recovery process
     recovery_mutex: Arc<Mutex<()>>,
     /// Tracks last recovery attempt per symbol to avoid too frequent retries
-    last_recovery: Arc<RwLock<HashMap<Arc<str>, Instant>>>,
+    last_recovery: Arc<DashMap<Arc<str>, Instant>>,
 
     // New field: update callbacks
     update_callbacks: Arc<RwLock<Vec<OrderbookUpdateCallback>>>,
@@ -36,11 +37,11 @@ impl OrderBookManager {
         exchange_client: Arc<dyn ExchangeClient + Send + Sync>
     ) -> Self {
         Self {
-            books: Arc::new(RwLock::new(HashMap::with_capacity(1000))), // Pre-allocate capacity
+            books: Arc::new(DashMap::with_capacity(1000)), // Pre-allocate capacity
             default_depth,
             exchange_client,
             recovery_mutex: Arc::new(Mutex::new(())),
-            last_recovery: Arc::new(RwLock::new(HashMap::with_capacity(1000))), // Pre-allocate
+            last_recovery: Arc::new(DashMap::with_capacity(1000)), // Pre-allocate
             update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))), // Typically few callbacks
         }
     }
@@ -72,27 +73,18 @@ impl OrderBookManager {
 
     /// Get or create an orderbook for a symbol - fast path optimized
     pub async fn get_or_create_book(&self, symbol: &Arc<str>) -> Arc<OrderBook> {
-        // First try read lock for faster path
-        {
-            let books = self.books.read().await;
-            if let Some(book) = books.get(symbol) {
-                return book.clone();
-            }
+        if let Some(book) = self.books.get(symbol) {
+            return book.clone();
         }
 
-        // Not found, upgrade to write lock
-        let mut books = self.books.write().await;
+        // Not found, insert if absent (atomic operation with DashMap)
+        let book = Arc::new(OrderBook::new(self.default_depth));
 
-        // Double-check in case another thread created it while we were waiting
-        match books.get(symbol) {
-            Some(book) => book.clone(),
-            None => {
-                let book = Arc::new(OrderBook::new(self.default_depth));
-                books.insert(symbol.clone(), book.clone());
-                debug!(?symbol, "Created new orderbook");
-                book
-            }
-        }
+        // Note: entry API ensures atomic get_or_insert
+        let result = self.books.entry(symbol.clone()).or_insert(book).clone();
+        debug!(?symbol, "Created new orderbook");
+
+        result
     }
 
     pub async fn apply_snapshot(
@@ -119,11 +111,8 @@ impl OrderBookManager {
         // Apply the snapshot
         book.apply_snapshot(bids_levels, asks_levels, last_update_id).await;
 
-        // Reset recovery tracker
-        {
-            let mut last_recovery = self.last_recovery.write().await;
-            last_recovery.remove(&symbol);
-        }
+        // Reset recovery tracker - using DashMap remove
+        self.last_recovery.remove(&symbol);
 
         // Notify callbacks about the update
         self.notify_update(&symbol, &book).await;
@@ -144,25 +133,20 @@ impl OrderBookManager {
         }
 
         // Check if we've attempted recovery recently (don't spam with requests)
-        {
-            let last_recovery = self.last_recovery.read().await;
-            if let Some(last_time) = last_recovery.get(symbol) {
-                if last_time.elapsed() < Duration::from_secs(3) {
-                    debug!(
-                        symbol = %symbol,
-                        "Skipping recovery, too soon since last attempt: {:?}",
-                        last_time.elapsed()
-                    );
-                    return;
-                }
+        // Using DashMap get instead of RwLock read
+        if let Some(last_time) = self.last_recovery.get(symbol) {
+            if last_time.elapsed() < Duration::from_secs(3) {
+                debug!(
+                    symbol = %symbol,
+                    "Skipping recovery, too soon since last attempt: {:?}",
+                    last_time.elapsed()
+                );
+                return;
             }
         }
 
-        // Mark that we're attempting recovery
-        {
-            let mut last_recovery = self.last_recovery.write().await;
-            last_recovery.insert(symbol.clone(), Instant::now());
-        }
+        // Mark that we're attempting recovery - using DashMap insert
+        self.last_recovery.insert(symbol.clone(), Instant::now());
 
         // Clone what we need for the task
         let symbol_clone = symbol.clone();
@@ -239,14 +223,12 @@ impl OrderBookManager {
         first_update_id: u64,
         last_update_id: u64
     ) -> bool {
-        // Get existing book without creating if missing
+        // Get existing book without creating if missing - using DashMap get
         let book = {
-            let books = self.books.read().await;
-            match books.get(symbol) {
-                Some(book) => book.clone(),
+            match self.books.get(symbol) {
+                Some(book_ref) => book_ref.clone(),
                 None => {
                     // If book doesn't exist, we trigger recovery process
-                    drop(books);
                     debug!(
                         symbol = %symbol,
                         "Book doesn't exist, triggering recovery"
@@ -294,13 +276,11 @@ impl OrderBookManager {
         &self,
         symbol: &Arc<str>
     ) -> Option<(Option<Level>, Option<Level>)> {
-        // Fast path - read only
-        let books = self.books.read().await;
-        match books.get(symbol) {
-            Some(book) if book.is_synced() => { Some(book.snapshot().await) }
+        // Fast path with DashMap
+        match self.books.get(symbol) {
+            Some(book_ref) if book_ref.is_synced() => { Some(book_ref.snapshot().await) }
             Some(_) => {
                 // Book exists but not in sync, trigger recovery without waiting
-                drop(books);
                 self.trigger_recovery(symbol).await;
                 None
             }
@@ -338,27 +318,23 @@ impl OrderBookManager {
 
     /// Check if an orderbook is initialized
     pub async fn is_initialized(&self, symbol: &Arc<str>) -> bool {
-        let books = self.books.read().await;
-        if let Some(book) = books.get(symbol) {
-            book.is_synced()
-        } else {
-            false
-        }
+        if let Some(book_ref) = self.books.get(symbol) { book_ref.is_synced() } else { false }
     }
 
     /// Get all the symbols that have orderbooks
     pub async fn get_symbols(&self) -> Vec<Arc<str>> {
-        let books = self.books.read().await;
-        books.keys().cloned().collect()
+        self.books
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// Get statistics about all orderbooks
     pub async fn get_stats(&self) -> HashMap<Arc<str>, (bool, u64)> {
-        let books = self.books.read().await;
-        let mut stats = HashMap::with_capacity(books.len());
+        let mut stats = HashMap::with_capacity(self.books.len());
 
-        for (symbol, book) in books.iter() {
-            stats.insert(symbol.clone(), (book.is_synced(), book.get_last_update_id()));
+        for entry in self.books.iter() {
+            stats.insert(entry.key().clone(), (entry.is_synced(), entry.get_last_update_id()));
         }
 
         stats
@@ -366,9 +342,8 @@ impl OrderBookManager {
 
     /// Get the mid-price for a symbol
     pub async fn get_mid_price(&self, symbol: &Arc<str>) -> Option<f64> {
-        let books = self.books.read().await;
-        if let Some(book) = books.get(symbol) {
-            if book.is_synced() { book.mid_price().await } else { None }
+        if let Some(book_ref) = self.books.get(symbol) {
+            if book_ref.is_synced() { book_ref.mid_price().await } else { None }
         } else {
             None
         }
@@ -380,10 +355,9 @@ impl OrderBookManager {
         symbol: &Arc<str>,
         depth: Option<usize>
     ) -> Option<(Vec<Level>, Vec<Level>)> {
-        let books = self.books.read().await;
-        if let Some(book) = books.get(symbol) {
-            if book.is_synced() {
-                Some((book.get_bids(depth).await, book.get_asks(depth).await))
+        if let Some(book_ref) = self.books.get(symbol) {
+            if book_ref.is_synced() {
+                Some((book_ref.get_bids(depth).await, book_ref.get_asks(depth).await))
             } else {
                 None
             }
@@ -431,9 +405,7 @@ impl OrderBookManager {
 
     /// Clear all orderbooks
     pub async fn clear_all(&self) {
-        let mut books = self.books.write().await;
-        books.clear();
-
+        self.books.clear();
         debug!("Cleared all orderbooks");
     }
 }
