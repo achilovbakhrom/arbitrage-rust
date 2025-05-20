@@ -1585,6 +1585,7 @@ dependencies = [
  "http",
  "lazy_static",
  "ordered-float",
+ "parking_lot",
  "rand 0.9.1",
  "reqwest",
  "rust_decimal",
