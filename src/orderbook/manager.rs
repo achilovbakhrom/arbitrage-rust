@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{ RwLock, Mutex };
+use tokio::sync::Mutex;
+use parking_lot::RwLock;
 use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
 use std::time::{ Duration, Instant };
@@ -37,29 +38,29 @@ impl OrderBookManager {
         exchange_client: Arc<dyn ExchangeClient + Send + Sync>
     ) -> Self {
         Self {
-            books: Arc::new(DashMap::with_capacity(1000)), // Pre-allocate capacity
+            books: Arc::new(DashMap::with_capacity(1000)),
             default_depth,
-            exchange_client,
-            recovery_mutex: Arc::new(Mutex::new(())),
-            last_recovery: Arc::new(DashMap::with_capacity(1000)), // Pre-allocate
-            update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))), // Typically few callbacks
+            exchange_client: exchange_client.clone(),
+            recovery_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            last_recovery: Arc::new(DashMap::with_capacity(1000)),
+            update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))),
         }
     }
 
     /// Register a callback to be notified when an orderbook is updated
     #[inline]
-    pub async fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
-        let mut callbacks = self.update_callbacks.write().await;
+    pub fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
+        let mut callbacks = self.update_callbacks.write();
         callbacks.push(callback);
     }
 
     /// Notify all registered callbacks about an orderbook update
     /// Optimized to avoid unnecessary locking and cloning
     #[inline]
-    async fn notify_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
+    fn notify_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
         // Fast path: first check if we have any callbacks at all
         {
-            let callbacks = self.update_callbacks.read().await;
+            let callbacks = self.update_callbacks.read();
             if callbacks.is_empty() {
                 return;
             }
@@ -72,7 +73,7 @@ impl OrderBookManager {
     }
 
     /// Get or create an orderbook for a symbol - fast path optimized
-    pub async fn get_or_create_book(&self, symbol: &Arc<str>) -> Arc<OrderBook> {
+    pub fn get_or_create_book(&self, symbol: &Arc<str>) -> Arc<OrderBook> {
         if let Some(book) = self.books.get(symbol) {
             return book.clone();
         }
@@ -87,7 +88,7 @@ impl OrderBookManager {
         result
     }
 
-    pub async fn apply_snapshot(
+    pub fn apply_snapshot(
         &self,
         symbol: Arc<str>,
         bids: &[(f64, f64)],
@@ -95,7 +96,7 @@ impl OrderBookManager {
         last_update_id: u64
     ) {
         // Get or create the orderbook
-        let book = self.get_or_create_book(&symbol).await;
+        let book = self.get_or_create_book(&symbol);
 
         // Convert to Level structs
         let bids_levels: Vec<Level> = bids
@@ -109,13 +110,13 @@ impl OrderBookManager {
             .collect();
 
         // Apply the snapshot
-        book.apply_snapshot(bids_levels, asks_levels, last_update_id).await;
+        book.apply_snapshot(bids_levels, asks_levels, last_update_id);
 
         // Reset recovery tracker - using DashMap remove
         self.last_recovery.remove(&symbol);
 
         // Notify callbacks about the update
-        self.notify_update(&symbol, &book).await;
+        self.notify_update(&symbol, &book);
 
         debug!(
             symbol = %symbol,
@@ -157,23 +158,8 @@ impl OrderBookManager {
             // Add some jitter to avoid all symbols recovering at the same time
             let jitter = rand::random::<u64>() % 200;
             tokio::time::sleep(Duration::from_millis(jitter)).await;
-
             // Use a short timeout for the lock to avoid blocking other symbols
-            let lock_result = tokio::time::timeout(
-                Duration::from_millis(500),
-                manager.recovery_mutex.lock()
-            ).await;
-
-            let _lock = match lock_result {
-                Ok(lock) => lock,
-                Err(_) => {
-                    debug!(
-                        symbol = %symbol_clone,
-                        "Skipping orderbook recovery due to lock timeout"
-                    );
-                    return;
-                }
-            };
+            let _lock = manager.recovery_mutex.lock().await;
 
             info!(
                 symbol = %symbol_clone,
@@ -185,9 +171,9 @@ impl OrderBookManager {
                 Ok((snapshot_bids, snapshot_asks, snapshot_last_id)) => {
                     if snapshot_bids.is_empty() || snapshot_asks.is_empty() {
                         warn!(
-                        symbol = %symbol_clone,
-                        "Empty orderbook snapshot received"
-                    );
+                            symbol = %symbol_clone,
+                            "Empty orderbook snapshot received"
+                        );
                         return;
                     }
 
@@ -197,7 +183,7 @@ impl OrderBookManager {
                         &snapshot_bids,
                         &snapshot_asks,
                         snapshot_last_id
-                    ).await;
+                    );
 
                     info!(
                         symbol = %symbol_clone,
@@ -215,7 +201,7 @@ impl OrderBookManager {
         });
     }
 
-    pub async fn apply_depth_update(
+    pub fn apply_depth_update(
         &self,
         symbol: &Arc<str>,
         bids: &[(f64, f64)],
@@ -233,17 +219,18 @@ impl OrderBookManager {
                         symbol = %symbol,
                         "Book doesn't exist, triggering recovery"
                     );
-                    self.trigger_recovery(symbol).await;
+
+                    self.trigger_recovery(symbol);
                     return false;
                 }
             }
         };
 
         // Try to apply the update
-        match book.apply_depth_update(bids, asks, first_update_id, last_update_id).await {
+        match book.apply_depth_update(bids, asks, first_update_id, last_update_id) {
             Ok(true) => {
                 // Update applied successfully
-                self.notify_update(symbol, &book).await;
+                self.notify_update(symbol, &book);
                 true
             }
             Ok(false) => {
@@ -255,7 +242,7 @@ impl OrderBookManager {
                     book_last_id = book.get_last_update_id(),
                     "Book out of sync, triggering recovery"
                 );
-                self.trigger_recovery(symbol).await;
+                self.trigger_recovery(symbol);
                 false
             }
             Err(_) => {
@@ -264,7 +251,7 @@ impl OrderBookManager {
                     symbol = %symbol,
                     "Error applying depth update, triggering recovery"
                 );
-                self.trigger_recovery(symbol).await;
+                self.trigger_recovery(symbol);
                 false
             }
         }
@@ -272,16 +259,13 @@ impl OrderBookManager {
 
     /// Get the best bid and ask for a symbol - fast path optimized
     #[inline]
-    pub async fn get_top_of_book(
-        &self,
-        symbol: &Arc<str>
-    ) -> Option<(Option<Level>, Option<Level>)> {
+    pub fn get_top_of_book(&self, symbol: &Arc<str>) -> Option<(Option<Level>, Option<Level>)> {
         // Fast path with DashMap
         match self.books.get(symbol) {
-            Some(book_ref) if book_ref.is_synced() => { Some(book_ref.snapshot().await) }
+            Some(book_ref) if book_ref.is_synced() => { Some(book_ref.snapshot()) }
             Some(_) => {
                 // Book exists but not in sync, trigger recovery without waiting
-                self.trigger_recovery(symbol).await;
+                self.trigger_recovery(symbol);
                 None
             }
             None => None,
@@ -341,23 +325,23 @@ impl OrderBookManager {
     }
 
     /// Get the mid-price for a symbol
-    pub async fn get_mid_price(&self, symbol: &Arc<str>) -> Option<f64> {
+    pub fn get_mid_price(&self, symbol: &Arc<str>) -> Option<f64> {
         if let Some(book_ref) = self.books.get(symbol) {
-            if book_ref.is_synced() { book_ref.mid_price().await } else { None }
+            if book_ref.is_synced() { book_ref.mid_price() } else { None }
         } else {
             None
         }
     }
 
     /// Get multiple price levels for a symbol
-    pub async fn get_price_levels(
+    pub fn get_price_levels(
         &self,
         symbol: &Arc<str>,
         depth: Option<usize>
     ) -> Option<(Vec<Level>, Vec<Level>)> {
         if let Some(book_ref) = self.books.get(symbol) {
             if book_ref.is_synced() {
-                Some((book_ref.get_bids(depth).await, book_ref.get_asks(depth).await))
+                Some((book_ref.get_bids(depth), book_ref.get_asks(depth)))
             } else {
                 None
             }
@@ -371,12 +355,12 @@ impl OrderBookManager {
         let mut failed_symbols = Vec::new();
 
         for symbol in symbols {
-            let book = self.get_or_create_book(symbol).await;
+            let book = self.get_or_create_book(symbol);
 
             if !book.is_synced() {
                 match self.fetch_snapshot(symbol.as_ref()).await {
                     Ok((bids, asks, last_update_id)) => {
-                        self.apply_snapshot(symbol.clone(), &bids, &asks, last_update_id).await;
+                        self.apply_snapshot(symbol.clone(), &bids, &asks, last_update_id);
                     }
                     Err(e) => {
                         error!(

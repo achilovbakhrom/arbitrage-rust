@@ -9,12 +9,13 @@ mod orderbook;
 mod arbitrage;
 mod performance;
 
-use std::time::Duration;
+use std::{ thread, time::Duration };
 use std::sync::Arc;
 use models::symbol_map::SymbolMap;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use tokio::runtime;
 use tokio::time::{ sleep, timeout };
 
 use config::Config;
@@ -35,8 +36,7 @@ enum Command {
     PerformanceTest,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Parse command line arguments
     let command = if std::env::args().nth(1).as_deref() == Some("perf-test") {
         Command::PerformanceTest
@@ -54,10 +54,22 @@ async fn main() -> Result<()> {
         ::init_logging(config.log_level, config.debug, &config.log_config)
         .context("Failed to initialize logging system")?;
 
+    let runtime = tokio::runtime::Builder
+        ::new_multi_thread()
+        .worker_threads(4) // Limit the number of worker threads
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime");
+
     match command {
-        Command::Run => run_normal_mode(config).await,
-        Command::PerformanceTest => run_performance_test(config).await,
+        Command::Run => {
+            runtime.block_on(async { run_normal_mode(config).await }).unwrap();
+        }
+        Command::PerformanceTest => {
+            runtime.block_on(async { run_performance_test(config).await }).unwrap();
+        }
     }
+    Ok(())
 }
 
 async fn run_normal_mode(config: Config) -> Result<()> {
@@ -159,7 +171,7 @@ async fn run_normal_mode(config: Config) -> Result<()> {
         Decimal::from_f64(config.threshold).unwrap(), // Configured minimum profit threshold
         triangular_paths,
         dec!(100.0) // Start with 100 USDT
-    ).await;
+    );
 
     info!(
         "Created high-performance event-driven arbitrage detector with threshold: {:.2}%",
@@ -231,17 +243,13 @@ async fn run_normal_mode(config: Config) -> Result<()> {
                 let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
                 let manager = manager_for_msg_task.clone();
 
-                // Spawn a task to update the orderbook without blocking the WebSocket
-                tokio::spawn(async move {
-                    // Apply depth update - this will trigger the arbitrage detector via callbacks
-                    manager.apply_depth_update(
-                        &symbol_arc,
-                        &bids,
-                        &asks,
-                        first_update_id,
-                        last_update_id
-                    ).await;
-                });
+                manager.apply_depth_update(
+                    &symbol_arc,
+                    &bids,
+                    &asks,
+                    first_update_id,
+                    last_update_id
+                );
             }).await;
 
             // Process WebSocket messages
@@ -356,7 +364,7 @@ async fn run_performance_test(config: Config) -> Result<()> {
         Decimal::from_f64(config.threshold).unwrap(),
         triangular_paths,
         dec!(100.0) // Start with 100 USDT
-    ).await;
+    );
 
     info!("Created arbitrage detector. Starting performance test...");
 

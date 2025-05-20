@@ -477,7 +477,7 @@ pub async fn run_performance_test(
     };
 
     // Register the opportunity callback with the orderbook manager
-    orderbook_manager.register_update_callback(Arc::new(opportunity_callback)).await;
+    orderbook_manager.register_update_callback(Arc::new(opportunity_callback));
 
     // Set up depth update callback for measuring performance
     let detection_times_for_cb = detection_times.clone();
@@ -516,7 +516,7 @@ pub async fn run_performance_test(
                 &asks_cloned,
                 first_update_id,
                 last_update_id
-            ).await;
+            );
 
             let orderbook_update_time = orderbook_update_start.elapsed();
 

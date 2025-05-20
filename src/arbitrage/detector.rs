@@ -4,14 +4,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, Ordering };
-use tokio::sync::{ Mutex, mpsc, Semaphore };
-use futures::{ stream, StreamExt };
-use tracing::{ debug, info, warn };
+use tracing::info;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use colored::Colorize;
-use std::collections::{ HashSet, HashMap };
+use parking_lot::Mutex;
+
 use dashmap::DashMap; // Use DashMap for concurrent access without locks
+use std::thread;
 
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
@@ -80,12 +80,15 @@ pub struct ArbitrageDetectorState {
     pub stats_counter: Arc<AtomicUsize>,
     pub profit_counter: Arc<AtomicUsize>,
     pub start_amount: Decimal,
+
+    // Optional queue for outputting opportunities
+    pub opportunity_queue: Option<Arc<Mutex<Vec<ArbitrageOpportunity>>>>,
 }
 
 impl ArbitrageDetectorState {
     /// Check a single triangular path for arbitrage opportunity
     #[inline]
-    pub async fn check_path(
+    pub fn check_path(
         &self,
         path: &Arc<TriangularPath>,
         start_amount: Decimal
@@ -104,9 +107,9 @@ impl ArbitrageDetectorState {
         }
 
         // Get current snapshots (top of book)
-        let first_tob = first_book.snapshot().await;
-        let second_tob = second_book.snapshot().await;
-        let third_tob = third_book.snapshot().await;
+        let first_tob = first_book.snapshot();
+        let second_tob = second_book.snapshot();
+        let third_tob = third_book.snapshot();
 
         // Extract prices based on trade direction (with early returns to avoid allocations)
         let first_price = if path.first_is_base_to_quote {
@@ -222,85 +225,77 @@ impl ArbitrageDetectorState {
                 // Increment the stats counter
                 self.stats_counter.fetch_add(1, Ordering::Relaxed);
 
-                // Clone context for the task
-                let state = self.clone();
-                let start_amount = self.start_amount;
-
-                // Spawn lightweight task to avoid blocking the callback
-                tokio::spawn(async move {
-                    // Create a temporary buffer for path references
-                    let mut paths_to_check = Vec::with_capacity(indices.len());
-
-                    // Get paths to check
-                    for &idx in &indices {
-                        if let Some(path) = state.all_paths.get(idx) {
-                            paths_to_check.push(Arc::clone(path));
-                        }
-                    }
-
-                    // Skip if no paths to check
-                    if paths_to_check.is_empty() {
-                        return;
-                    }
-
-                    // Scan the affected paths
-                    let mut opportunities = Vec::new();
-
-                    for path in &paths_to_check {
-                        // Inside the path checking loop, add for each path:
-
-                        if let Some(opportunity) = state.check_path(path, start_amount).await {
-                            opportunities.push(opportunity);
-                        }
-                        info!("check {:?}", path);
-                    }
-
-                    // Process opportunities
-                    if !opportunities.is_empty() {
-                        // Increment profit counter
-                        state.profit_counter.fetch_add(opportunities.len(), Ordering::Relaxed);
-
-                        // Sort by profit ratio descending
-                        opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
-
-                        // Print opportunities
-                        if !opportunities.is_empty() {
-                            println!(
-                                "\n{}",
-                                "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold()
-                            );
-
-                            for (i, opp) in opportunities.iter().enumerate() {
-                                println!("#{}: {}", i + 1, opp.display());
-                            }
-
-                            println!(
-                                "{}\n",
-                                "=============================".bright_purple().bold()
-                            );
-                        }
-                    }
-                });
+                // Process directly for low latency (no task spawn)
+                self.process_affected_paths(symbol, book, &indices);
             }
         }
     }
 
-    /// Run a periodic task to print statistics
-    pub async fn run_stats_task(&self) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    /// Process affected paths - fully synchronous
+    fn process_affected_paths(&self, symbol: &Arc<str>, book: &Arc<OrderBook>, indices: &[usize]) {
+        // Create a temporary buffer for opportunities
+        let mut opportunities = Vec::new();
 
-        loop {
-            interval.tick().await;
-
-            let scans = self.stats_counter.swap(0, Ordering::Relaxed);
-            let profits = self.profit_counter.swap(0, Ordering::Relaxed);
-
-            info!(
-                "Arbitrage stats: {} update triggers processed, {} profitable opportunities found",
-                scans,
-                profits
-            );
+        // Check each path
+        for &idx in indices {
+            if let Some(path) = self.all_paths.get(idx) {
+                if let Some(opportunity) = self.check_path(path, self.start_amount) {
+                    opportunities.push(opportunity);
+                }
+            }
         }
+
+        // Process opportunities if any were found
+        if !opportunities.is_empty() {
+            // Increment profit counter
+            self.profit_counter.fetch_add(opportunities.len(), Ordering::Relaxed);
+
+            // Sort by profit ratio descending
+            opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
+
+            // Either add to queue or print directly
+            if let Some(queue) = &self.opportunity_queue {
+                let mut queue = queue.lock();
+                queue.extend(opportunities);
+            } else {
+                // Print opportunities
+                println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
+
+                for (i, opp) in opportunities.iter().enumerate() {
+                    println!("#{}: {}", i + 1, opp.display());
+                }
+
+                println!("{}\n", "=============================".bright_purple().bold());
+            }
+        }
+    }
+
+    /// Run a periodic task to print statistics - runs in its own thread
+    pub fn run_stats_task(&self) {
+        // Clone what we need for the thread
+        let stats_counter = self.stats_counter.clone();
+        let profit_counter = self.profit_counter.clone();
+
+        // Spawn a dedicated thread
+        thread::Builder
+            ::new()
+            .name("arb-stats".to_string())
+            .spawn(move || {
+                loop {
+                    // Sleep for 60 seconds
+                    thread::sleep(std::time::Duration::from_secs(60));
+
+                    let scans = stats_counter.swap(0, Ordering::Relaxed);
+                    let profits = profit_counter.swap(0, Ordering::Relaxed);
+
+                    info!(
+                        "Arbitrage stats: {} update triggers processed, {} profitable opportunities found",
+                        scans,
+                        profits
+                    );
+                }
+            })
+            .expect("Failed to spawn stats thread");
     }
 }
 
@@ -318,12 +313,13 @@ impl Clone for ArbitrageDetectorState {
             stats_counter: self.stats_counter.clone(),
             profit_counter: self.profit_counter.clone(),
             start_amount: self.start_amount,
+            opportunity_queue: self.opportunity_queue.clone(),
         }
     }
 }
 
 /// Create a new event-driven arbitrage detector
-pub async fn create_event_driven_detector(
+pub fn create_event_driven_detector(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: Decimal,
     min_profit_threshold: Decimal,
@@ -369,6 +365,7 @@ pub async fn create_event_driven_detector(
         stats_counter: stats_counter.clone(),
         profit_counter: profit_counter.clone(),
         start_amount,
+        opportunity_queue: None,
     });
 
     // Register callback with orderbook manager
@@ -377,13 +374,10 @@ pub async fn create_event_driven_detector(
         Arc::new(move |symbol, book| {
             callback_state.handle_update(symbol, book);
         })
-    ).await;
+    );
 
     // Start a task to periodically print stats
-    let stats_state = detector_state.clone();
-    tokio::spawn(async move {
-        stats_state.run_stats_task().await;
-    });
+    detector_state.run_stats_task();
 
     // Return the detector state
     detector_state

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use ordered_float::OrderedFloat;
 use crate::models::level::Level;
-use tokio::sync::{ RwLock, Mutex };
+use parking_lot::{Mutex, RwLock};
 use tracing::{ debug, warn };
 use std::fmt;
 
@@ -84,14 +84,14 @@ impl OrderBook {
     }
 
     // Updated src/orderbook/orderbook.rs
-    pub async fn apply_snapshot(
+    pub fn apply_snapshot(
         &self,
         bids: Vec<Level>,
         asks: Vec<Level>,
         snapshot_last_update_id: u64
     ) {
         // Acquire exclusive lock for the snapshot operation
-        let _lock = self.update_mutex.lock().await;
+        let _lock = self.update_mutex.lock();
 
         // First - check if we already have a valid state (to avoid reprocessing)
         if
@@ -110,7 +110,7 @@ impl OrderBook {
 
         // Reset and update bids
         {
-            let mut bids_map = self.bids.write().await;
+            let mut bids_map = self.bids.write();
             bids_map.clear();
 
             // Insert bids (highest first for quick access to best bid)
@@ -123,7 +123,7 @@ impl OrderBook {
 
         // Reset and update asks
         {
-            let mut asks_map = self.asks.write().await;
+            let mut asks_map = self.asks.write();
             asks_map.clear();
 
             // Insert asks (lowest first for quick access to best ask)
@@ -139,7 +139,7 @@ impl OrderBook {
 
         // Get a copy of buffered events before processing
         let buffered_events = {
-            let buffer = self.event_buffer.read().await;
+            let buffer = self.event_buffer.read();
             buffer.clone()
         };
 
@@ -170,7 +170,7 @@ impl OrderBook {
                 // Rule 5: First event must have U (first_id) <= lastUpdateId AND u (last_id) > lastUpdateId
                 if first_id <= snapshot_last_update_id && last_id > snapshot_last_update_id {
                     // Process this event
-                    self.process_price_updates(&bids, &asks).await;
+                    self.process_price_updates(&bids, &asks);
                     last_processed_id = last_id;
                     first_processed = true;
                     debug!(
@@ -202,7 +202,7 @@ impl OrderBook {
                 }
 
                 // Process this event
-                self.process_price_updates(&bids, &asks).await;
+                self.process_price_updates(&bids, &asks);
                 last_processed_id = last_id;
                 debug!("Processed subsequent event: first_id={}, last_id={}", first_id, last_id);
             }
@@ -214,7 +214,7 @@ impl OrderBook {
             self.last_update_id.store(last_processed_id, Ordering::Release);
 
             // Clear the buffer now that we've processed it
-            let mut buffer = self.event_buffer.write().await;
+            let mut buffer = self.event_buffer.write();
             buffer.clear();
 
             debug!("All buffered events processed, orderbook synced with lastUpdateId: {}", last_processed_id);
@@ -224,7 +224,7 @@ impl OrderBook {
         self.set_state(OrderBookState::Synced);
     }
 
-    pub async fn apply_depth_update(
+    pub fn apply_depth_update(
         &self,
         bids: &[(f64, f64)],
         asks: &[(f64, f64)],
@@ -245,7 +245,7 @@ impl OrderBook {
             let asks_clone = asks.to_vec();
 
             // Buffer the event
-            self.buffer_event(first_update_id, last_update_id, bids_clone, asks_clone).await;
+            self.buffer_event(first_update_id, last_update_id, bids_clone, asks_clone);
             return Ok(false);
         }
 
@@ -274,7 +274,7 @@ impl OrderBook {
         }
 
         // Process the price updates
-        self.process_price_updates(bids, asks).await;
+        self.process_price_updates(bids, asks);
 
         // Update our last update ID
         self.last_update_id.store(last_update_id, Ordering::Release);
@@ -289,7 +289,7 @@ impl OrderBook {
         Ok(true)
     }
 
-    pub async fn buffer_event(
+    pub fn buffer_event(
         &self,
         first_update_id: u64,
         last_update_id: u64,
@@ -301,7 +301,7 @@ impl OrderBook {
             return;
         }
 
-        let mut buffer = self.event_buffer.write().await;
+        let mut buffer = self.event_buffer.write();
 
         // Buffer management: limit size to avoid memory issues
         if buffer.len() >= 1000 {
@@ -330,10 +330,10 @@ impl OrderBook {
         );
     }
 
-    async fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
+    fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
         // Apply bid updates
         {
-            let mut bids_map = self.bids.write().await;
+            let mut bids_map = self.bids.write();
             for &(price, quantity) in bids {
                 let key = OrderedFloat(price);
 
@@ -363,7 +363,7 @@ impl OrderBook {
 
         // Apply ask updates
         {
-            let mut asks_map = self.asks.write().await;
+            let mut asks_map = self.asks.write();
             for &(price, quantity) in asks {
                 let key = OrderedFloat(price);
 
@@ -393,46 +393,46 @@ impl OrderBook {
     }
 
     /// Best (highest) bid - zero allocation
-    pub async fn best_bid(&self) -> Option<Level> {
+    pub fn best_bid(&self) -> Option<Level> {
         // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return None;
         }
 
-        let bids = self.bids.read().await;
+        let bids = self.bids.read();
         bids.iter()
             .next_back() // Get the highest bid (at the end for BTreeMap)
             .map(|(k, &v)| Level { price: k.into_inner(), quantity: v })
     }
 
     /// Best (lowest) ask - zero allocation
-    pub async fn best_ask(&self) -> Option<Level> {
+    pub fn best_ask(&self) -> Option<Level> {
         // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return None;
         }
 
-        let asks = self.asks.read().await;
+        let asks = self.asks.read();
         asks.iter()
             .next() // Get the lowest ask (at the beginning for BTreeMap)
             .map(|(k, &v)| Level { price: k.into_inner(), quantity: v })
     }
 
     /// Snapshot of top-of-book - zero allocation
-    pub async fn snapshot(&self) -> (Option<Level>, Option<Level>) {
+    pub fn snapshot(&self) -> (Option<Level>, Option<Level>) {
         // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return (None, None);
         }
 
-        let best_bid = self.best_bid().await;
-        let best_ask = self.best_ask().await;
+        let best_bid = self.best_bid();
+        let best_ask = self.best_ask();
         (best_bid, best_ask)
     }
 
     /// Get the mid-price
-    pub async fn mid_price(&self) -> Option<f64> {
-        let (bid, ask) = self.snapshot().await;
+    pub fn mid_price(&self) -> Option<f64> {
+        let (bid, ask) = self.snapshot();
         match (bid, ask) {
             (Some(bid_level), Some(ask_level)) => {
                 Some((bid_level.price + ask_level.price) / 2.0)
@@ -442,13 +442,13 @@ impl OrderBook {
     }
 
     /// Get all bid levels up to max_depth
-    pub async fn get_bids(&self, depth: Option<usize>) -> Vec<Level> {
+    pub fn get_bids(&self, depth: Option<usize>) -> Vec<Level> {
         // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return Vec::new();
         }
 
-        let bids = self.bids.read().await;
+        let bids = self.bids.read();
         let limit = depth.unwrap_or(self.max_depth).min(bids.len());
 
         bids.iter()
@@ -459,13 +459,13 @@ impl OrderBook {
     }
 
     /// Get all ask levels up to max_depth
-    pub async fn get_asks(&self, depth: Option<usize>) -> Vec<Level> {
+    pub fn get_asks(&self, depth: Option<usize>) -> Vec<Level> {
         // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return Vec::new();
         }
 
-        let asks = self.asks.read().await;
+        let asks = self.asks.read();
         let limit = depth.unwrap_or(self.max_depth).min(asks.len());
 
         asks.iter()
@@ -487,8 +487,8 @@ impl OrderBook {
     }
 
     /// Calculate the spread (ask - bid)
-    pub async fn spread(&self) -> Option<f64> {
-        let (bid, ask) = self.snapshot().await;
+    pub fn spread(&self) -> Option<f64> {
+        let (bid, ask) = self.snapshot();
         match (bid, ask) {
             (Some(bid_level), Some(ask_level)) => { Some(ask_level.price - bid_level.price) }
             _ => None,
@@ -496,8 +496,8 @@ impl OrderBook {
     }
 
     /// Calculate the spread as a percentage of the mid-price
-    pub async fn spread_percentage(&self) -> Option<f64> {
-        let (bid, ask) = self.snapshot().await;
+    pub fn spread_percentage(&self) -> Option<f64> {
+        let (bid, ask) = self.snapshot();
         match (bid, ask) {
             (Some(bid_level), Some(ask_level)) => {
                 let spread = ask_level.price - bid_level.price;
@@ -509,28 +509,28 @@ impl OrderBook {
     }
 
     /// Check if the orderbook is empty (no bids or asks)
-    pub async fn is_empty(&self) -> bool {
-        let bids = self.bids.read().await;
-        let asks = self.asks.read().await;
+    pub fn is_empty(&self) -> bool {
+        let bids = self.bids.read();
+        let asks = self.asks.read();
         bids.is_empty() || asks.is_empty()
     }
 
     /// Calculate total volume at bid side
-    pub async fn bid_volume(&self) -> f64 {
-        let bids = self.bids.read().await;
+    pub fn bid_volume(&self) -> f64 {
+        let bids = self.bids.read();
         bids.values().sum()
     }
 
     /// Calculate total volume at ask side
-    pub async fn ask_volume(&self) -> f64 {
-        let asks = self.asks.read().await;
+    pub fn ask_volume(&self) -> f64 {
+        let asks = self.asks.read();
         asks.values().sum()
     }
 
     /// Calculate order imbalance (bid volume - ask volume)
-    pub async fn volume_imbalance(&self) -> f64 {
-        let bid_vol = self.bid_volume().await;
-        let ask_vol = self.ask_volume().await;
+    pub fn volume_imbalance(&self) -> f64 {
+        let bid_vol = self.bid_volume();
+        let ask_vol = self.ask_volume();
         bid_vol - ask_vol
     }
 }
