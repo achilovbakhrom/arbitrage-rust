@@ -220,7 +220,13 @@ impl OrderBookManager {
                         "Book doesn't exist, triggering recovery"
                     );
 
-                    self.trigger_recovery(symbol);
+                    // self.trigger_recovery(symbol);
+
+                    let symbol_clone = symbol.clone();
+                    let self_clone = self.clone();
+                    tokio::spawn(async move {
+                        self_clone.trigger_recovery(&symbol_clone).await;
+                    });
                     return false;
                 }
             }
@@ -242,7 +248,12 @@ impl OrderBookManager {
                     book_last_id = book.get_last_update_id(),
                     "Book out of sync, triggering recovery"
                 );
-                self.trigger_recovery(symbol);
+                // self.trigger_recovery(symbol);
+                let symbol_clone = symbol.clone();
+                let self_clone = self.clone();
+                tokio::spawn(async move {
+                    self_clone.trigger_recovery(&symbol_clone).await;
+                });
                 false
             }
             Err(_) => {
@@ -251,7 +262,12 @@ impl OrderBookManager {
                     symbol = %symbol,
                     "Error applying depth update, triggering recovery"
                 );
-                self.trigger_recovery(symbol);
+                // self.trigger_recovery(symbol);
+                let symbol_clone = symbol.clone();
+                let self_clone = self.clone();
+                tokio::spawn(async move {
+                    self_clone.trigger_recovery(&symbol_clone).await;
+                });
                 false
             }
         }
@@ -265,7 +281,13 @@ impl OrderBookManager {
             Some(book_ref) if book_ref.is_synced() => { Some(book_ref.snapshot()) }
             Some(_) => {
                 // Book exists but not in sync, trigger recovery without waiting
-                self.trigger_recovery(symbol);
+                // self.trigger_recovery(symbol);
+
+                let symbol_clone = symbol.clone();
+                let self_clone = self.clone();
+                tokio::spawn(async move {
+                    self_clone.trigger_recovery(&symbol_clone).await;
+                });
                 None
             }
             None => None,
