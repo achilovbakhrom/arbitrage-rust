@@ -27,8 +27,8 @@ fi
 
 # Run the performance test
 echo
-echo "[2/4] Running performance test (duration: 120 seconds)..."
-echo "This will take approximately 2 minutes to complete."
+echo "[2/4] Running performance test (duration: 300 seconds)..."
+echo "This will take approximately 5 minutes to complete."
 echo
 
 # Execute the performance test 

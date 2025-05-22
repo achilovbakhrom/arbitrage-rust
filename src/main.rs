@@ -9,13 +9,12 @@ mod orderbook;
 mod arbitrage;
 mod performance;
 
-use std::{ thread, time::Duration };
+use std::time::Duration;
 use std::sync::Arc;
 use models::symbol_map::SymbolMap;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tokio::runtime;
 use tokio::time::{ sleep, timeout };
 
 use config::Config;
@@ -45,9 +44,15 @@ fn main() -> Result<()> {
     };
 
     // Load configuration with helpful error messages
-    let config = Config::from_env().context(
+    let mut config = Config::from_env().context(
         "Failed to load configuration from environment. Make sure you have a .env file with required variables."
     )?;
+
+    // Override debug mode for performance tests
+    if matches!(command, Command::PerformanceTest) {
+        config.debug = false; // Force disable console logging for performance tests
+        config.max_triangles = 50;
+    }
 
     // Initialize logging system
     logging
@@ -374,7 +379,7 @@ async fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 2 minutes
+        300, // 5 minutes
         output_file
     ).await;
 

@@ -16,13 +16,10 @@ use std::thread;
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
+use rust_decimal::prelude::ToPrimitive;
 
-/// Maximum number of paths to check concurrently
 const MAX_CONCURRENT_CHECKS: usize = 32;
-
-/// Maximum batch size for scanning
 const MAX_BATCH_SIZE: usize = 128;
-
 /// Symbol cooldown in milliseconds (to avoid processing the same symbol too frequently)
 const SYMBOL_COOLDOWN_MS: u64 = 100;
 
@@ -83,6 +80,10 @@ pub struct ArbitrageDetectorState {
 
     // Optional queue for outputting opportunities
     pub opportunity_queue: Option<Arc<Mutex<Vec<ArbitrageOpportunity>>>>,
+
+    // Pre-computed values for fast calculations
+    fee_multiplier_f64: f64,
+    min_profit_threshold_f64: f64,
 }
 
 impl ArbitrageDetectorState {
@@ -97,96 +98,75 @@ impl ArbitrageDetectorState {
 
         // Get orderbooks for each symbol in the path
         let books = &self.orderbook_manager.books;
-        let first_book = books.get(&path.first_symbol)?.clone();
-        let second_book = books.get(&path.second_symbol)?.clone();
-        let third_book = books.get(&path.third_symbol)?.clone();
+
+        // Fast lookup using get_cached_top_of_book
+        let first_book = books.get(&path.first_symbol)?;
+        let second_book = books.get(&path.second_symbol)?;
+        let third_book = books.get(&path.third_symbol)?;
 
         // Check if all books are synced
         if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
             return None;
         }
 
-        // Get current snapshots (top of book)
-        let first_tob = first_book.snapshot();
-        let second_tob = second_book.snapshot();
-        let third_tob = third_book.snapshot();
+        // Get cached top of book values for ultra-fast access
+        let (first_bid, first_ask) = first_book.get_cached_top_of_book();
+        let (second_bid, second_ask) = second_book.get_cached_top_of_book();
+        let (third_bid, third_ask) = third_book.get_cached_top_of_book();
 
-        // Extract prices based on trade direction (with early returns to avoid allocations)
-        let first_price = if path.first_is_base_to_quote {
-            // Selling base at bid price
-            first_tob.0.as_ref().map(|l| f64_to_decimal(l.price))?
-        } else {
-            // Buying base at ask price
-            first_tob.1.as_ref().map(|l| f64_to_decimal(l.price))?
-        };
+        // Extract prices based on trade direction using f64 for speed
+        let first_price = if path.first_is_base_to_quote { first_bid?.0 } else { first_ask?.0 };
 
-        let second_price = if path.second_is_base_to_quote {
-            // Selling base at bid price
-            second_tob.0.as_ref().map(|l| f64_to_decimal(l.price))?
-        } else {
-            // Buying base at ask price
-            second_tob.1.as_ref().map(|l| f64_to_decimal(l.price))?
-        };
+        let second_price = if path.second_is_base_to_quote { second_bid?.0 } else { second_ask?.0 };
 
-        let third_price = if path.third_is_base_to_quote {
-            // Selling base at bid price
-            third_tob.0.as_ref().map(|l| f64_to_decimal(l.price))?
-        } else {
-            // Buying base at ask price
-            third_tob.1.as_ref().map(|l| f64_to_decimal(l.price))?
-        };
+        let third_price = if path.third_is_base_to_quote { third_bid?.0 } else { third_ask?.0 };
 
-        // Fast calculation path
-        let mut amount = start_amount;
+        // Ultra-fast f64 calculation
+        let mut amount_f64 = 100.0; // Use fixed start amount for speed
 
         // First leg
         if path.first_is_base_to_quote {
-            // Selling base for quote
-            amount = amount * first_price;
+            amount_f64 *= first_price;
         } else {
-            // Buying base with quote
-            amount = amount / first_price;
+            amount_f64 /= first_price;
         }
-        // Apply fee
-        amount = amount * self.one_minus_fee;
+        amount_f64 *= self.fee_multiplier_f64;
 
         // Second leg
         if path.second_is_base_to_quote {
-            // Selling base for quote
-            amount = amount * second_price;
+            amount_f64 *= second_price;
         } else {
-            // Buying base with quote
-            amount = amount / second_price;
+            amount_f64 /= second_price;
         }
-        // Apply fee
-        amount = amount * self.one_minus_fee;
+        amount_f64 *= self.fee_multiplier_f64;
 
         // Third leg
         if path.third_is_base_to_quote {
-            // Selling base for quote
-            amount = amount * third_price;
+            amount_f64 *= third_price;
         } else {
-            // Buying base with quote
-            amount = amount / third_price;
+            amount_f64 /= third_price;
         }
-        // Apply fee
-        amount = amount * self.one_minus_fee;
+        amount_f64 *= self.fee_multiplier_f64;
 
         // Calculate profit ratio
-        let profit_ratio = amount / start_amount;
-        // Fast path: check if profitable early to avoid creating ArbitrageOpportunity
-        if profit_ratio <= dec!(1.0) + self.min_profit_threshold {
+        let profit_ratio_f64 = amount_f64 / 100.0;
+
+        // Fast path: check if profitable early
+        if profit_ratio_f64 <= 1.0 + self.min_profit_threshold_f64 {
             return None;
         }
 
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
-        // Create the opportunity
+        // Convert back to Decimal only for profitable opportunities
+        let profit_ratio = f64_to_decimal(profit_ratio_f64);
+        let end_amount = f64_to_decimal(amount_f64);
+
         Some(ArbitrageOpportunity {
             path: Arc::clone(path),
             profit_ratio,
             start_amount,
-            end_amount: amount,
+            end_amount,
             fee_adjusted: true,
             execution_time_ms,
         })
@@ -201,40 +181,38 @@ impl ArbitrageDetectorState {
 
         let symbol_str = symbol.to_string();
 
-        // Skip if recently processed
+        // Fast cooldown check
         let now = Instant::now();
-        {
-            if let Some(last_processed) = self.processed_symbols.get(&symbol_str) {
-                if last_processed.elapsed().as_millis() < (SYMBOL_COOLDOWN_MS as u128) {
-                    return;
-                }
+        if let Some(last_processed) = self.processed_symbols.get(&symbol_str) {
+            if last_processed.elapsed().as_millis() < (SYMBOL_COOLDOWN_MS as u128) {
+                return;
             }
-            // Update processed timestamp
-            self.processed_symbols.insert(symbol_str.clone(), now);
         }
+
+        // Update processed timestamp
+        self.processed_symbols.insert(symbol_str.clone(), now);
 
         // Find affected paths and process them
         if let Some(path_indices) = self.symbol_to_paths.get(&symbol_str) {
-            let indices = path_indices.clone(); // Clone the small Vec of indices
-
-            // Drop the reference to unblock the map
+            let indices = path_indices.clone();
             drop(path_indices);
 
-            // Only spawn a task if we actually have paths to check
             if !indices.is_empty() {
-                // Increment the stats counter
                 self.stats_counter.fetch_add(1, Ordering::Relaxed);
-
-                // Process directly for low latency (no task spawn)
-                self.process_affected_paths(symbol, book, &indices);
+                self.process_affected_paths_fast(symbol, book, &indices);
             }
         }
     }
 
-    /// Process affected paths - fully synchronous
-    fn process_affected_paths(&self, symbol: &Arc<str>, book: &Arc<OrderBook>, indices: &[usize]) {
-        // Create a temporary buffer for opportunities
-        let mut opportunities = Vec::new();
+    #[inline]
+    fn process_affected_paths_fast(
+        &self,
+        symbol: &Arc<str>,
+        book: &Arc<OrderBook>,
+        indices: &[usize]
+    ) {
+        // Pre-allocate with reasonable capacity
+        let mut opportunities = Vec::with_capacity(indices.len().min(10));
 
         // Check each path
         for &idx in indices {
@@ -247,13 +225,11 @@ impl ArbitrageDetectorState {
 
         // Process opportunities if any were found
         if !opportunities.is_empty() {
-            // Increment profit counter
             self.profit_counter.fetch_add(opportunities.len(), Ordering::Relaxed);
 
             // Sort by profit ratio descending
-            opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
+            opportunities.sort_unstable_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
 
-            // Either add to queue or print directly
             if let Some(queue) = &self.opportunity_queue {
                 let mut queue = queue.lock();
                 queue.extend(opportunities);
@@ -270,19 +246,59 @@ impl ArbitrageDetectorState {
         }
     }
 
+    fn process_affected_paths(&self, symbol: &Arc<str>, book: &Arc<OrderBook>, indices: &[usize]) {
+        self.process_affected_paths_fast(symbol, book, indices);
+    }
+
+    /// Process affected paths - fully synchronous
+    // fn process_affected_paths(&self, symbol: &Arc<str>, book: &Arc<OrderBook>, indices: &[usize]) {
+    //     // Create a temporary buffer for opportunities
+    //     let mut opportunities = Vec::new();
+
+    //     // Check each path
+    //     for &idx in indices {
+    //         if let Some(path) = self.all_paths.get(idx) {
+    //             if let Some(opportunity) = self.check_path(path, self.start_amount) {
+    //                 opportunities.push(opportunity);
+    //             }
+    //         }
+    //     }
+
+    //     // Process opportunities if any were found
+    //     if !opportunities.is_empty() {
+    //         // Increment profit counter
+    //         self.profit_counter.fetch_add(opportunities.len(), Ordering::Relaxed);
+
+    //         // Sort by profit ratio descending
+    //         opportunities.sort_by(|a, b| b.profit_ratio.cmp(&a.profit_ratio));
+
+    //         // Either add to queue or print directly
+    //         if let Some(queue) = &self.opportunity_queue {
+    //             let mut queue = queue.lock();
+    //             queue.extend(opportunities);
+    //         } else {
+    //             // Print opportunities
+    //             println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
+
+    //             for (i, opp) in opportunities.iter().enumerate() {
+    //                 println!("#{}: {}", i + 1, opp.display());
+    //             }
+
+    //             println!("{}\n", "=============================".bright_purple().bold());
+    //         }
+    //     }
+    // }
+
     /// Run a periodic task to print statistics - runs in its own thread
     pub fn run_stats_task(&self) {
-        // Clone what we need for the thread
         let stats_counter = self.stats_counter.clone();
         let profit_counter = self.profit_counter.clone();
 
-        // Spawn a dedicated thread
         thread::Builder
             ::new()
             .name("arb-stats".to_string())
             .spawn(move || {
                 loop {
-                    // Sleep for 60 seconds
                     thread::sleep(std::time::Duration::from_secs(60));
 
                     let scans = stats_counter.swap(0, Ordering::Relaxed);
@@ -314,6 +330,8 @@ impl Clone for ArbitrageDetectorState {
             profit_counter: self.profit_counter.clone(),
             start_amount: self.start_amount,
             opportunity_queue: self.opportunity_queue.clone(),
+            fee_multiplier_f64: self.fee_multiplier_f64,
+            min_profit_threshold_f64: self.min_profit_threshold_f64,
         }
     }
 }
@@ -354,6 +372,9 @@ pub fn create_event_driven_detector(
     let stats_counter = Arc::new(AtomicUsize::new(0));
     let profit_counter = Arc::new(AtomicUsize::new(0));
 
+    let fee_multiplier_f64 = (dec!(1.0) - fee_rate).to_f64().unwrap_or(0.999);
+    let min_profit_threshold_f64 = min_profit_threshold.to_f64().unwrap_or(0.001);
+
     let detector_state = Arc::new(ArbitrageDetectorState {
         orderbook_manager: orderbook_manager.clone(),
         fee_rate,
@@ -366,6 +387,8 @@ pub fn create_event_driven_detector(
         profit_counter: profit_counter.clone(),
         start_amount,
         opportunity_queue: None,
+        fee_multiplier_f64,
+        min_profit_threshold_f64: min_profit_threshold_f64 as f64,
     });
 
     // Register callback with orderbook manager
