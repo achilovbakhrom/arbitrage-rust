@@ -347,66 +347,6 @@ impl OrderBook {
     }
 
     fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
-        // // Apply bid updates
-        // {
-        //     let mut bids_map = self.bids.write();
-        //     for &(price, quantity) in bids {
-        //         let key = OrderedFloat(price);
-
-        //         // Rule 7 & 8: If the quantity is 0, remove the price level
-        //         if quantity == 0.0 {
-        //             // Remove price level
-        //             bids_map.remove(&key);
-        //         } else {
-        //             // Update or add price level
-        //             bids_map.insert(key, quantity);
-        //         }
-        //     }
-
-        //     // Enforce depth limit for bids - we want to keep highest bids
-        //     if bids_map.len() > self.max_depth {
-        //         // Sort in ascending order and truncate the first (lowest) elements
-        //         let mut prices: Vec<_> = bids_map.keys().cloned().collect();
-        //         prices.sort(); // Ascending order
-
-        //         // Remove lowest bids to maintain max depth
-        //         let remove_count = bids_map.len() - self.max_depth;
-        //         for i in 0..remove_count {
-        //             bids_map.remove(&prices[i]);
-        //         }
-        //     }
-        // }
-
-        // // Apply ask updates
-        // {
-        //     let mut asks_map = self.asks.write();
-        //     for &(price, quantity) in asks {
-        //         let key = OrderedFloat(price);
-
-        //         // Rule 7 & 8: If the quantity is 0, remove the price level
-        //         if quantity == 0.0 {
-        //             // Remove price level
-        //             asks_map.remove(&key);
-        //         } else {
-        //             // Update or add price level
-        //             asks_map.insert(key, quantity);
-        //         }
-        //     }
-
-        //     // Enforce depth limit for asks - we want to keep lowest asks
-        //     if asks_map.len() > self.max_depth {
-        //         // Sort in descending order and truncate the first (highest) elements
-        //         let mut prices: Vec<_> = asks_map.keys().cloned().collect();
-        //         prices.sort_by(|a, b| b.cmp(a)); // Descending order
-
-        //         // Remove highest asks to maintain max depth
-        //         let remove_count = asks_map.len() - self.max_depth;
-        //         for i in 0..remove_count {
-        //             asks_map.remove(&prices[i]);
-        //         }
-        //     }
-        // }
-
         // Process bids if any
         if !bids.is_empty() {
             let mut bids_map = self.bids.write();

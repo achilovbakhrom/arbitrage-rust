@@ -12,9 +12,6 @@ mod performance;
 use std::time::Duration;
 use std::sync::Arc;
 use models::symbol_map::SymbolMap;
-use rust_decimal::prelude::FromPrimitive;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use tokio::time::{ sleep, timeout };
 
 use config::Config;
@@ -172,10 +169,10 @@ async fn run_normal_mode(config: Config) -> Result<()> {
     // Create the event-driven arbitrage detector
     let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
         orderbook_manager.clone(),
-        dec!(0.001), // 0.1% fee
-        Decimal::from_f64(config.threshold).unwrap(), // Configured minimum profit threshold
+        0.001, // 0.1% fee
+        config.threshold, // Configured minimum profit threshold
         triangular_paths,
-        dec!(100.0) // Start with 100 USDT
+        100.0 // Start with 100 USDT
     );
 
     info!(
@@ -365,10 +362,10 @@ async fn run_performance_test(config: Config) -> Result<()> {
     // Create arbitrage detector
     let detector = arbitrage::detector::create_event_driven_detector(
         orderbook_manager.clone(),
-        dec!(0.001), // 0.1% fee
-        Decimal::from_f64(config.threshold).unwrap(),
+        0.001, // 0.1% fee
+        config.threshold,
         triangular_paths,
-        dec!(100.0) // Start with 100 USDT
+        100.0 // Start with 100 USDT
     );
 
     info!("Created arbitrage detector. Starting performance test...");
@@ -379,7 +376,7 @@ async fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        300, // 5 minutes
+        120, // 2 minutes
         output_file
     ).await;
 

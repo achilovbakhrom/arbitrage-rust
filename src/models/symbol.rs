@@ -1,15 +1,14 @@
-use rust_decimal::Decimal;
 use std::fmt;
 use std::sync::Arc;
 
 /// Lightweight trading symbol representation
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone)]
 pub struct Symbol {
     pub symbol: Arc<str>, // Using Arc<str> to reduce clone costs
     pub base_asset: Arc<str>,
     pub quote_asset: Arc<str>,
-    pub min_qty: Option<Decimal>,
-    pub max_qty: Option<Decimal>,
+    pub min_qty: Option<f64>,
+    pub max_qty: Option<f64>,
     pub price_precision: u8,
     pub qty_precision: u8,
     pub is_trading: bool,

@@ -64,12 +64,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 tracing-timing = "0.6.0"
 
-# Decimal arithmetic for money
-rust_decimal = { version = "1.33.1", features = ["serde"] }
-rust_decimal_macros = "1.33.1"
 
 rand = "0.9.1"
-uuid = { version = "1.16.0", features = ["v4"] }
+uuid = { version = "1.17.0", features = ["v4"] }
 ordered-float = "5.0.0"
 
 lazy_static = "1.4.0"

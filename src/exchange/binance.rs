@@ -6,7 +6,6 @@ use tokio::sync::RwLock;
 use tracing::{ debug, error, info, warn };
 use std::time::{ Duration, Instant };
 use std::sync::Arc;
-use rust_decimal::Decimal;
 
 use crate::models::level::Level;
 use crate::models::symbol::Symbol;
@@ -141,8 +140,8 @@ impl BinanceClient {
         for filter in &binance_symbol.filters {
             match filter {
                 BinanceSymbolFilter::LotSize { minQty, maxQty, stepSize } => {
-                    min_qty = minQty.parse::<Decimal>().ok();
-                    max_qty = maxQty.parse::<Decimal>().ok();
+                    min_qty = minQty.parse::<f64>().ok();
+                    max_qty = maxQty.parse::<f64>().ok();
                     qty_precision = Self::calculate_precision(stepSize);
                 }
                 BinanceSymbolFilter::PriceFilter { tickSize, .. } => {
