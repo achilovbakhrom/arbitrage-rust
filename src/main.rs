@@ -282,7 +282,7 @@ async fn run_normal_mode(config: Config) -> Result<()> {
 async fn run_performance_test(config: Config) -> Result<()> {
     // Output information
     info!("Starting performance test for triangular arbitrage system");
-    info!("Test duration: 120 seconds");
+    info!("Test duration: 300 seconds");
 
     // Create output directory
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -370,13 +370,13 @@ async fn run_performance_test(config: Config) -> Result<()> {
 
     info!("Created arbitrage detector. Starting performance test...");
 
-    // Run the performance test for 120 seconds
+    // Run the performance test for 300 seconds
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 2 minutes
+        120, // 5 minutes
         output_file
     ).await;
 
