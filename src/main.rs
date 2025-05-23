@@ -9,13 +9,9 @@ mod orderbook;
 mod arbitrage;
 mod performance;
 
-use std::{ thread, time::Duration };
+use std::time::Duration;
 use std::sync::Arc;
 use models::symbol_map::SymbolMap;
-use rust_decimal::prelude::FromPrimitive;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-use tokio::runtime;
 use tokio::time::{ sleep, timeout };
 
 use config::Config;
@@ -45,9 +41,15 @@ fn main() -> Result<()> {
     };
 
     // Load configuration with helpful error messages
-    let config = Config::from_env().context(
+    let mut config = Config::from_env().context(
         "Failed to load configuration from environment. Make sure you have a .env file with required variables."
     )?;
+
+    // Override debug mode for performance tests
+    if matches!(command, Command::PerformanceTest) {
+        config.debug = false; // Force disable console logging for performance tests
+        config.max_triangles = 50;
+    }
 
     // Initialize logging system
     logging
@@ -167,10 +169,10 @@ async fn run_normal_mode(config: Config) -> Result<()> {
     // Create the event-driven arbitrage detector
     let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
         orderbook_manager.clone(),
-        dec!(0.001), // 0.1% fee
-        Decimal::from_f64(config.threshold).unwrap(), // Configured minimum profit threshold
+        0.001, // 0.1% fee
+        config.threshold, // Configured minimum profit threshold
         triangular_paths,
-        dec!(100.0) // Start with 100 USDT
+        100.0 // Start with 100 USDT
     );
 
     info!(
@@ -360,10 +362,10 @@ async fn run_performance_test(config: Config) -> Result<()> {
     // Create arbitrage detector
     let detector = arbitrage::detector::create_event_driven_detector(
         orderbook_manager.clone(),
-        dec!(0.001), // 0.1% fee
-        Decimal::from_f64(config.threshold).unwrap(),
+        0.001, // 0.1% fee
+        config.threshold,
         triangular_paths,
-        dec!(100.0) // Start with 100 USDT
+        100.0 // Start with 100 USDT
     );
 
     info!("Created arbitrage detector. Starting performance test...");

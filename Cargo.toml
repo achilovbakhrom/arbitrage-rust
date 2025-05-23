@@ -3,6 +3,21 @@ name = "rust-arb-optimized"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
+
+# CPU-specific optimizations
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
 
@@ -49,12 +64,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 tracing-timing = "0.6.0"
 
-# Decimal arithmetic for money
-rust_decimal = { version = "1.33.1", features = ["serde"] }
-rust_decimal_macros = "1.33.1"
 
 rand = "0.9.1"
-uuid = { version = "1.16.0", features = ["v4"] }
+uuid = { version = "1.17.0", features = ["v4"] }
 ordered-float = "5.0.0"
 
 lazy_static = "1.4.0"
@@ -69,3 +81,8 @@ url = "2.5.4"
 
 #rwlock
 parking_lot = "0.12.3"
+
+ahash = "0.8.12"    # Faster hasher
+crossbeam = "0.8.4" # For AtomicCell
+smallvec = "1.15.0" # For small vector optimizations
+rayon = "1.10.0"    # For parallel processing

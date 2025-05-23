@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 use tokio::time::Instant;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-use tracing::{ info, error, warn };
-use crate::models::triangular_path::TriangularPath;
+use tracing::info;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageOpportunity;
 
@@ -25,7 +22,7 @@ pub enum ExecutionStrategy {
 pub struct ExecutionResult {
     pub opportunity: ArbitrageOpportunity,
     pub success: bool,
-    pub profit_amount: Decimal,
+    pub profit_amount: f64,
     pub execution_time_ms: u64,
     pub error: Option<String>,
 }
@@ -74,8 +71,8 @@ impl ArbitrageExecutor {
 
         // For demonstration, we'll assume success with slightly worse profit than anticipated
         // due to slippage and other real-world factors
-        let realized_profit_ratio = opportunity.profit_ratio * dec!(0.8); // 80% of expected profit
-        let profit_amount = opportunity.start_amount * (realized_profit_ratio - dec!(1.0));
+        let realized_profit_ratio = opportunity.profit_ratio * 0.8; // 80% of expected profit
+        let profit_amount = opportunity.start_amount * (realized_profit_ratio - 1.0);
 
         ExecutionResult {
             opportunity: opportunity.clone(),

@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
+use crossbeam::atomic::AtomicCell;
 use ordered_float::OrderedFloat;
 use crate::models::level::Level;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{ Mutex, RwLock };
 use tracing::{ debug, warn };
 use std::fmt;
 
@@ -35,6 +36,10 @@ pub struct OrderBook {
     update_mutex: Mutex<()>,
     /// Buffer for events that arrive before the snapshot
     event_buffer: RwLock<Vec<(u64, u64, Vec<(f64, f64)>, Vec<(f64, f64)>)>>,
+
+    // Cache for fast access
+    cached_best_bid: AtomicCell<Option<(f64, f64)>>,
+    cached_best_ask: AtomicCell<Option<(f64, f64)>>,
 }
 
 impl fmt::Debug for OrderBook {
@@ -64,6 +69,8 @@ impl OrderBook {
             state: AtomicU8::new(OrderBookState::Uninitialized as u8),
             update_mutex: Mutex::new(()),
             event_buffer: RwLock::new(Vec::with_capacity(100)), // Pre-allocate a reasonable buffer
+            cached_best_bid: AtomicCell::new(None),
+            cached_best_ask: AtomicCell::new(None),
         }
     }
 
@@ -84,12 +91,7 @@ impl OrderBook {
     }
 
     // Updated src/orderbook/orderbook.rs
-    pub fn apply_snapshot(
-        &self,
-        bids: Vec<Level>,
-        asks: Vec<Level>,
-        snapshot_last_update_id: u64
-    ) {
+    pub fn apply_snapshot(&self, bids: Vec<Level>, asks: Vec<Level>, snapshot_last_update_id: u64) {
         // Acquire exclusive lock for the snapshot operation
         let _lock = self.update_mutex.lock();
 
@@ -119,6 +121,13 @@ impl OrderBook {
                     bids_map.insert(OrderedFloat(lvl.price), lvl.quantity);
                 }
             }
+
+            // Update cached best bid
+            if let Some((&price, &qty)) = bids_map.last_key_value() {
+                self.cached_best_bid.store(Some((price.0, qty)));
+            } else {
+                self.cached_best_bid.store(None);
+            }
         }
 
         // Reset and update asks
@@ -131,6 +140,13 @@ impl OrderBook {
                 if lvl.quantity > 0.0 {
                     asks_map.insert(OrderedFloat(lvl.price), lvl.quantity);
                 }
+            }
+
+            // Update cached best ask
+            if let Some((&price, &qty)) = asks_map.first_key_value() {
+                self.cached_best_ask.store(Some((price.0, qty)));
+            } else {
+                self.cached_best_ask.store(None);
             }
         }
 
@@ -331,62 +347,66 @@ impl OrderBook {
     }
 
     fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
-        // Apply bid updates
-        {
+        // Process bids if any
+        if !bids.is_empty() {
             let mut bids_map = self.bids.write();
+            let mut best_bid_changed = false;
+
             for &(price, quantity) in bids {
                 let key = OrderedFloat(price);
 
-                // Rule 7 & 8: If the quantity is 0, remove the price level
                 if quantity == 0.0 {
-                    // Remove price level
                     bids_map.remove(&key);
+                    best_bid_changed = true;
                 } else {
-                    // Update or add price level
                     bids_map.insert(key, quantity);
+                    best_bid_changed = true;
                 }
             }
 
-            // Enforce depth limit for bids - we want to keep highest bids
-            if bids_map.len() > self.max_depth {
-                // Sort in ascending order and truncate the first (lowest) elements
-                let mut prices: Vec<_> = bids_map.keys().cloned().collect();
-                prices.sort(); // Ascending order
+            // Maintain depth limit - remove lowest bids
+            while bids_map.len() > self.max_depth {
+                bids_map.pop_first();
+            }
 
-                // Remove lowest bids to maintain max depth
-                let remove_count = bids_map.len() - self.max_depth;
-                for i in 0..remove_count {
-                    bids_map.remove(&prices[i]);
+            // Update cached best bid if changed
+            if best_bid_changed {
+                if let Some((&price, &qty)) = bids_map.last_key_value() {
+                    self.cached_best_bid.store(Some((price.0, qty)));
+                } else {
+                    self.cached_best_bid.store(None);
                 }
             }
         }
 
-        // Apply ask updates
-        {
+        // Process asks if any
+        if !asks.is_empty() {
             let mut asks_map = self.asks.write();
+            let mut best_ask_changed = false;
+
             for &(price, quantity) in asks {
                 let key = OrderedFloat(price);
 
-                // Rule 7 & 8: If the quantity is 0, remove the price level
                 if quantity == 0.0 {
-                    // Remove price level
                     asks_map.remove(&key);
+                    best_ask_changed = true;
                 } else {
-                    // Update or add price level
                     asks_map.insert(key, quantity);
+                    best_ask_changed = true;
                 }
             }
 
-            // Enforce depth limit for asks - we want to keep lowest asks
-            if asks_map.len() > self.max_depth {
-                // Sort in descending order and truncate the first (highest) elements
-                let mut prices: Vec<_> = asks_map.keys().cloned().collect();
-                prices.sort_by(|a, b| b.cmp(a)); // Descending order
+            // Maintain depth limit - remove highest asks
+            while asks_map.len() > self.max_depth {
+                asks_map.pop_last();
+            }
 
-                // Remove highest asks to maintain max depth
-                let remove_count = asks_map.len() - self.max_depth;
-                for i in 0..remove_count {
-                    asks_map.remove(&prices[i]);
+            // Update cached best ask if changed
+            if best_ask_changed {
+                if let Some((&price, &qty)) = asks_map.first_key_value() {
+                    self.cached_best_ask.store(Some((price.0, qty)));
+                } else {
+                    self.cached_best_ask.store(None);
                 }
             }
         }
@@ -394,40 +414,57 @@ impl OrderBook {
 
     /// Best (highest) bid - zero allocation
     pub fn best_bid(&self) -> Option<Level> {
-        // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return None;
         }
 
+        // Try cached value first
+        if let Some((price, quantity)) = self.cached_best_bid.load() {
+            return Some(Level { price, quantity });
+        }
+
         let bids = self.bids.read();
         bids.iter()
-            .next_back() // Get the highest bid (at the end for BTreeMap)
+            .next_back()
             .map(|(k, &v)| Level { price: k.into_inner(), quantity: v })
     }
 
     /// Best (lowest) ask - zero allocation
     pub fn best_ask(&self) -> Option<Level> {
-        // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return None;
         }
 
+        // Try cached value first
+        if let Some((price, quantity)) = self.cached_best_ask.load() {
+            return Some(Level { price, quantity });
+        }
+
         let asks = self.asks.read();
         asks.iter()
-            .next() // Get the lowest ask (at the beginning for BTreeMap)
+            .next()
             .map(|(k, &v)| Level { price: k.into_inner(), quantity: v })
     }
 
     /// Snapshot of top-of-book - zero allocation
     pub fn snapshot(&self) -> (Option<Level>, Option<Level>) {
-        // Fast check to avoid unnecessary work
         if self.get_state() != OrderBookState::Synced {
             return (None, None);
         }
 
-        let best_bid = self.best_bid();
-        let best_ask = self.best_ask();
-        (best_bid, best_ask)
+        // Use cached values for ultra-fast access
+        let cached_bid = self.cached_best_bid.load();
+        let cached_ask = self.cached_best_ask.load();
+
+        (
+            cached_bid.map(|(price, quantity)| Level { price, quantity }),
+            cached_ask.map(|(price, quantity)| Level { price, quantity }),
+        )
+    }
+
+    #[inline]
+    pub fn get_cached_top_of_book(&self) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+        (self.cached_best_bid.load(), self.cached_best_ask.load())
     }
 
     /// Get the mid-price
