@@ -376,7 +376,7 @@ async fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        300, // 5 minutes
+        120, // 5 minutes
         output_file
     ).await;
 

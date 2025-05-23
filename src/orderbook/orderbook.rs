@@ -16,36 +16,11 @@ pub enum OrderBookState {
     OutOfSync = 2,
 }
 
-/// A single price level in the orderbook - optimized for cache efficiency
-#[derive(Debug, Clone, Copy)]
-#[repr(C, align(16))] // Cache line alignment
-struct PriceLevel {
-    price: f64, // 8 bytes
-    quantity: f64, // 8 bytes
-}
-
-impl PriceLevel {
-    #[inline(always)]
-    const fn new(price: f64, quantity: f64) -> Self {
-        Self { price, quantity }
-    }
-
-    #[inline(always)]
-    const fn empty() -> Self {
-        Self { price: 0.0, quantity: 0.0 }
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.quantity == 0.0
-    }
-}
-
 /// Ultra-fast orderbook with lock-free operations where possible
 pub struct OrderBook {
-    /// Fixed arrays for price levels - aligned for cache efficiency
-    bids: Box<[PriceLevel; 512]>, // Reduced size for better cache usage
-    asks: Box<[PriceLevel; 512]>,
+    /// Fixed arrays for price levels - (price, quantity) tuples
+    bids: Box<[(f64, f64); 512]>, // Primitive tuples for maximum performance
+    asks: Box<[(f64, f64); 512]>,
 
     /// Atomic counters for active levels
     bid_count: AtomicCell<u16>, // u16 is sufficient and more cache-friendly
@@ -62,8 +37,8 @@ pub struct OrderBook {
     update_mutex: Mutex<()>,
 
     /// Hot path caches - most frequently accessed data
-    cached_best_bid: AtomicCell<PriceLevel>,
-    cached_best_ask: AtomicCell<PriceLevel>,
+    cached_best_bid: AtomicCell<(f64, f64)>,
+    cached_best_ask: AtomicCell<(f64, f64)>,
     cached_mid_price: AtomicCell<f64>,
 
     /// Cold path data - less frequently accessed
@@ -90,8 +65,8 @@ impl OrderBook {
         let max_depth = max_depth.min(512) as u16;
 
         // Use Box to heap-allocate large arrays and avoid stack overflow
-        let bids = Box::new([PriceLevel::empty(); 512]);
-        let asks = Box::new([PriceLevel::empty(); 512]);
+        let bids = Box::new([(0.0, 0.0); 512]);
+        let asks = Box::new([(0.0, 0.0); 512]);
 
         OrderBook {
             bids,
@@ -102,8 +77,8 @@ impl OrderBook {
             max_depth,
             state: AtomicU8::new(OrderBookState::Uninitialized as u8),
             update_mutex: Mutex::new(()),
-            cached_best_bid: AtomicCell::new(PriceLevel::empty()),
-            cached_best_ask: AtomicCell::new(PriceLevel::empty()),
+            cached_best_bid: AtomicCell::new((0.0, 0.0)),
+            cached_best_ask: AtomicCell::new((0.0, 0.0)),
             cached_mid_price: AtomicCell::new(0.0),
             event_buffer: RwLock::new(Vec::with_capacity(64)), // Smaller initial capacity
             first_update_id: AtomicU64::new(0),
@@ -125,17 +100,23 @@ impl OrderBook {
         self.state.store(state as u8, Ordering::Release);
     }
 
+    /// Check if a price level is empty (quantity is 0.0)
+    #[inline(always)]
+    fn is_empty_level(level: (f64, f64)) -> bool {
+        level.1 == 0.0
+    }
+
     /// Ultra-fast bid insertion with branch optimization
     #[inline(always)]
     unsafe fn insert_bid_unchecked(&self, price: f64, quantity: f64) -> bool {
-        let bids_ptr = self.bids.as_ptr() as *mut PriceLevel;
+        let bids_ptr = self.bids.as_ptr() as *mut (f64, f64);
         let mut count = self.bid_count.load() as usize;
 
         if quantity == 0.0 {
             // Remove operation - find and shift
             for i in 0..count {
                 let level = bids_ptr.add(i);
-                if (*level).price == price {
+                if (*level).0 == price {
                     // Shift remaining elements
                     std::ptr::copy(level.add(1), level, count - i - 1);
                     count -= 1;
@@ -152,11 +133,11 @@ impl OrderBook {
         // Find position (bids sorted highest to lowest)
         for i in 0..count {
             let level = bids_ptr.add(i);
-            if (*level).price == price {
+            if (*level).0 == price {
                 // Update existing
-                (*level).quantity = quantity;
+                (*level).1 = quantity;
                 return true;
-            } else if (*level).price < price {
+            } else if (*level).0 < price {
                 insert_pos = i;
                 break;
             }
@@ -186,7 +167,7 @@ impl OrderBook {
             }
 
             let level = bids_ptr.add(insert_pos);
-            *level = PriceLevel::new(price, quantity);
+            *level = (price, quantity);
             self.bid_count.store(count as u16);
             true
         } else {
@@ -197,14 +178,14 @@ impl OrderBook {
     /// Ultra-fast ask insertion with branch optimization
     #[inline(always)]
     unsafe fn insert_ask_unchecked(&self, price: f64, quantity: f64) -> bool {
-        let asks_ptr = self.asks.as_ptr() as *mut PriceLevel;
+        let asks_ptr = self.asks.as_ptr() as *mut (f64, f64);
         let mut count = self.ask_count.load() as usize;
 
         if quantity == 0.0 {
             // Remove operation
             for i in 0..count {
                 let level = asks_ptr.add(i);
-                if (*level).price == price {
+                if (*level).0 == price {
                     std::ptr::copy(level.add(1), level, count - i - 1);
                     count -= 1;
                     self.ask_count.store(count as u16);
@@ -220,11 +201,11 @@ impl OrderBook {
         // Find position (asks sorted lowest to highest)
         for i in 0..count {
             let level = asks_ptr.add(i);
-            if (*level).price == price {
+            if (*level).0 == price {
                 // Update existing
-                (*level).quantity = quantity;
+                (*level).1 = quantity;
                 return true;
-            } else if (*level).price > price {
+            } else if (*level).0 > price {
                 insert_pos = i;
                 break;
             }
@@ -252,7 +233,7 @@ impl OrderBook {
             }
 
             let level = asks_ptr.add(insert_pos);
-            *level = PriceLevel::new(price, quantity);
+            *level = (price, quantity);
             self.ask_count.store(count as u16);
             true
         } else {
@@ -270,7 +251,7 @@ impl OrderBook {
         let best_bid = if bid_count > 0 {
             unsafe { *self.bids.as_ptr() }
         } else {
-            PriceLevel::empty()
+            (0.0, 0.0)
         };
         self.cached_best_bid.store(best_bid);
 
@@ -278,13 +259,13 @@ impl OrderBook {
         let best_ask = if ask_count > 0 {
             unsafe { *self.asks.as_ptr() }
         } else {
-            PriceLevel::empty()
+            (0.0, 0.0)
         };
         self.cached_best_ask.store(best_ask);
 
         // Update mid price cache
-        let mid_price = if !best_bid.is_empty() && !best_ask.is_empty() {
-            (best_bid.price + best_ask.price) * 0.5
+        let mid_price = if !Self::is_empty_level(best_bid) && !Self::is_empty_level(best_ask) {
+            (best_bid.0 + best_ask.0) * 0.5
         } else {
             0.0
         };
@@ -328,10 +309,10 @@ impl OrderBook {
         // Bulk copy bids (already sorted highest to lowest)
         let bid_len = bids.len().min(self.max_depth as usize);
         unsafe {
-            let bids_ptr = self.bids.as_ptr() as *mut PriceLevel;
+            let bids_ptr = self.bids.as_ptr() as *mut (f64, f64);
             for (i, level) in bids.into_iter().take(bid_len).enumerate() {
                 if level.quantity > 0.0 {
-                    *bids_ptr.add(i) = PriceLevel::new(level.price, level.quantity);
+                    *bids_ptr.add(i) = (level.price, level.quantity);
                 }
             }
         }
@@ -340,10 +321,10 @@ impl OrderBook {
         // Bulk copy asks (already sorted lowest to highest)
         let ask_len = asks.len().min(self.max_depth as usize);
         unsafe {
-            let asks_ptr = self.asks.as_ptr() as *mut PriceLevel;
+            let asks_ptr = self.asks.as_ptr() as *mut (f64, f64);
             for (i, level) in asks.into_iter().take(ask_len).enumerate() {
                 if level.quantity > 0.0 {
-                    *asks_ptr.add(i) = PriceLevel::new(level.price, level.quantity);
+                    *asks_ptr.add(i) = (level.price, level.quantity);
                 }
             }
         }
@@ -401,8 +382,8 @@ impl OrderBook {
     pub fn best_bid(&self) -> Option<Level> {
         if self.get_state() == OrderBookState::Synced {
             let cached = self.cached_best_bid.load();
-            if !cached.is_empty() {
-                return Some(Level { price: cached.price, quantity: cached.quantity });
+            if !Self::is_empty_level(cached) {
+                return Some(Level { price: cached.0, quantity: cached.1 });
             }
         }
         None
@@ -413,8 +394,8 @@ impl OrderBook {
     pub fn best_ask(&self) -> Option<Level> {
         if self.get_state() == OrderBookState::Synced {
             let cached = self.cached_best_ask.load();
-            if !cached.is_empty() {
-                return Some(Level { price: cached.price, quantity: cached.quantity });
+            if !Self::is_empty_level(cached) {
+                return Some(Level { price: cached.0, quantity: cached.1 });
             }
         }
         None
@@ -427,14 +408,14 @@ impl OrderBook {
             let bid = self.cached_best_bid.load();
             let ask = self.cached_best_ask.load();
 
-            let bid_level = if !bid.is_empty() {
-                Some(Level { price: bid.price, quantity: bid.quantity })
+            let bid_level = if !Self::is_empty_level(bid) {
+                Some(Level { price: bid.0, quantity: bid.1 })
             } else {
                 None
             };
 
-            let ask_level = if !ask.is_empty() {
-                Some(Level { price: ask.price, quantity: ask.quantity })
+            let ask_level = if !Self::is_empty_level(ask) {
+                Some(Level { price: ask.0, quantity: ask.1 })
             } else {
                 None
             };
@@ -467,8 +448,8 @@ impl OrderBook {
             let bid = self.cached_best_bid.load();
             let ask = self.cached_best_ask.load();
 
-            if !bid.is_empty() && !ask.is_empty() {
-                Some(ask.price - bid.price)
+            if !Self::is_empty_level(bid) && !Self::is_empty_level(ask) {
+                Some(ask.0 - bid.0)
             } else {
                 None
             }
@@ -530,8 +511,8 @@ impl OrderBook {
         let bid = self.cached_best_bid.load();
         let ask = self.cached_best_ask.load();
 
-        let bid_tuple = if !bid.is_empty() { Some((bid.price, bid.quantity)) } else { None };
-        let ask_tuple = if !ask.is_empty() { Some((ask.price, ask.quantity)) } else { None };
+        let bid_tuple = if !Self::is_empty_level(bid) { Some(bid) } else { None };
+        let ask_tuple = if !Self::is_empty_level(ask) { Some(ask) } else { None };
 
         (bid_tuple, ask_tuple)
     }
@@ -550,8 +531,8 @@ impl OrderBook {
             let bids_ptr = self.bids.as_ptr();
             for i in 0..limit {
                 let level = *bids_ptr.add(i);
-                if !level.is_empty() {
-                    result.push(Level { price: level.price, quantity: level.quantity });
+                if !Self::is_empty_level(level) {
+                    result.push(Level { price: level.0, quantity: level.1 });
                 }
             }
         }
@@ -571,8 +552,8 @@ impl OrderBook {
             let asks_ptr = self.asks.as_ptr();
             for i in 0..limit {
                 let level = *asks_ptr.add(i);
-                if !level.is_empty() {
-                    result.push(Level { price: level.price, quantity: level.quantity });
+                if !Self::is_empty_level(level) {
+                    result.push(Level { price: level.0, quantity: level.1 });
                 }
             }
         }
@@ -611,7 +592,7 @@ impl OrderBook {
         unsafe {
             let bids_ptr = self.bids.as_ptr();
             for i in 0..count {
-                total += (*bids_ptr.add(i)).quantity;
+                total += (*bids_ptr.add(i)).1; // .1 is quantity
             }
         }
         total
@@ -623,7 +604,7 @@ impl OrderBook {
         unsafe {
             let asks_ptr = self.asks.as_ptr();
             for i in 0..count {
-                total += (*asks_ptr.add(i)).quantity;
+                total += (*asks_ptr.add(i)).1; // .1 is quantity
             }
         }
         total
