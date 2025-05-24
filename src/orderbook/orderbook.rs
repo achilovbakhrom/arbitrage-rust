@@ -16,14 +16,14 @@ pub enum OrderBookState {
     OutOfSync = 2,
 }
 
+const MAX_DEPTH: usize = 100;
+
 /// Ultra-fast orderbook with lock-free operations where possible
 pub struct OrderBook {
-    /// Fixed arrays for price levels - (price, quantity) tuples
-    bids: Box<[(f64, f64); 512]>, // Primitive tuples for maximum performance
-    asks: Box<[(f64, f64); 512]>,
+    bids: Box<[(f64, f64); MAX_DEPTH]>,
+    asks: Box<[(f64, f64); MAX_DEPTH]>,
 
-    /// Atomic counters for active levels
-    bid_count: AtomicCell<u16>, // u16 is sufficient and more cache-friendly
+    bid_count: AtomicCell<u16>,
     ask_count: AtomicCell<u16>,
 
     /// Version tracking
@@ -62,11 +62,11 @@ impl OrderBook {
     /// Create a new empty orderbook with optimized defaults
     #[inline]
     pub fn new(max_depth: usize) -> Self {
-        let max_depth = max_depth.min(512) as u16;
+        let max_depth = max_depth.min(MAX_DEPTH) as u16;
 
         // Use Box to heap-allocate large arrays and avoid stack overflow
-        let bids = Box::new([(0.0, 0.0); 512]);
-        let asks = Box::new([(0.0, 0.0); 512]);
+        let bids = Box::new([(0.0, 0.0); MAX_DEPTH]);
+        let asks = Box::new([(0.0, 0.0); MAX_DEPTH]);
 
         OrderBook {
             bids,
