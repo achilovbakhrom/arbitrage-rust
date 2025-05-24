@@ -191,24 +191,13 @@ async fn run_normal_mode(config: Config) -> Result<()> {
         tokio::spawn(async move {
             let client = BinanceSbeClient::new(sbe_api_key);
 
-            // Attempt to connect with exponential backoff retry
-            let mut retry_count = 0;
-            let max_retries = 5;
             let mut ws_stream = loop {
                 match client.connect().await {
                     Ok(stream) => {
                         break stream;
                     }
                     Err(err) => {
-                        retry_count += 1;
-                        if retry_count >= max_retries {
-                            error!("Failed to connect after {} retries: {}", max_retries, err);
-                            return;
-                        }
-
-                        let backoff = Duration::from_secs((2u64).pow(retry_count as u32));
-                        warn!("Connection failed, retrying in {:?}: {}", backoff, err);
-                        sleep(backoff).await;
+                        warn!("Connection failed: {}", err);
                     }
                 }
             };

@@ -7,7 +7,6 @@ use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, Ordering };
 use tracing::info;
 use colored::Colorize;
-use parking_lot::Mutex;
 
 use dashmap::DashMap; // Use DashMap for concurrent access without locks
 use std::thread;
