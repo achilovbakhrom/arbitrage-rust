@@ -1,4 +1,4 @@
-use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
+use std::{ sync::atomic::{ AtomicU64, AtomicU8, Ordering } };
 use crossbeam::atomic::AtomicCell;
 use crate::models::level::Level;
 use parking_lot::{ Mutex, RwLock };
@@ -115,13 +115,15 @@ impl OrderBook {
         if quantity == 0.0 {
             // Remove operation - find and shift
             for i in 0..count {
-                let level = bids_ptr.add(i);
-                if (*level).0 == price {
-                    // Shift remaining elements
-                    std::ptr::copy(level.add(1), level, count - i - 1);
-                    count -= 1;
-                    self.bid_count.store(count as u16);
-                    return true;
+                unsafe {
+                    let level = bids_ptr.add(i);
+                    if (*level).0 == price {
+                        // Shift remaining elements
+                        std::ptr::copy(level.add(1), level, count - i - 1);
+                        count -= 1;
+                        self.bid_count.store(count as u16);
+                        return true;
+                    }
                 }
             }
             return false;
@@ -132,14 +134,16 @@ impl OrderBook {
 
         // Find position (bids sorted highest to lowest)
         for i in 0..count {
-            let level = bids_ptr.add(i);
-            if (*level).0 == price {
-                // Update existing
-                (*level).1 = quantity;
-                return true;
-            } else if (*level).0 < price {
-                insert_pos = i;
-                break;
+            unsafe {
+                let level = bids_ptr.add(i);
+                if (*level).0 == price {
+                    // Update existing
+                    (*level).1 = quantity;
+                    return true;
+                } else if (*level).0 < price {
+                    insert_pos = i;
+                    break;
+                }
             }
         }
 
@@ -148,28 +152,33 @@ impl OrderBook {
             if count < (self.max_depth as usize) {
                 // Shift elements to make room
                 if insert_pos < count {
-                    std::ptr::copy(
-                        bids_ptr.add(insert_pos),
-                        bids_ptr.add(insert_pos + 1),
-                        count - insert_pos
-                    );
+                    unsafe {
+                        std::ptr::copy(
+                            bids_ptr.add(insert_pos),
+                            bids_ptr.add(insert_pos + 1),
+                            count - insert_pos
+                        );
+                    }
                 }
                 count += 1;
             } else if insert_pos < count {
                 // Shift and replace worst level
-                std::ptr::copy(
-                    bids_ptr.add(insert_pos),
-                    bids_ptr.add(insert_pos + 1),
-                    count - insert_pos - 1
-                );
+                unsafe {
+                    std::ptr::copy(
+                        bids_ptr.add(insert_pos),
+                        bids_ptr.add(insert_pos + 1),
+                        count - insert_pos - 1
+                    );
+                }
             } else {
                 return false; // Price too low to include
             }
-
-            let level = bids_ptr.add(insert_pos);
-            *level = (price, quantity);
-            self.bid_count.store(count as u16);
-            true
+            unsafe {
+                let level = bids_ptr.add(insert_pos);
+                *level = (price, quantity);
+                self.bid_count.store(count as u16);
+                true
+            }
         } else {
             false
         }
@@ -184,12 +193,14 @@ impl OrderBook {
         if quantity == 0.0 {
             // Remove operation
             for i in 0..count {
-                let level = asks_ptr.add(i);
-                if (*level).0 == price {
-                    std::ptr::copy(level.add(1), level, count - i - 1);
-                    count -= 1;
-                    self.ask_count.store(count as u16);
-                    return true;
+                unsafe {
+                    let level = asks_ptr.add(i);
+                    if (*level).0 == price {
+                        std::ptr::copy(level.add(1), level, count - i - 1);
+                        count -= 1;
+                        self.ask_count.store(count as u16);
+                        return true;
+                    }
                 }
             }
             return false;
@@ -200,14 +211,16 @@ impl OrderBook {
 
         // Find position (asks sorted lowest to highest)
         for i in 0..count {
-            let level = asks_ptr.add(i);
-            if (*level).0 == price {
-                // Update existing
-                (*level).1 = quantity;
-                return true;
-            } else if (*level).0 > price {
-                insert_pos = i;
-                break;
+            unsafe {
+                let level = asks_ptr.add(i);
+                if (*level).0 == price {
+                    // Update existing
+                    (*level).1 = quantity;
+                    return true;
+                } else if (*level).0 > price {
+                    insert_pos = i;
+                    break;
+                }
             }
         }
 
@@ -215,27 +228,33 @@ impl OrderBook {
         if insert_pos < (self.max_depth as usize) {
             if count < (self.max_depth as usize) {
                 if insert_pos < count {
-                    std::ptr::copy(
-                        asks_ptr.add(insert_pos),
-                        asks_ptr.add(insert_pos + 1),
-                        count - insert_pos
-                    );
+                    unsafe {
+                        std::ptr::copy(
+                            asks_ptr.add(insert_pos),
+                            asks_ptr.add(insert_pos + 1),
+                            count - insert_pos
+                        );
+                    }
                 }
                 count += 1;
             } else if insert_pos < count {
-                std::ptr::copy(
-                    asks_ptr.add(insert_pos),
-                    asks_ptr.add(insert_pos + 1),
-                    count - insert_pos - 1
-                );
+                unsafe {
+                    std::ptr::copy(
+                        asks_ptr.add(insert_pos),
+                        asks_ptr.add(insert_pos + 1),
+                        count - insert_pos - 1
+                    );
+                }
             } else {
                 return false;
             }
 
-            let level = asks_ptr.add(insert_pos);
-            *level = (price, quantity);
-            self.ask_count.store(count as u16);
-            true
+            unsafe {
+                let level = asks_ptr.add(insert_pos);
+                *level = (price, quantity);
+                self.ask_count.store(count as u16);
+                true
+            }
         } else {
             false
         }
@@ -484,6 +503,7 @@ impl OrderBook {
 
         self.process_price_updates(bids, asks);
         self.last_update_id.store(last_update_id, Ordering::Release);
+
         Ok(true)
     }
 

@@ -554,7 +554,7 @@ pub async fn run_performance_test(
             // Record the measurement
             test_state.record_measurement(measurement).await;
         });
-    }).await;
+    });
 
     // Connect to WebSocket
     let mut ws_stream = client.connect().await?;
