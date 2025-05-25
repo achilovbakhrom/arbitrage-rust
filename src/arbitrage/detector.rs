@@ -5,10 +5,10 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, Ordering };
-use tracing::info;
+use tracing::{ debug, info };
 use colored::Colorize;
 
-use dashmap::DashMap; // Use DashMap for concurrent access without locks
+use dashmap::DashMap;
 use std::thread;
 
 use crate::models::triangular_path::TriangularPath;
@@ -154,16 +154,19 @@ impl ArbitrageDetectorState {
         })
     }
 
-    /// Handle an orderbook update
+    /// Handle an orderbook update - REMOVED async
     pub fn handle_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
         if !book.is_synced() {
             return;
         }
+        let start = Instant::now();
 
         // Find affected paths and process them
         if let Some(path_indices) = self.symbol_to_paths.get(symbol) {
             self.process_affected_paths(path_indices.borrow());
         }
+        let elapsed = start.elapsed();
+        debug!("Elapsed: {:2}", elapsed.as_micros());
     }
 
     #[inline]
@@ -295,7 +298,7 @@ pub fn create_event_driven_detector(
         min_profit_threshold_f64: min_profit_threshold_f64 as f64,
     });
 
-    // Register callback with orderbook manager
+    // Register callback with orderbook manager - CHANGED to sync callback
     let callback_state = detector_state.clone();
     orderbook_manager.register_update_callback(
         Arc::new(move |symbol, book| {

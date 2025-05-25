@@ -241,7 +241,7 @@ async fn run_normal_mode(config: Config) -> Result<()> {
                     first_update_id,
                     last_update_id
                 );
-            }).await;
+            });
 
             // Process WebSocket messages
             if let Err(e) = client.process_messages(&mut ws_stream).await {
