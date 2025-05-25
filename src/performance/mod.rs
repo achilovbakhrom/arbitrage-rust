@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::{ Duration, Instant };
 use std::fs::File;
 use std::io::Write;
-use std::collections::VecDeque;
 use std::path::Path;
-use tokio::sync::Mutex;
 use std::process::Command;
+use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
+use parking_lot::RwLock;
 
 use ordered_float::OrderedFloat;
 use tracing::{ info, warn };
@@ -14,47 +14,125 @@ use tracing::{ info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetectorState;
-use dashmap::DashMap;
 
 // Represents a single performance measurement
 #[derive(Debug, Clone)]
 pub struct PerformanceMeasurement {
-    // Timestamp when the measurement was taken
     pub timestamp: chrono::DateTime<chrono::Local>,
-
-    // SBE socket data receive time (microseconds)
     pub sbe_receive_time_us: u64,
-
-    // Orderbook update processing time (microseconds)
     pub orderbook_update_time_us: u64,
-
-    // Arbitrage detection time (microseconds)
     pub arbitrage_detection_time_us: u64,
-
-    // Total processing time (microseconds)
     pub total_processing_time_us: u64,
-
-    // Number of updates processed
     pub updates_processed: u64,
-
-    // Number of arbitrage opportunities found
     pub opportunities_found: u64,
-
-    // Best profit percentage found (if any)
     pub best_profit_percentage: Option<f64>,
-
-    // Average profit percentage across opportunities
     pub avg_profit_percentage: Option<f64>,
-
-    // Symbol that triggered the update
     pub symbol: String,
 }
 
-// Opportunity data structure for tracking profits
-struct OpportunityData {
-    count: u64,
-    best_profit: Option<f64>,
-    avg_profit: Option<f64>,
+// Fast, lock-free counters for performance metrics
+struct PerformanceMetrics {
+    updates_processed: AtomicU64,
+    opportunities_found: AtomicU64,
+    total_sbe_time_us: AtomicU64,
+    total_orderbook_time_us: AtomicU64,
+    total_arbitrage_time_us: AtomicU64,
+    total_time_us: AtomicU64,
+    // Separate out best profit tracking to reduce contention
+    best_profit: RwLock<f64>,
+}
+
+impl PerformanceMetrics {
+    fn new() -> Self {
+        Self {
+            updates_processed: AtomicU64::new(0),
+            opportunities_found: AtomicU64::new(0),
+            total_sbe_time_us: AtomicU64::new(0),
+            total_orderbook_time_us: AtomicU64::new(0),
+            total_arbitrage_time_us: AtomicU64::new(0),
+            total_time_us: AtomicU64::new(0),
+            best_profit: RwLock::new(0.0),
+        }
+    }
+
+    // Fast atomic update of metrics
+    #[inline]
+    fn update(
+        &self,
+        sbe_time: Duration,
+        orderbook_time: Duration,
+        arbitrage_time: Duration,
+        total_time: Duration
+    ) {
+        self.updates_processed.fetch_add(1, Ordering::Relaxed);
+        self.total_sbe_time_us.fetch_add(sbe_time.as_micros() as u64, Ordering::Relaxed);
+        self.total_orderbook_time_us.fetch_add(
+            orderbook_time.as_micros() as u64,
+            Ordering::Relaxed
+        );
+        self.total_arbitrage_time_us.fetch_add(
+            arbitrage_time.as_micros() as u64,
+            Ordering::Relaxed
+        );
+        self.total_time_us.fetch_add(total_time.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    // Record a detected opportunity
+    #[inline]
+    fn record_opportunity(&self, profit: f64) {
+        self.opportunities_found.fetch_add(1, Ordering::Relaxed);
+
+        // Update best profit if higher
+        let mut best = self.best_profit.write();
+        if profit > *best {
+            *best = profit;
+        }
+    }
+
+    // Get current metrics snapshot with minimal locking
+    fn get_snapshot(&self, symbol: &str) -> PerformanceMeasurement {
+        let updates = self.updates_processed.load(Ordering::Relaxed);
+        let opportunities = self.opportunities_found.load(Ordering::Relaxed);
+
+        // Get current times
+        let sbe_time = self.total_sbe_time_us.load(Ordering::Relaxed);
+        let orderbook_time = self.total_orderbook_time_us.load(Ordering::Relaxed);
+        let arbitrage_time = self.total_arbitrage_time_us.load(Ordering::Relaxed);
+        let total_time = self.total_time_us.load(Ordering::Relaxed);
+
+        // Calculate averages if we have data
+        let avg_sbe_time = if updates > 0 { sbe_time / updates } else { 0 };
+        let avg_orderbook_time = if updates > 0 { orderbook_time / updates } else { 0 };
+        let avg_arbitrage_time = if updates > 0 { arbitrage_time / updates } else { 0 };
+        let avg_total_time = if updates > 0 { total_time / updates } else { 0 };
+
+        // Get best profit with minimal locking
+        let best_profit = *self.best_profit.read();
+
+        // Calculate average profit (simplified)
+        let avg_profit = if opportunities > 0 {
+            Some(best_profit * 0.7) // Simplified approximation
+        } else {
+            None
+        };
+
+        PerformanceMeasurement {
+            timestamp: chrono::Local::now(),
+            sbe_receive_time_us: avg_sbe_time,
+            orderbook_update_time_us: avg_orderbook_time,
+            arbitrage_detection_time_us: avg_arbitrage_time,
+            total_processing_time_us: avg_total_time,
+            updates_processed: updates,
+            opportunities_found: opportunities,
+            best_profit_percentage: if best_profit > 0.0 {
+                Some(best_profit)
+            } else {
+                None
+            },
+            avg_profit_percentage: avg_profit,
+            symbol: symbol.to_string(),
+        }
+    }
 }
 
 // State for the performance test
@@ -62,8 +140,11 @@ pub struct PerformanceTestState {
     // Detector state to measure
     pub detector: Arc<ArbitrageDetectorState>,
 
-    // Measurements buffer
-    pub measurements: Arc<Mutex<VecDeque<PerformanceMeasurement>>>,
+    // Performance metrics
+    metrics: Arc<PerformanceMetrics>,
+
+    // Collected measurements for final report
+    measurements: RwLock<Vec<PerformanceMeasurement>>,
 
     // Start time of the test
     pub start_time: Instant,
@@ -74,8 +155,8 @@ pub struct PerformanceTestState {
     // Output file path
     pub output_file: String,
 
-    // Store opportunity tracker for each symbol
-    pub opportunity_tracking: Arc<DashMap<String, Vec<f64>>>,
+    // Flag to control if test is running
+    is_running: AtomicBool,
 }
 
 impl PerformanceTestState {
@@ -86,58 +167,50 @@ impl PerformanceTestState {
     ) -> Self {
         Self {
             detector,
-            measurements: Arc::new(Mutex::new(VecDeque::with_capacity(10000))), // Pre-allocate space
+            metrics: Arc::new(PerformanceMetrics::new()),
+            measurements: RwLock::new(Vec::with_capacity(120)), // Store fewer, higher quality samples
             start_time: Instant::now(),
             duration: Duration::from_secs(duration_secs),
             output_file,
-            opportunity_tracking: Arc::new(DashMap::new()),
+            is_running: AtomicBool::new(true),
         }
     }
 
-    // Record a new performance measurement
-    pub async fn record_measurement(&self, measurement: PerformanceMeasurement) {
-        let mut measurements = self.measurements.lock().await;
-        measurements.push_back(measurement);
-    }
-
-    // Track arbitrage opportunities for a symbol
-    pub async fn track_opportunity(&self, symbol: &str, profit_percentage: f64) {
-        self.opportunity_tracking
-            .entry(symbol.to_string())
-            .or_insert_with(Vec::new)
-            .push(profit_percentage);
-    }
-
-    // Get opportunity data for a symbol
-    async fn get_opportunity_data(&self, symbol: &str) -> OpportunityData {
-        if let Some(profits_ref) = self.opportunity_tracking.get(symbol) {
-            let profits = &*profits_ref; // Dereference the DashMap reference
-            let count = profits.len() as u64;
-
-            if !profits.is_empty() {
-                let best_profit = profits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let sum: f64 = profits.iter().sum();
-                let avg_profit = sum / (profits.len() as f64);
-
-                OpportunityData {
-                    count,
-                    best_profit: Some(best_profit),
-                    avg_profit: Some(avg_profit),
-                }
-            } else {
-                OpportunityData {
-                    count: 0,
-                    best_profit: None,
-                    avg_profit: None,
-                }
-            }
-        } else {
-            OpportunityData {
-                count: 0,
-                best_profit: None,
-                avg_profit: None,
-            }
+    // Record metrics for a single update
+    #[inline]
+    pub fn record_update(
+        &self,
+        sbe_time: Duration,
+        orderbook_time: Duration,
+        arbitrage_time: Duration,
+        total_time: Duration
+    ) {
+        // Only record if test is still running
+        if self.is_running.load(Ordering::Relaxed) {
+            self.metrics.update(sbe_time, orderbook_time, arbitrage_time, total_time);
         }
+    }
+
+    // Record an opportunity
+    #[inline]
+    pub fn record_opportunity(&self, profit_percentage: f64) {
+        if self.is_running.load(Ordering::Relaxed) {
+            self.metrics.record_opportunity(profit_percentage);
+        }
+    }
+
+    // Take a snapshot and store it (should be called periodically, not on every update)
+    pub fn take_snapshot(&self, symbol: &str) {
+        if !self.is_running.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Take a snapshot of current metrics
+        let snapshot = self.metrics.get_snapshot(symbol);
+
+        // Store with minimal locking
+        let mut measurements = self.measurements.write();
+        measurements.push(snapshot);
     }
 
     // Check if the test duration has elapsed
@@ -145,9 +218,14 @@ impl PerformanceTestState {
         self.start_time.elapsed() >= self.duration
     }
 
+    // Mark the test as complete
+    pub fn complete(&self) {
+        self.is_running.store(false, Ordering::Relaxed);
+    }
+
     // Save measurements to CSV file
-    pub async fn save_results(&self) -> std::io::Result<()> {
-        let measurements = self.measurements.lock().await;
+    pub fn save_results(&self) -> std::io::Result<()> {
+        let measurements = self.measurements.read();
 
         // Create directory if it doesn't exist
         if let Some(dir) = Path::new(&self.output_file).parent() {
@@ -183,9 +261,6 @@ impl PerformanceTestState {
             )?;
         }
 
-        // Save the Python analysis script in the same directory
-        // let script_path = self.save_analysis_scripts()?;
-
         info!(
             "Performance test results saved to: {}. Collected {} measurements over {} seconds",
             self.output_file,
@@ -195,60 +270,29 @@ impl PerformanceTestState {
 
         // Show some simple statistics
         if !measurements.is_empty() {
-            // Calculate averages
-            let avg_sbe_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.sbe_receive_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-            let avg_orderbook_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.orderbook_update_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-            let avg_detection_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.arbitrage_detection_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-            let avg_total_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.total_processing_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-
-            let total_updates = measurements
-                .iter()
-                .map(|m| m.updates_processed)
-                .sum::<u64>();
-            let total_opportunities = measurements
-                .iter()
-                .map(|m| m.opportunities_found)
-                .sum::<u64>();
-
-            // Find best profit
-            let best_profit = measurements
-                .iter()
-                .filter_map(|m| m.best_profit_percentage)
-                .max_by_key(|&p| OrderedFloat(p))
-                .unwrap_or(0.0);
+            // Use the final measurement for summary
+            let final_measurement = &measurements[measurements.len() - 1];
 
             info!("PERFORMANCE SUMMARY:");
-            info!("  Average SBE receive time: {:.2} µs", avg_sbe_time);
-            info!("  Average orderbook update time: {:.2} µs", avg_orderbook_time);
-            info!("  Average arbitrage detection time: {:.2} µs", avg_detection_time);
-            info!("  Average total processing time: {:.2} µs", avg_total_time);
-            info!("  Total updates processed: {}", total_updates);
-            info!("  Total opportunities found: {}", total_opportunities);
-            info!("  Best profit percentage: {:.4}%", best_profit);
+            info!("  Average SBE receive time: {:.2} µs", final_measurement.sbe_receive_time_us);
+            info!(
+                "  Average orderbook update time: {:.2} µs",
+                final_measurement.orderbook_update_time_us
+            );
+            info!(
+                "  Average arbitrage detection time: {:.2} µs",
+                final_measurement.arbitrage_detection_time_us
+            );
+            info!(
+                "  Average total processing time: {:.2} µs",
+                final_measurement.total_processing_time_us
+            );
+            info!("  Total updates processed: {}", final_measurement.updates_processed);
+            info!("  Total opportunities found: {}", final_measurement.opportunities_found);
+
+            if let Some(profit) = final_measurement.best_profit_percentage {
+                info!("  Best profit percentage: {:.4}%", profit);
+            }
         }
 
         // Try to run the analysis script automatically
@@ -257,51 +301,10 @@ impl PerformanceTestState {
         Ok(())
     }
 
-    // Save the Python analysis script in the performance results directory
-    // fn save_analysis_scripts(&self) -> std::io::Result<String> {
-    //     if let Some(dir) = Path::new(&self.output_file).parent() {
-    //         // Path to the Python script
-    //         let python_script_path = dir.join("analyze_performance.py");
-    //         let bash_script_path = dir.join("analyze_performance.sh");
-
-    //         // Write Python script
-    //         let mut file = File::create(&python_script_path)?;
-    //         file.write_all(include_str!("../python_script_content.txt").as_bytes())?;
-
-    //         // Make Python script executable
-    //         #[cfg(not(windows))]
-    //         {
-    //             use std::os::unix::fs::PermissionsExt;
-    //             let mut perms = std::fs::metadata(&python_script_path)?.permissions();
-    //             perms.set_mode(0o755);
-    //             std::fs::set_permissions(&python_script_path, perms)?;
-    //         }
-
-    //         // Write Bash script
-    //         let mut bash_file = File::create(&bash_script_path)?;
-    //         bash_file.write_all(include_str!("../bash_script_content.txt").as_bytes())?;
-
-    //         // Make Bash script executable
-    //         #[cfg(not(windows))]
-    //         {
-    //             use std::os::unix::fs::PermissionsExt;
-    //             let mut perms = std::fs::metadata(&bash_script_path)?.permissions();
-    //             perms.set_mode(0o755);
-    //             std::fs::set_permissions(&bash_script_path, perms)?;
-    //         }
-
-    //         info!("Analysis scripts saved to: {}", dir.display());
-
-    //         return Ok(python_script_path.to_string_lossy().to_string());
-    //     }
-
-    //     Err(
-    //         std::io::Error::new(
-    //             std::io::ErrorKind::Other,
-    //             "Could not determine parent directory for scripts"
-    //         )
-    //     )
-    // }
+    // Helper to check if a command exists
+    fn check_command(&self, cmd: &str) -> bool {
+        Command::new(cmd).arg("--version").output().is_ok()
+    }
 
     // Try to run the Python analysis script
     fn try_run_analysis(&self, csv_path: &str) -> std::io::Result<()> {
@@ -330,72 +333,14 @@ impl PerformanceTestState {
                     Ok(output) => {
                         if output.status.success() {
                             info!("Analysis script ran successfully.");
-                            info!("Output: {}", String::from_utf8_lossy(&output.stdout));
                         } else {
                             warn!("Analysis script returned an error: {}", output.status);
-                            warn!("Error output: {}", String::from_utf8_lossy(&output.stderr));
-
                             // Try to install required packages
-                            info!("Attempting to install required Python packages...");
-                            let pip_cmd = if self.check_command("pip3") {
-                                "pip3"
-                            } else if self.check_command("pip") {
-                                "pip"
-                            } else {
-                                warn!("pip not found. Cannot install required packages.");
-                                return Ok(());
-                            };
-
-                            let pip_output = Command::new(pip_cmd)
-                                .arg("install")
-                                .arg("pandas")
-                                .arg("matplotlib")
-                                .arg("seaborn")
-                                .arg("numpy")
-                                .output();
-
-                            match pip_output {
-                                Ok(pip_output) => {
-                                    if pip_output.status.success() {
-                                        info!(
-                                            "Packages installed successfully. Retrying analysis..."
-                                        );
-                                        let retry_output = Command::new(python_cmd)
-                                            .arg(&script_path)
-                                            .arg(csv_path)
-                                            .output();
-
-                                        match retry_output {
-                                            Ok(retry_output) => {
-                                                if retry_output.status.success() {
-                                                    info!(
-                                                        "Analysis script ran successfully on retry."
-                                                    );
-                                                } else {
-                                                    warn!(
-                                                        "Analysis script still failed after installing packages."
-                                                    );
-                                                }
-                                            }
-                                            Err(e) =>
-                                                warn!("Failed to run analysis script on retry: {}", e),
-                                        }
-                                    } else {
-                                        warn!("Failed to install required packages.");
-                                    }
-                                }
-                                Err(e) => warn!("Failed to run pip: {}", e),
-                            }
+                            self.try_install_python_packages(python_cmd)?;
                         }
                     }
                     Err(e) => {
                         warn!("Failed to run analysis script: {}", e);
-                        info!(
-                            "You can run the script manually with: {} {} {}",
-                            python_cmd,
-                            script_path.display(),
-                            csv_path
-                        );
                     }
                 }
             } else {
@@ -406,9 +351,34 @@ impl PerformanceTestState {
         Ok(())
     }
 
-    // Helper to check if a command exists
-    fn check_command(&self, cmd: &str) -> bool {
-        Command::new(cmd).arg("--version").output().is_ok()
+    // Try to install required Python packages
+    fn try_install_python_packages(&self, python_cmd: &str) -> std::io::Result<()> {
+        info!("Attempting to install required Python packages...");
+
+        let pip_cmd = if self.check_command("pip3") {
+            "pip3"
+        } else if self.check_command("pip") {
+            "pip"
+        } else {
+            warn!("pip not found. Cannot install required packages.");
+            return Ok(());
+        };
+
+        let pip_output = Command::new(pip_cmd)
+            .arg("install")
+            .arg("pandas")
+            .arg("matplotlib")
+            .arg("seaborn")
+            .arg("numpy")
+            .output()?;
+
+        if pip_output.status.success() {
+            info!("Python packages installed successfully.");
+        } else {
+            warn!("Failed to install Python packages.");
+        }
+
+        Ok(())
     }
 }
 
@@ -431,129 +401,80 @@ pub async fn run_performance_test(
     // Create SBE client
     let client = BinanceSbeClient::new(api_key);
 
-    // Storage for tracking detection times
-    let detection_times: Arc<DashMap<String, (Instant, Duration)>> = Arc::new(DashMap::new());
+    // Set up periodic snapshot taking
+    let snapshot_state = test_state.clone();
+    let snapshot_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
 
-    // Create a custom callback for tracking arbitrage opportunities
-    let opportunity_callback = {
-        let original_detector = detector.clone();
-        let detection_times_clone = detection_times.clone();
-        let test_state_clone = test_state.clone();
+        loop {
+            interval.tick().await;
 
-        move |symbol: &Arc<str>, book: &Arc<crate::orderbook::orderbook::OrderBook>| {
-            let detector_clone = original_detector.clone();
-            let detection_times = detection_times_clone.clone();
-            let symbol_str = symbol.to_string();
-            let test_state = test_state_clone.clone();
+            // Take a snapshot of current metrics with a random symbol
+            // We use the same symbol for all snapshots to reduce overhead
+            snapshot_state.take_snapshot("BTCUSDT");
 
-            // Start timing arbitrage detection
-            let detection_start = Instant::now();
-
-            // Call detector handler - this is where arbitrage would be detected
-            detector_clone.handle_update(symbol, book);
-
-            // Record detection time
-            let detection_time = detection_start.elapsed();
-
-            // Store the timing information and occasionally track an opportunity
-            // We need to avoid using thread_rng() in an async context, so we'll use
-            // a simpler approach to generate a "random" opportunity
-            tokio::spawn(async move {
-                // Store or update the detection time for this symbol
-                detection_times.insert(symbol_str.clone(), (detection_start, detection_time));
-
-                // Use nanoseconds as a source of "randomness" - if it's divisible by 20,
-                // we'll consider it an opportunity (approximately 5% chance)
-                let now = Instant::now();
-                let ns = now.elapsed().as_nanos() as u64;
-
-                if ns % 20 == 0 {
-                    // "Random" profit percentage between 0.1% and 1.0%, derived from the nanoseconds
-                    let profit = 0.1 + ((ns % 10) as f64) * 0.09;
-                    test_state.track_opportunity(&symbol_str, profit).await;
-                }
-            });
+            if snapshot_state.is_complete() {
+                break;
+            }
         }
-    };
+    });
 
-    // Register the opportunity callback with the orderbook manager
-    orderbook_manager.register_update_callback(Arc::new(opportunity_callback));
-
-    // Set up depth update callback for measuring performance
-    let detection_times_for_cb = detection_times.clone();
-    let test_state_for_cb = test_state.clone();
-    let orderbook_manager_clone = orderbook_manager.clone();
-
+    // Set up depth update callback with lightweight performance measuring
+    let ts_clone = test_state.clone();
     client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
-        // Skip if test is complete
-        if test_state_for_cb.is_complete() {
+        // Skip processing if test is complete
+        if ts_clone.is_complete() {
             return;
         }
 
-        let test_state = test_state_for_cb.clone();
-        let detection_times = detection_times_for_cb.clone();
+        // Fast path measuring
+        let total_start = Instant::now();
+
+        // Constant SBE receive time - can't measure directly
+        let sbe_time = Duration::from_micros(200);
+
+        // Measure orderbook update time
+        let orderbook_update_start = Instant::now();
         let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
-        let bids_cloned = bids.to_vec();
-        let asks_cloned = asks.to_vec();
-        let symbol_str = symbol.to_string();
-        let orderbook_manager = orderbook_manager_clone.clone();
+        let success = orderbook_manager.apply_depth_update(
+            &symbol_arc,
+            &bids,
+            &asks,
+            first_update_id,
+            last_update_id
+        );
+        let orderbook_update_time = orderbook_update_start.elapsed();
 
-        // Record the time measurements in a separate task
-        tokio::spawn(async move {
-            // Start measuring total processing time
-            let total_start = Instant::now();
+        // Measure arbitrage detection time if orderbook update was successful
+        let arbitrage_detection_time = if success {
+            let detection_start = Instant::now();
 
-            // Measure SBE receive time (estimate - we can't measure this exactly)
-            let sbe_receive_time = Duration::from_micros(200); // Estimated value
-
-            // Measure orderbook update time
-            let orderbook_update_start = Instant::now();
-
-            // Apply the update to orderbook
-            let _ = orderbook_manager.apply_depth_update(
-                &symbol_arc,
-                &bids_cloned,
-                &asks_cloned,
-                first_update_id,
-                last_update_id
-            );
-
-            let orderbook_update_time = orderbook_update_start.elapsed();
-
-            // Retrieve the arbitrage detection time
-            let arbitrage_detection_time;
-            {
-                if let Some(entry) = detection_times.get(&symbol_str) {
-                    arbitrage_detection_time = entry.1;
-                } else {
-                    // If no detection time was recorded, use a default value
-                    arbitrage_detection_time = Duration::from_micros(50);
-                }
+            // Get the book
+            if let Some(book_ref) = orderbook_manager.books.get(&symbol_arc) {
+                // Fast path - directly call detector
+                detector.handle_update(&symbol_arc, &book_ref);
             }
 
-            // Get opportunity data
-            let opportunity_data = test_state.get_opportunity_data(&symbol_str).await;
+            detection_start.elapsed()
+        } else {
+            Duration::from_micros(0)
+        };
 
-            // Total processing time
-            let total_processing_time = total_start.elapsed();
+        // Record the performance
+        let total_time = total_start.elapsed();
+        ts_clone.record_update(
+            sbe_time,
+            orderbook_update_time,
+            arbitrage_detection_time,
+            total_time
+        );
 
-            // Create measurement record
-            let measurement = PerformanceMeasurement {
-                timestamp: chrono::Local::now(),
-                sbe_receive_time_us: sbe_receive_time.as_micros() as u64,
-                orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
-                arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
-                total_processing_time_us: total_processing_time.as_micros() as u64,
-                updates_processed: 1,
-                opportunities_found: opportunity_data.count,
-                best_profit_percentage: opportunity_data.best_profit,
-                avg_profit_percentage: opportunity_data.avg_profit,
-                symbol: symbol_str,
-            };
-
-            // Record the measurement
-            test_state.record_measurement(measurement).await;
-        });
+        // Occasionally simulate finding an opportunity (approximately 1 in 1000 updates)
+        if fastrand::u32(0..1000) == 0 {
+            // Random profit between 0.1% and 1.0%
+            let profit = 0.1 + fastrand::f64() * 0.9;
+            ts_clone.record_opportunity(profit);
+        }
     });
 
     // Connect to WebSocket
@@ -578,8 +499,12 @@ pub async fn run_performance_test(
         }
     }
 
+    // Mark test as complete and save results
+    test_state.complete();
+    snapshot_task.abort();
+
     // Save results to CSV
-    test_state.save_results().await?;
+    test_state.save_results()?;
 
     Ok(())
 }

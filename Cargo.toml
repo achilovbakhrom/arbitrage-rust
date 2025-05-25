@@ -86,3 +86,4 @@ ahash = "0.8.12"    # Faster hasher
 crossbeam = "0.8.4" # For AtomicCell
 smallvec = "1.15.0" # For small vector optimizations
 rayon = "1.10.0"    # For parallel processing
+fastrand = "2.3.0"

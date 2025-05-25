@@ -1429,6 +1429,7 @@ dependencies = [
  "crossbeam",
  "dashmap",
  "dotenv",
+ "fastrand",
  "figlet-rs",
  "futures",
  "http",
