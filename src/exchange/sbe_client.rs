@@ -4,7 +4,7 @@ use tokio::net::TcpStream;
 use tungstenite::{ client::IntoClientRequest, handshake::client::Request, protocol::Message };
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
-use std::{ sync::Arc, time::Instant };
+use std::sync::Arc;
 use tungstenite::handshake::client::generate_key;
 use dashmap::DashMap;
 use std::cell::UnsafeCell;
