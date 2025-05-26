@@ -1,5 +1,3 @@
-// src/arbitrage/detector.rs
-
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::sync::Arc;

@@ -5,3 +5,5 @@
 /performance_results
 .env
 .analyze
+.DS_Store
+*.lock
