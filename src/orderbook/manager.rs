@@ -736,13 +736,7 @@ impl OrderBookManager {
             }
             Ok(false) => {
                 // Book out of sync, need recovery
-                // debug!(
-                //     symbol = %symbol,
-                //     first_id = first_update_id,
-                //     last_id = last_update_id,
-                //     book_last_id = book.get_last_update_id(),
-                //     "Book out of sync, triggering recovery"
-                // );
+
                 self.trigger_recovery(symbol);
                 false
             }

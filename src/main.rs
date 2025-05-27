@@ -250,7 +250,7 @@ fn run_normal_mode(config: Config) -> Result<()> {
         // Set up depth update callback
         client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
             // Clone the data to avoid lifetime issues
-            let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
+            let symbol_arc: Arc<str> = Arc::from(symbol);
             let manager = manager_for_msg_task.clone();
 
             manager.apply_depth_update(&symbol_arc, &bids, &asks, first_update_id, last_update_id);
