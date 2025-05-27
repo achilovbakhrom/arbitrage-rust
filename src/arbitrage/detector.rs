@@ -157,14 +157,10 @@ impl ArbitrageDetectorState {
         if !book.is_synced() {
             return;
         }
-        let start = Instant::now();
-
         // Find affected paths and process them
         if let Some(path_indices) = self.symbol_to_paths.get(symbol) {
             self.process_affected_paths(path_indices.borrow());
         }
-        let elapsed = start.elapsed();
-        debug!("Elapsed: {:2}", elapsed.as_micros());
     }
 
     #[inline]

@@ -1,11 +1,14 @@
-use tokio_tungstenite::{ connect_async, WebSocketStream };
-use futures::{ SinkExt, StreamExt };
-use tokio::net::TcpStream;
-use tungstenite::{ client::IntoClientRequest, handshake::client::Request, protocol::Message };
+use tungstenite::{
+    http::Request,
+    protocol::Message,
+    handshake::client::generate_key,
+    connect,
+    WebSocket,
+    stream::MaybeTlsStream,
+};
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
-use std::sync::Arc;
-use tungstenite::handshake::client::generate_key;
+use std::{ net::TcpStream, sync::Arc };
 use dashmap::DashMap;
 use std::cell::UnsafeCell;
 use parking_lot::RwLock;
@@ -34,13 +37,8 @@ pub struct BinanceSbeClient<F>
     where F: Fn(&str, [(f64, f64); 100], [(f64, f64); 100], u64, u64) + Send + Sync + 'static {
     api_key: Arc<str>,
     endpoint: String,
-    // CHANGED: tokio::RwLock -> parking_lot::RwLock
     depth_callback: RwLock<Option<F>>,
-
-    // Thread-local buffers using UnsafeCell
     buffers: BufferCell,
-
-    // Symbol intern pool to avoid string allocations
     symbol_pool: Arc<DashMap<Box<[u8]>, Arc<str>>>,
 }
 
@@ -57,11 +55,8 @@ impl<F> BinanceSbeClient<F>
         }
     }
 
-    pub async fn connect(
-        &self
-    ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>> {
+    pub fn connect(&self) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
         info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
-
         let request = Request::builder()
             .uri(self.endpoint.as_str())
             .header("X-MBX-APIKEY", self.api_key.as_ref())
@@ -73,13 +68,7 @@ impl<F> BinanceSbeClient<F>
             .body(())
             .context("Failed to build request")?;
 
-        let client_request = request
-            .into_client_request()
-            .context("Failed to convert to WebSocket request")?;
-
-        debug!("Connecting with request: {:?}", &client_request);
-
-        let (ws_stream, response) = connect_async(client_request).await.context(
+        let (ws_stream, response) = connect(request).context(
             "Failed to connect to Binance SBE WebSocket"
         )?;
 
@@ -88,9 +77,9 @@ impl<F> BinanceSbeClient<F>
         Ok(ws_stream)
     }
 
-    pub async fn subscribe(
+    pub fn subscribe(
         &self,
-        ws_stream: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
+        ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
         symbols: &[String],
         channels: &[String]
     ) -> Result<()> {
@@ -111,16 +100,19 @@ impl<F> BinanceSbeClient<F>
         debug!("Subscription request: {}", &subscription);
 
         let message = Message::Text(subscription.into());
-        ws_stream.send(message).await?;
+        ws_stream.send(message)?;
 
         Ok(())
     }
 
-    pub async fn process_messages(
+    // FIXED: Proper error handling and loop termination
+    pub fn process_messages(
         &self,
-        ws_stream: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>
+        ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>
     ) -> Result<()> {
-        while let Some(message_result) = ws_stream.next().await {
+        loop {
+            let message_result = ws_stream.read();
+
             match message_result {
                 Ok(message) => {
                     match message {
@@ -134,7 +126,7 @@ impl<F> BinanceSbeClient<F>
                         }
                         Message::Ping(data) => {
                             debug!("Received ping, responding with pong");
-                            if let Err(e) = ws_stream.send(Message::Pong(data.clone())).await {
+                            if let Err(e) = ws_stream.send(Message::Pong(data)) {
                                 error!("Failed to send pong: {}", e);
                                 return Err(anyhow::anyhow!("WebSocket connection error: {}", e));
                             }
@@ -146,7 +138,10 @@ impl<F> BinanceSbeClient<F>
                             info!("WebSocket closed: {:?}", frame);
                             return Ok(());
                         }
-                        _ => {}
+                        Message::Frame(_) => {
+                            // Handle raw frames if needed
+                            debug!("Received raw frame");
+                        }
                     }
                 }
                 Err(e) => {
@@ -155,12 +150,64 @@ impl<F> BinanceSbeClient<F>
                 }
             }
         }
-
-        info!("WebSocket stream ended");
-        Ok(())
     }
 
-    // CHANGED: Removed async - now synchronous
+    // Alternative implementation with graceful shutdown support
+    pub fn process_messages_with_shutdown(
+        &self,
+        ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+        shutdown: &std::sync::atomic::AtomicBool
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+
+        loop {
+            // Check for shutdown signal
+            if shutdown.load(Ordering::Relaxed) {
+                info!("Shutdown signal received, closing WebSocket");
+                let _ = ws_stream.close(None);
+                return Ok(());
+            }
+
+            let message_result = ws_stream.read();
+
+            match message_result {
+                Ok(message) => {
+                    match message {
+                        Message::Binary(data) => {
+                            if let Err(e) = self.handle_binary_message(&data) {
+                                debug!("Error handling binary message: {}", e);
+                            }
+                        }
+                        Message::Text(text) => {
+                            debug!("Received text message: {}", text);
+                        }
+                        Message::Ping(data) => {
+                            debug!("Received ping, responding with pong");
+                            if let Err(e) = ws_stream.send(Message::Pong(data)) {
+                                error!("Failed to send pong: {}", e);
+                                return Err(anyhow::anyhow!("WebSocket connection error: {}", e));
+                            }
+                        }
+                        Message::Pong(data) => {
+                            debug!("Received pong response: {:?}", data);
+                        }
+                        Message::Close(frame) => {
+                            info!("WebSocket closed: {:?}", frame);
+                            return Ok(());
+                        }
+                        Message::Frame(_) => {
+                            debug!("Received raw frame");
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("WebSocket message error: {}", e);
+                    return Err(anyhow::anyhow!("WebSocket error: {}", e));
+                }
+            }
+        }
+    }
+
     #[inline]
     pub fn set_depth_callback(&self, callback: F) {
         let mut cb = self.depth_callback.write();
@@ -227,7 +274,7 @@ impl<F> BinanceSbeClient<F>
         };
 
         // Read fixed fields
-        let event_time = read_i64(data, offset)?;
+        let _event_time = read_i64(data, offset)?;
         offset += 8;
         let first_update_id = read_i64(data, offset)? as u64;
         offset += 8;
@@ -314,7 +361,8 @@ impl<F> BinanceSbeClient<F>
 
         // Intern the symbol
         let symbol = self.intern_symbol(symbol_bytes);
-        // CHANGED: Synchronous callback access
+
+        // Synchronous callback access
         let cb_guard = self.depth_callback.read();
         if let Some(cb) = cb_guard.as_ref() {
             cb(&symbol, *bid_buffer, *ask_buffer, first_update_id, last_update_id);

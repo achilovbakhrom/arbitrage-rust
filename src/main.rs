@@ -10,8 +10,9 @@ mod performance;
 
 use std::time::Duration;
 use std::sync::Arc;
+use std::sync::atomic::{ AtomicBool, Ordering };
+use std::thread;
 use models::symbol_map::SymbolMap;
-use tokio::time::{ sleep, timeout };
 
 use config::Config;
 use anyhow::{ anyhow, Context, Result };
@@ -55,25 +56,15 @@ fn main() -> Result<()> {
         ::init_logging(config.log_level, config.debug, &config.log_config)
         .context("Failed to initialize logging system")?;
 
-    let runtime = tokio::runtime::Builder
-        ::new_multi_thread()
-        .worker_threads(4) // Limit the number of worker threads
-        .enable_all()
-        .build()
-        .expect("Failed to create Tokio runtime");
-
     match command {
-        Command::Run => {
-            runtime.block_on(async { run_normal_mode(config).await }).unwrap();
-        }
-        Command::PerformanceTest => {
-            runtime.block_on(async { run_performance_test(config).await }).unwrap();
-        }
+        Command::Run => run_normal_mode(config)?,
+        Command::PerformanceTest => run_performance_test(config)?,
     }
+
     Ok(())
 }
 
-async fn run_normal_mode(config: Config) -> Result<()> {
+fn run_normal_mode(config: Config) -> Result<()> {
     // Display startup information
     print_app_starting();
     print_config(&config);
@@ -87,8 +78,20 @@ async fn run_normal_mode(config: Config) -> Result<()> {
 
     info!("Connected to exchange: {}", client.name());
 
+    // Create a runtime for async operations
+    let rt = tokio::runtime::Builder
+        ::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("Failed to create Tokio runtime")?;
+
     // Verify exchange connectivity with timeout
-    match timeout(API_TIMEOUT, client.is_operational()).await {
+    let is_operational = rt.block_on(async {
+        tokio::time::timeout(API_TIMEOUT, client.is_operational()).await
+    });
+
+    match is_operational {
         Ok(Ok(true)) => {
             info!("✓ Exchange is operational");
         }
@@ -99,7 +102,11 @@ async fn run_normal_mode(config: Config) -> Result<()> {
     }
 
     // Fetch all active spot trading symbols (with timeout)
-    let symbols = match timeout(API_TIMEOUT, client.get_active_spot_symbols()).await {
+    let symbols = rt.block_on(async {
+        tokio::time::timeout(API_TIMEOUT, client.get_active_spot_symbols()).await
+    });
+
+    let symbols = match symbols {
         Ok(Ok(symbols)) => symbols,
         Ok(Err(e)) => {
             error!("Failed to fetch symbols: {}", e);
@@ -181,96 +188,105 @@ async fn run_normal_mode(config: Config) -> Result<()> {
 
     // Start WebSocket connection for real-time market data
     info!("Starting WebSocket connection for real-time market data...");
-    let message_task = {
-        // Create clones for the WebSocket task
-        let manager_for_msg_task = orderbook_manager.clone();
-        let paths_for_msg_task = Arc::new(unique_symbols.clone());
-        let sbe_api_key = config.sbe_api_key.clone();
 
-        tokio::spawn(async move {
-            let client = BinanceSbeClient::new(sbe_api_key);
+    // Create shutdown signal
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
 
-            let mut ws_stream = loop {
-                match client.connect().await {
-                    Ok(stream) => {
-                        break stream;
-                    }
-                    Err(err) => {
-                        warn!("Connection failed: {}", err);
-                    }
-                }
-            };
-
-            info!("Connected to Binance SBE WebSocket");
-
-            // Subscribe to depth stream for each symbol
-            let channels = vec!["depth".to_string()];
-
-            // Limit to WEBSOCKET_BUFFER_SIZE symbols per connection to avoid overwhelming
-            let subscription_symbols = paths_for_msg_task
-                .iter()
-                .take(WEBSOCKET_BUFFER_SIZE)
-                .cloned()
-                .collect::<Vec<String>>();
-
-            match
-                client.subscribe(
-                    &mut ws_stream,
-                    &subscription_symbols,
-                    channels.iter().as_slice()
-                ).await
-            {
-                Ok(_) => info!("Successfully subscribed to {} symbols", subscription_symbols.len()),
-                Err(e) => {
-                    error!("Failed to subscribe: {}", e);
-                    return;
-                }
-            }
-
-            // Set up depth update callback
-            client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
-                // Clone the data to avoid lifetime issues with the spawned task
-                let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
-                let manager = manager_for_msg_task.clone();
-
-                manager.apply_depth_update(
-                    &symbol_arc,
-                    &bids,
-                    &asks,
-                    first_update_id,
-                    last_update_id
-                );
-            });
-
-            // Process WebSocket messages
-            if let Err(e) = client.process_messages(&mut ws_stream).await {
-                error!("WebSocket processing error: {}", e);
-            }
+    // Set up Ctrl+C handler
+    ctrlc
+        ::set_handler(move || {
+            info!("Received Ctrl+C, shutting down...");
+            shutdown_clone.store(true, Ordering::Relaxed);
         })
-    };
+        .context("Error setting Ctrl-C handler")?;
+
+    // Create clones for the WebSocket thread
+    let manager_for_msg_task = orderbook_manager.clone();
+    let paths_for_msg_task = Arc::new(unique_symbols.clone());
+    let sbe_api_key = config.sbe_api_key.clone();
+    let shutdown_for_ws = shutdown.clone();
+
+    // Start WebSocket processing in a separate thread
+    let ws_handle = thread::spawn(move || {
+        let client = BinanceSbeClient::new(sbe_api_key);
+
+        let mut ws_stream = loop {
+            if shutdown_for_ws.load(Ordering::Relaxed) {
+                return;
+            }
+
+            match client.connect() {
+                Ok(stream) => {
+                    break stream;
+                }
+                Err(err) => {
+                    warn!("Connection failed: {}, retrying in 5 seconds...", err);
+                    thread::sleep(Duration::from_secs(5));
+                }
+            }
+        };
+
+        info!("Connected to Binance SBE WebSocket");
+
+        // Subscribe to depth stream for each symbol
+        let channels = vec!["depth".to_string()];
+
+        // Limit to WEBSOCKET_BUFFER_SIZE symbols per connection to avoid overwhelming
+        let subscription_symbols = paths_for_msg_task
+            .iter()
+            .take(WEBSOCKET_BUFFER_SIZE)
+            .cloned()
+            .collect::<Vec<String>>();
+
+        match client.subscribe(&mut ws_stream, &subscription_symbols, channels.iter().as_slice()) {
+            Ok(_) => info!("Successfully subscribed to {} symbols", subscription_symbols.len()),
+            Err(e) => {
+                error!("Failed to subscribe: {}", e);
+                return;
+            }
+        }
+
+        // Set up depth update callback
+        client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
+            // Clone the data to avoid lifetime issues
+            let symbol_arc: Arc<str> = Arc::from(symbol.to_string());
+            let manager = manager_for_msg_task.clone();
+
+            manager.apply_depth_update(&symbol_arc, &bids, &asks, first_update_id, last_update_id);
+        });
+
+        // Process WebSocket messages with shutdown support
+        if let Err(e) = client.process_messages_with_shutdown(&mut ws_stream, &shutdown_for_ws) {
+            error!("WebSocket processing error: {}", e);
+        }
+    });
 
     // Print startup complete message
     print_app_started();
-    info!("\n Press Ctrl+C to exit");
+    info!("\nPress Ctrl+C to exit");
 
-    // Wait for CTRL+C signal for graceful shutdown
-    tokio::signal::ctrl_c().await?;
-    info!("Received Ctrl+C, shutting down...");
+    // Wait for shutdown signal
+    while !shutdown.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(100));
+    }
 
-    // Clean up and exit
-    message_task.abort();
+    // Wait for WebSocket thread to finish
+    if let Err(e) = ws_handle.join() {
+        error!("Error joining WebSocket thread: {:?}", e);
+    }
 
-    // Give tasks a moment to clean up
-    sleep(Duration::from_millis(200)).await;
+    // Give threads a moment to clean up
+    thread::sleep(Duration::from_millis(200));
 
     info!("Triangular arbitrage system stopped");
     Ok(())
 }
 
-async fn run_performance_test(config: Config) -> Result<()> {
+fn run_performance_test(config: Config) -> Result<()> {
     // Output information
     info!("Starting performance test for triangular arbitrage system");
-    info!("Test duration: 300 seconds");
+    info!("Test duration: 120 seconds");
 
     // Create output directory
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -289,8 +305,20 @@ async fn run_performance_test(config: Config) -> Result<()> {
         )?
     );
 
+    // Create a runtime for async operations
+    let rt = tokio::runtime::Builder
+        ::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("Failed to create Tokio runtime")?;
+
     // Verify exchange connectivity
-    match timeout(API_TIMEOUT, client.is_operational()).await {
+    let is_operational = rt.block_on(async {
+        tokio::time::timeout(API_TIMEOUT, client.is_operational()).await
+    });
+
+    match is_operational {
         Ok(Ok(true)) => {
             info!("✓ Exchange is operational");
         }
@@ -301,7 +329,11 @@ async fn run_performance_test(config: Config) -> Result<()> {
     }
 
     // Fetch symbols
-    let symbols = match timeout(API_TIMEOUT, client.get_active_spot_symbols()).await {
+    let symbols = rt.block_on(async {
+        tokio::time::timeout(API_TIMEOUT, client.get_active_spot_symbols()).await
+    });
+
+    let symbols = match symbols {
         Ok(Ok(symbols)) => symbols,
         Ok(Err(e)) => {
             error!("Failed to fetch symbols: {}", e);
@@ -358,15 +390,15 @@ async fn run_performance_test(config: Config) -> Result<()> {
 
     info!("Created arbitrage detector. Starting performance test...");
 
-    // Run the performance test for 300 seconds
+    // Run the performance test synchronously
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 5 minutes
+        120, // 2 minutes
         output_file
-    ).await;
+    );
 
     match test_result {
         Ok(_) => {
