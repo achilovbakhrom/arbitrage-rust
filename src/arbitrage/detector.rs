@@ -12,6 +12,7 @@ use std::thread;
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
+use crate::simd;
 
 /// Represents an arbitrage opportunity
 #[derive(Debug, Clone)]
@@ -72,6 +73,142 @@ pub struct ArbitrageDetectorState {
 }
 
 impl ArbitrageDetectorState {
+    #[inline]
+    pub fn check_paths_batch(&self, path_indices: &[usize]) -> Vec<ArbitrageOpportunity> {
+        if path_indices.len() < simd::MIN_SIMD_BATCH_SIZE || !simd::has_simd_support() {
+            // Fall back to original implementation for small batches
+            return path_indices
+                .iter()
+                .filter_map(|&idx| {
+                    self.all_paths
+                        .get(idx)
+                        .and_then(|path| self.check_path(path, self.start_amount))
+                })
+                .collect();
+        }
+
+        let mut opportunities = Vec::new();
+        let mut prices = Vec::with_capacity(path_indices.len());
+        let mut directions = Vec::with_capacity(path_indices.len());
+        let mut valid_paths = Vec::with_capacity(path_indices.len());
+
+        // Gather data for SIMD processing
+        for &idx in path_indices {
+            if let Some(path) = self.all_paths.get(idx) {
+                let books = &self.orderbook_manager.books;
+
+                if
+                    let (Some(first_book), Some(second_book), Some(third_book)) = (
+                        books.get(&path.first_symbol),
+                        books.get(&path.second_symbol),
+                        books.get(&path.third_symbol),
+                    )
+                {
+                    if first_book.is_synced() && second_book.is_synced() && third_book.is_synced() {
+                        let (first_bid, first_ask) = first_book.get_cached_top_of_book();
+                        let (second_bid, second_ask) = second_book.get_cached_top_of_book();
+                        let (third_bid, third_ask) = third_book.get_cached_top_of_book();
+
+                        if
+                            let (
+                                Some(first_bid),
+                                Some(first_ask),
+                                Some(second_bid),
+                                Some(second_ask),
+                                Some(third_bid),
+                                Some(third_ask),
+                            ) = (first_bid, first_ask, second_bid, second_ask, third_bid, third_ask)
+                        {
+                            let first_price = if path.first_is_base_to_quote {
+                                first_bid.0
+                            } else {
+                                first_ask.0
+                            };
+                            let second_price = if path.second_is_base_to_quote {
+                                second_bid.0
+                            } else {
+                                second_ask.0
+                            };
+                            let third_price = if path.third_is_base_to_quote {
+                                third_bid.0
+                            } else {
+                                third_ask.0
+                            };
+
+                            prices.push((first_price, second_price, third_price));
+                            directions.push((
+                                path.first_is_base_to_quote,
+                                path.second_is_base_to_quote,
+                                path.third_is_base_to_quote,
+                            ));
+                            valid_paths.push((idx, path.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        if prices.is_empty() {
+            return opportunities;
+        }
+
+        // Perform SIMD batch calculation
+        let mut results = vec![0.0; prices.len()];
+        let processed = unsafe {
+            simd::batch_calculate_arbitrage_neon(
+                &prices,
+                &directions,
+                self.fee_multiplier_f64,
+                100.0, // Fixed start amount for speed
+                &mut results
+            )
+        };
+
+        // Handle remaining non-SIMD calculations
+        for i in processed..prices.len() {
+            results[i] = unsafe {
+                simd::calculate_triangular_arbitrage_neon(
+                    prices[i].0,
+                    prices[i].1,
+                    prices[i].2,
+                    directions[i].0,
+                    directions[i].1,
+                    directions[i].2,
+                    self.fee_multiplier_f64,
+                    100.0
+                )
+            };
+        }
+
+        // Find profitable opportunities using SIMD
+        let mut profitable_indices = Vec::new();
+        unsafe {
+            simd::find_profitable_neon(
+                &results,
+                1.0 + self.min_profit_threshold_f64,
+                &mut profitable_indices
+            );
+        }
+
+        // Create ArbitrageOpportunity objects for profitable paths
+        for &profit_idx in &profitable_indices {
+            if let Some((original_idx, path)) = valid_paths.get(profit_idx) {
+                let profit_ratio = results[profit_idx];
+                let end_amount = profit_ratio;
+
+                opportunities.push(ArbitrageOpportunity {
+                    path: path.clone(),
+                    profit_ratio,
+                    start_amount: 100.0,
+                    end_amount,
+                    execution_time_ms: 0, // Will be set by caller
+                });
+            }
+        }
+
+        opportunities
+    }
+
     /// Check a single triangular path for arbitrage opportunity
     #[inline]
     pub fn check_path(
@@ -167,27 +304,40 @@ impl ArbitrageDetectorState {
     fn process_affected_paths(&self, indices: &[usize]) {
         OPPORTUNITY_BUFFER.with(|buffer| {
             let mut opportunities = buffer.borrow_mut();
-            opportunities.clear(); // Reuse existing capacity
+            opportunities.clear();
 
-            for &idx in indices {
-                if let Some(path) = self.all_paths.get(idx) {
-                    if let Some(opportunity) = self.check_path(path, self.start_amount) {
-                        opportunities.push(opportunity);
+            let start_time = Instant::now();
+
+            // Use SIMD batch processing for larger sets
+            if indices.len() >= simd::MIN_SIMD_BATCH_SIZE && simd::has_simd_support() {
+                opportunities.extend(self.check_paths_batch(indices));
+
+                // Set execution time for all opportunities
+                let execution_time_ms = start_time.elapsed().as_millis() as u64;
+                for opp in opportunities.iter_mut() {
+                    opp.execution_time_ms = execution_time_ms;
+                }
+            } else {
+                // Fall back to original single-path processing
+                for &idx in indices {
+                    if let Some(path) = self.all_paths.get(idx) {
+                        if let Some(mut opportunity) = self.check_path(path, self.start_amount) {
+                            opportunity.execution_time_ms = start_time.elapsed().as_millis() as u64;
+                            opportunities.push(opportunity);
+                        }
                     }
                 }
             }
 
-            // Process opportunities without additional allocations
+            // Process opportunities (unchanged)
             if !opportunities.is_empty() {
                 self.profit_counter.fetch_add(opportunities.len(), Ordering::Relaxed);
 
-                println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
-
-                for (i, opp) in opportunities.iter().enumerate() {
-                    println!("#{}: {}", i + 1, opp.display());
-                }
-
-                println!("{}\n", "=============================".bright_purple().bold());
+                // println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
+                // for (i, opp) in opportunities.iter().enumerate() {
+                //     println!("#{}: {}", i + 1, opp.display());
+                // }
+                // println!("{}\n", "=============================".bright_purple().bold());
             }
         });
     }
@@ -313,13 +463,13 @@ pub fn print_opportunities(opportunities: &[ArbitrageOpportunity]) {
         return;
     }
 
-    println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
+    // println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
 
-    for (i, opp) in opportunities.iter().enumerate() {
-        println!("#{}: {}", i + 1, opp.display());
-    }
+    // for (i, opp) in opportunities.iter().enumerate() {
+    //     println!("#{}: {}", i + 1, opp.display());
+    // }
 
-    println!("{}\n", "=============================".bright_purple().bold());
+    // println!("{}\n", "=============================".bright_purple().bold());
 }
 
 /// Get the top N opportunities

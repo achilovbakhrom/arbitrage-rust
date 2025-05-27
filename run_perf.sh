@@ -19,7 +19,7 @@ mkdir -p performance_results
 
 # Build the performance test binary in release mode
 echo "[1/4] Building in release mode..."
-cargo build --release
+RUSTFLAGS="-C target-cpu=native -C target-feature=+neon" cargo build --release
 if [ $? -ne 0 ]; then
     echo "Error: Failed to build binary."
     exit 1
