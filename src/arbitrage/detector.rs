@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, Ordering };
-use tracing::{ debug, info };
+use tracing::info;
 use colored::Colorize;
 
 use dashmap::DashMap;
