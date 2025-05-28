@@ -1,13 +1,12 @@
-mod arbitrage;
 mod config;
 mod constants;
 mod enums;
 mod exchange;
+mod utils;
 mod models;
 mod orderbook;
+mod arbitrage;
 mod performance;
-mod simd;
-mod utils;
 
 use std::time::Duration;
 use std::sync::Arc;

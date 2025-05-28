@@ -15,6 +15,10 @@ overflow-checks = false
 opt-level = 3
 codegen-units = 1
 
+# CPU-specific optimizations
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=native"]
+
 [dependencies]
 
 # Async tools
@@ -84,13 +88,3 @@ smallvec = "1.15.0" # For small vector optimizations
 rayon = "1.10.0"    # For parallel processing
 fastrand = "2.3.0"
 ctrlc = "3.4.7"
-
-# SIMD support for both ARM64 (Mac M1) and x86_64 (Linux)
-
-# Mac M1 NEON optimizations
-[target.'cfg(target_arch = "aarch64")']
-rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+neon"]
-
-# Linux AVX2/FMA optimizations
-[target.'cfg(target_arch = "x86_64")']
-rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+avx2,+fma"]
