@@ -10,14 +10,22 @@ codegen-units = 1
 panic = "abort"
 strip = true
 overflow-checks = false
-
-[profile.release.package."*"]
-opt-level = 3
-codegen-units = 1
+debug = false
 
 # CPU-specific optimizations
-[target.'cfg(target_arch = "x86_64")']
-rustflags = ["-C", "target-cpu=native"]
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C",
+    "target-cpu=apple-m1",                # or apple-m2 for M2
+    "-C",
+    "target-feature=+neon,+fp16,+crypto",
+    "-C",
+    "link-arg=-Wl,-dead_strip",
+]
+
+[profile.pgo]
+inherits = "release"
+lto = true
 
 [dependencies]
 
@@ -88,3 +96,4 @@ smallvec = "1.15.0" # For small vector optimizations
 rayon = "1.10.0"    # For parallel processing
 fastrand = "2.3.0"
 ctrlc = "3.4.7"
+rpmalloc = "0.2.2"

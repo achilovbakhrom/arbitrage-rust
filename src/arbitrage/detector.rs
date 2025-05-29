@@ -244,7 +244,8 @@ pub fn create_event_driven_detector(
     fee_rate: f64,
     min_profit_threshold: f64,
     paths: Vec<Arc<TriangularPath>>,
-    start_amount: f64
+    start_amount: f64,
+    is_perf: bool
 ) -> Arc<ArbitrageDetectorState> {
     // Build symbol to paths mapping with pre-allocation
     let symbol_to_paths = Arc::new(DashMap::with_capacity(paths.len() * 3));
@@ -300,32 +301,11 @@ pub fn create_event_driven_detector(
         })
     );
 
-    // Start a task to periodically print stats
-    detector_state.run_stats_task();
+    if is_perf {
+        // Start a task to periodically print stats
+        detector_state.run_stats_task();
+    }
 
     // Return the detector state
     detector_state
-}
-
-/// Print arbitrage opportunities that exceed threshold
-pub fn print_opportunities(opportunities: &[ArbitrageOpportunity]) {
-    if opportunities.is_empty() {
-        return;
-    }
-
-    println!("\n{}", "=== ARBITRAGE OPPORTUNITIES ===".bright_purple().bold());
-
-    for (i, opp) in opportunities.iter().enumerate() {
-        println!("#{}: {}", i + 1, opp.display());
-    }
-
-    println!("{}\n", "=============================".bright_purple().bold());
-}
-
-/// Get the top N opportunities
-pub fn top_opportunities(
-    opportunities: &[ArbitrageOpportunity],
-    n: usize
-) -> Vec<&ArbitrageOpportunity> {
-    opportunities.iter().take(n).collect()
 }

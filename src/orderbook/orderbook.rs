@@ -2,7 +2,7 @@ use std::{ sync::atomic::{ AtomicU64, AtomicU8, Ordering } };
 use crossbeam::atomic::AtomicCell;
 use crate::models::level::Level;
 use parking_lot::{ Mutex, RwLock };
-use tracing::{ debug, warn };
+use tracing::{ debug, info, warn };
 use std::fmt;
 
 /// Current state of the orderbook
@@ -547,6 +547,7 @@ impl OrderBook {
         let limit = depth.unwrap_or(self.max_depth as usize).min(count);
 
         let mut result = Vec::with_capacity(limit);
+
         unsafe {
             let bids_ptr = self.bids.as_ptr();
             for i in 0..limit {

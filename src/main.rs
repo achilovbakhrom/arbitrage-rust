@@ -1,3 +1,7 @@
+// for the quick data allocation on memory
+#[global_allocator]
+static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
+
 mod config;
 mod constants;
 mod enums;
@@ -69,7 +73,7 @@ fn run_normal_mode(config: Config) -> Result<()> {
     print_app_starting();
     print_config(&config);
 
-    // Initialize exchange client with proper error handling
+    // Initialize exchange api client with proper error handling
     let client = Arc::new(
         BinanceClient::new(config.fix_api.clone(), config.fix_secret.clone(), config.debug).context(
             "Failed to create Binance client"
@@ -175,10 +179,11 @@ fn run_normal_mode(config: Config) -> Result<()> {
     // Create the event-driven arbitrage detector
     let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
         orderbook_manager.clone(),
-        0.001, // 0.1% fee
+        config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
         triangular_paths,
-        100.0 // Start with 100 USDT
+        config.trade_amount, // Start with 100 USDT,
+        false
     );
 
     info!(
@@ -202,7 +207,7 @@ fn run_normal_mode(config: Config) -> Result<()> {
         .context("Error setting Ctrl-C handler")?;
 
     // Create clones for the WebSocket thread
-    let manager_for_msg_task = orderbook_manager.clone();
+    let orderbook_manager_thread = orderbook_manager.clone();
     let paths_for_msg_task = Arc::new(unique_symbols.clone());
     let sbe_api_key = config.sbe_api_key.clone();
     let shutdown_for_ws = shutdown.clone();
@@ -251,9 +256,8 @@ fn run_normal_mode(config: Config) -> Result<()> {
         client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
             // Clone the data to avoid lifetime issues
             let symbol_arc: Arc<str> = Arc::from(symbol);
-            let manager = manager_for_msg_task.clone();
 
-            manager.apply_depth_update(&symbol_arc, &bids, &asks, first_update_id, last_update_id);
+            orderbook_manager_thread.apply_depth_update(&symbol_arc, &bids, &asks, first_update_id, last_update_id);
         });
 
         // Process WebSocket messages with shutdown support
@@ -382,10 +386,11 @@ fn run_performance_test(config: Config) -> Result<()> {
     // Create arbitrage detector
     let detector = arbitrage::detector::create_event_driven_detector(
         orderbook_manager.clone(),
-        0.001, // 0.1% fee
+        config.fee, // 0.1% fee
         config.threshold,
         triangular_paths,
-        100.0 // Start with 100 USDT
+        config.trade_amount, // Start with 100 USDT
+        true
     );
 
     info!("Created arbitrage detector. Starting performance test...");

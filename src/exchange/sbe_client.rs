@@ -8,7 +8,7 @@ use tungstenite::{
 };
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
-use std::{ net::TcpStream, sync::Arc };
+use std::{ net::TcpStream, sync::Arc, time::{ SystemTime, UNIX_EPOCH } };
 use dashmap::DashMap;
 use std::cell::UnsafeCell;
 use parking_lot::RwLock;
@@ -103,53 +103,6 @@ impl<F> BinanceSbeClient<F>
         ws_stream.send(message)?;
 
         Ok(())
-    }
-
-    // FIXED: Proper error handling and loop termination
-    pub fn process_messages(
-        &self,
-        ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>
-    ) -> Result<()> {
-        loop {
-            let message_result = ws_stream.read();
-
-            match message_result {
-                Ok(message) => {
-                    match message {
-                        Message::Binary(data) => {
-                            if let Err(e) = self.handle_binary_message(&data) {
-                                debug!("Error handling binary message: {}", e);
-                            }
-                        }
-                        Message::Text(text) => {
-                            debug!("Received text message: {}", text);
-                        }
-                        Message::Ping(data) => {
-                            debug!("Received ping, responding with pong");
-                            if let Err(e) = ws_stream.send(Message::Pong(data)) {
-                                error!("Failed to send pong: {}", e);
-                                return Err(anyhow::anyhow!("WebSocket connection error: {}", e));
-                            }
-                        }
-                        Message::Pong(data) => {
-                            debug!("Received pong response: {:?}", data);
-                        }
-                        Message::Close(frame) => {
-                            info!("WebSocket closed: {:?}", frame);
-                            return Ok(());
-                        }
-                        Message::Frame(_) => {
-                            // Handle raw frames if needed
-                            debug!("Received raw frame");
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("WebSocket message error: {}", e);
-                    return Err(anyhow::anyhow!("WebSocket error: {}", e));
-                }
-            }
-        }
     }
 
     // Alternative implementation with graceful shutdown support

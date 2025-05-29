@@ -15,6 +15,8 @@ pub struct Config {
     pub threshold: f64,
     pub depth: usize,
     pub max_triangles: usize,
+    pub trade_amount: f64,
+    pub fee: f64,
 
     #[serde(serialize_with = "serialize_level", deserialize_with = "deserialize_level")]
     pub log_level: Level,
@@ -83,6 +85,20 @@ impl Config {
             .parse::<usize>()
             .context("Failed to parse MAX_TRIANGLES environment variable")?;
 
+        // Parse TRADE_AMOUNT
+        let trade_amount: f64 = env
+            ::var("TRADE_AMOUNT")
+            .unwrap_or_else(|_| "100.0".to_string())
+            .parse::<f64>()
+            .context("Failed to parse TRADE_AMOUNT environment variable")?;
+
+        // Parse TRADE_AMOUNT
+        let fee: f64 = env
+            ::var("FEE")
+            .unwrap_or_else(|_| "0.001".to_string())
+            .parse::<f64>()
+            .context("Failed to parse FEE environment variable")?;
+
         // Parse LOG_LEVEL
         let log_level_str = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
 
@@ -144,6 +160,8 @@ impl Config {
             log_config,
             base_asset,
             excluded_coins,
+            trade_amount,
+            fee,
         })
     }
 }
