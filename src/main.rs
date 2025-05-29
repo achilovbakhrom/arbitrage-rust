@@ -16,6 +16,8 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
 use std::thread;
+use arbitrage::detector;
+use arbitrage::executor::{ ArbitrageExecutor, ExecutionStrategy };
 use models::symbol_map::SymbolMap;
 
 use config::Config;
@@ -169,6 +171,13 @@ fn run_normal_mode(config: Config) -> Result<()> {
     // Create the shared orderbook manager with optimal depth
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
+    let executor = Arc::new(
+        ArbitrageExecutor::new(
+            orderbook_manager.clone(),
+            ExecutionStrategy::FastSequential // Maximum speed
+        )
+    );
+
     // Convert paths to Arc for zero-copy sharing
     let triangular_paths: Vec<Arc<_>> = symbol_map
         .get_triangular_paths()
@@ -177,14 +186,35 @@ fn run_normal_mode(config: Config) -> Result<()> {
         .collect();
 
     // Create the event-driven arbitrage detector
-    let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
+    // let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
+    //     orderbook_manager.clone(),
+    //     config.fee, // 0.1% fee
+    //     config.threshold, // Configured minimum profit threshold
+    //     triangular_paths,
+    //     config.trade_amount, // Start with 100 USDT,
+    //     false
+    // );
+
+    let _arbitrage_detector = arbitrage::detector::create_ultra_fast_detector_with_executor(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
         triangular_paths,
-        config.trade_amount, // Start with 100 USDT,
-        false
+        config.trade_amount, // Start with configured amount
+        executor.clone(), // Pass the executor
+        false // is_perf flag
     );
+
+    let stats_executor = executor.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            let stats = stats_executor.get_performance_stats();
+            if stats.total_executions > 0 {
+                info!("Executor stats: {}", stats);
+            }
+        }
+    });
 
     info!(
         "Created high-performance event-driven arbitrage detector with threshold: {:.2}%",
@@ -257,7 +287,13 @@ fn run_normal_mode(config: Config) -> Result<()> {
             // Clone the data to avoid lifetime issues
             let symbol_arc: Arc<str> = Arc::from(symbol);
 
-            orderbook_manager_thread.apply_depth_update(&symbol_arc, &bids, &asks, first_update_id, last_update_id);
+            orderbook_manager_thread.apply_depth_update(
+                &symbol_arc,
+                &bids,
+                &asks,
+                first_update_id,
+                last_update_id
+            );
         });
 
         // Process WebSocket messages with shutdown support
@@ -376,6 +412,13 @@ fn run_performance_test(config: Config) -> Result<()> {
     // Create orderbook manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
+    let executor = Arc::new(
+        ArbitrageExecutor::new(
+            orderbook_manager.clone(),
+            ExecutionStrategy::FastSequential // Maximum speed
+        )
+    );
+
     // Convert paths to Arc for zero-copy sharing
     let triangular_paths: Vec<Arc<_>> = symbol_map
         .get_triangular_paths()
@@ -383,14 +426,30 @@ fn run_performance_test(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    // Create arbitrage detector
-    let detector = arbitrage::detector::create_event_driven_detector(
+    // // Create arbitrage detector
+    // let detector = arbitrage::detector::create_event_driven_detector(
+    //     orderbook_manager.clone(),
+    //     config.fee, // 0.1% fee
+    //     config.threshold,
+    //     triangular_paths,
+    //     config.trade_amount, // Start with 100 USDT
+    //     true
+    // );
+
+    // Create the event-driven arbitrage detector with high-performance executor
+    let detector = arbitrage::detector::create_ultra_fast_detector_with_executor(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
-        config.threshold,
+        config.threshold, // Configured minimum profit threshold
         triangular_paths,
-        config.trade_amount, // Start with 100 USDT
-        true
+        config.trade_amount, // Start with configured amount
+        executor.clone(), // Pass the executor
+        false // is_perf flag
+    );
+
+    info!(
+        "Created ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}%",
+        config.threshold * 100.0
     );
 
     info!("Created arbitrage detector. Starting performance test...");
