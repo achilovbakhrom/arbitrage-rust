@@ -325,7 +325,7 @@ fn run_normal_mode(config: Config) -> Result<()> {
 
 fn run_performance_test(config: Config) -> Result<()> {
     // Output information
-    info!("Starting performance test for triangular arbitrage system");
+    info!("Starting enhanced performance test for triangular arbitrage system");
     info!("Test duration: 120 seconds");
 
     // Create output directory
@@ -426,50 +426,41 @@ fn run_performance_test(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    // // Create arbitrage detector
-    // let detector = arbitrage::detector::create_event_driven_detector(
-    //     orderbook_manager.clone(),
-    //     config.fee, // 0.1% fee
-    //     config.threshold,
-    //     triangular_paths,
-    //     config.trade_amount, // Start with 100 USDT
-    //     true
-    // );
-
-    // Create the event-driven arbitrage detector with high-performance executor
+    // Create the enhanced arbitrage detector
     let detector = arbitrage::detector::create_ultra_fast_detector_with_executor(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
-        triangular_paths,
+        triangular_paths.clone(),
         config.trade_amount, // Start with configured amount
         executor.clone(), // Pass the executor
         false // is_perf flag
     );
 
     info!(
-        "Created ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}%",
+        "Created enhanced ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}%",
         config.threshold * 100.0
     );
 
-    info!("Created arbitrage detector. Starting performance test...");
+    info!("Created arbitrage detector. Starting enhanced performance test...");
 
-    // Run the performance test synchronously
+    // Run the enhanced performance test
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
         120, // 2 minutes
-        output_file
+        output_file,
+        triangular_paths // Pass the triangular paths
     );
 
     match test_result {
         Ok(_) => {
-            info!("Performance test completed successfully!");
+            info!("Enhanced performance test completed successfully!");
         }
         Err(e) => {
-            error!("Performance test failed: {}", e);
+            error!("Enhanced performance test failed: {}", e);
             return Err(e);
         }
     }

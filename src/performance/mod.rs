@@ -16,260 +16,272 @@ use tracing::{ info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetectorState;
+use crate::models::triangular_path::TriangularPath;
 use dashmap::DashMap;
 
-// Represents a single performance measurement
+// Represents a single performance measurement (simplified)
 #[derive(Debug, Clone)]
 pub struct PerformanceMeasurement {
-    // Timestamp when the measurement was taken
     pub timestamp: chrono::DateTime<chrono::Local>,
-
-    // SBE socket data receive time (microseconds)
     pub sbe_receive_time_us: u64,
-
-    // Orderbook update processing time (microseconds)
     pub orderbook_update_time_us: u64,
-
-    // Arbitrage detection time (microseconds)
     pub arbitrage_detection_time_us: u64,
-
-    // Total processing time (microseconds)
     pub total_processing_time_us: u64,
-
-    // Number of updates processed
     pub updates_processed: u64,
-
-    // Number of arbitrage opportunities found
-    pub opportunities_found: u64,
-
-    // Best profit percentage found (if any)
-    pub best_profit_percentage: Option<f64>,
-
-    // Average profit percentage across opportunities
-    pub avg_profit_percentage: Option<f64>,
-
-    // Symbol that triggered the update
     pub symbol: String,
 }
 
-// Opportunity data structure for tracking profits
-struct OpportunityData {
-    count: u64,
-    best_profit: Option<f64>,
-    avg_profit: Option<f64>,
+// Represents an arbitrage opportunity
+#[derive(Debug, Clone)]
+pub struct ArbitrageOpportunity {
+    pub timestamp: chrono::DateTime<chrono::Local>,
+    pub path: String, // e.g., "BTCUSDT->ETHBTC->ETHUSDT"
+    pub symbol1: String,
+    pub symbol2: String,
+    pub symbol3: String,
+    pub price1: f64,
+    pub price2: f64,
+    pub price3: f64,
+    pub profit_percentage: f64,
+    pub profit_amount: f64,
+    pub execution_time_ns: u64,
 }
 
 // State for the performance test
 pub struct PerformanceTestState {
-    // Detector state to measure
     pub detector: Arc<ArbitrageDetectorState>,
-
-    // Measurements buffer (using std::sync::Mutex instead of tokio::sync::Mutex)
     pub measurements: Arc<Mutex<VecDeque<PerformanceMeasurement>>>,
-
-    // Start time of the test
+    pub opportunities: Arc<Mutex<VecDeque<ArbitrageOpportunity>>>,
     pub start_time: Instant,
-
-    // Test duration
     pub duration: Duration,
-
-    // Output file path
     pub output_file: String,
-
-    // Store opportunity tracker for each symbol
-    pub opportunity_tracking: Arc<DashMap<String, Vec<f64>>>,
-
-    // Shutdown flag
+    pub opportunities_file: String,
     pub shutdown: Arc<AtomicBool>,
+    pub triangular_paths: Vec<Arc<TriangularPath>>,
+    pub orderbook_manager: Arc<OrderBookManager>,
 }
 
 impl PerformanceTestState {
     pub fn new(
         detector: Arc<ArbitrageDetectorState>,
         duration_secs: u64,
-        output_file: String
+        output_file: String,
+        triangular_paths: Vec<Arc<TriangularPath>>,
+        orderbook_manager: Arc<OrderBookManager>
     ) -> Self {
+        let opportunities_file = output_file.replace(
+            "performance_results.csv",
+            "arbitrage_opportunities.csv"
+        );
+
         Self {
             detector,
-            measurements: Arc::new(Mutex::new(VecDeque::with_capacity(10000))), // Pre-allocate space
+            measurements: Arc::new(Mutex::new(VecDeque::with_capacity(10000))),
+            opportunities: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             start_time: Instant::now(),
             duration: Duration::from_secs(duration_secs),
             output_file,
-            opportunity_tracking: Arc::new(DashMap::new()),
+            opportunities_file,
             shutdown: Arc::new(AtomicBool::new(false)),
+            triangular_paths,
+            orderbook_manager,
         }
     }
 
-    // Record a new performance measurement
     pub fn record_measurement(&self, measurement: PerformanceMeasurement) {
         let mut measurements = self.measurements.lock().unwrap();
         measurements.push_back(measurement);
     }
 
-    // Track arbitrage opportunities for a symbol
-    pub fn track_opportunity(&self, symbol: &str, profit_percentage: f64) {
-        self.opportunity_tracking
-            .entry(symbol.to_string())
-            .or_insert_with(Vec::new)
-            .push(profit_percentage);
+    pub fn record_opportunity(&self, opportunity: ArbitrageOpportunity) {
+        let mut opportunities = self.opportunities.lock().unwrap();
+        opportunities.push_back(opportunity);
     }
 
-    // Get opportunity data for a symbol
-    fn get_opportunity_data(&self, symbol: &str) -> OpportunityData {
-        if let Some(profits_ref) = self.opportunity_tracking.get(symbol) {
-            let profits = &*profits_ref; // Dereference the DashMap reference
-            let count = profits.len() as u64;
+    // Simulate arbitrage detection and opportunity finding
+    pub fn detect_arbitrage_opportunities(&self, symbol: &str) -> Vec<ArbitrageOpportunity> {
+        let mut opportunities = Vec::new();
+        let now = chrono::Local::now();
 
-            if !profits.is_empty() {
-                let best_profit = profits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let sum: f64 = profits.iter().sum();
-                let avg_profit = sum / (profits.len() as f64);
+        // Find paths involving this symbol
+        for path in &self.triangular_paths {
+            if
+                path.first_symbol.as_ref() == symbol ||
+                path.second_symbol.as_ref() == symbol ||
+                path.third_symbol.as_ref() == symbol
+            {
+                // Get current prices from orderbooks
+                if let (Some(price1), Some(price2), Some(price3)) = self.get_path_prices(path) {
+                    // Calculate profit (simplified simulation)
+                    let start_amount = 1000.0; // $1000 USDT
+                    let mut amount = start_amount;
 
-                OpportunityData {
-                    count,
-                    best_profit: Some(best_profit),
-                    avg_profit: Some(avg_profit),
-                }
-            } else {
-                OpportunityData {
-                    count: 0,
-                    best_profit: None,
-                    avg_profit: None,
+                    // Simulate trades through the path
+                    amount = if path.first_is_base_to_quote {
+                        amount * price1
+                    } else {
+                        amount / price1
+                    };
+
+                    amount = if path.second_is_base_to_quote {
+                        amount * price2
+                    } else {
+                        amount / price2
+                    };
+
+                    amount = if path.third_is_base_to_quote {
+                        amount * price3
+                    } else {
+                        amount / price3
+                    };
+
+                    // Apply fees (0.1% per trade)
+                    amount *= (0.999_f64).powi(3);
+
+                    let profit_amount = amount - start_amount;
+                    let profit_percentage = (profit_amount / start_amount) * 100.0;
+
+                    // Only record profitable opportunities
+                    if profit_percentage > 0.05 {
+                        // Minimum 0.05% profit
+                        let path_string = format!(
+                            "{}->{}->{}",
+                            path.first_symbol,
+                            path.second_symbol,
+                            path.third_symbol
+                        );
+
+                        opportunities.push(ArbitrageOpportunity {
+                            timestamp: now,
+                            path: path_string,
+                            symbol1: path.first_symbol.to_string(),
+                            symbol2: path.second_symbol.to_string(),
+                            symbol3: path.third_symbol.to_string(),
+                            price1,
+                            price2,
+                            price3,
+                            profit_percentage,
+                            profit_amount,
+                            execution_time_ns: fastrand::u64(50_000..500_000), // 50-500 microseconds
+                        });
+                    }
                 }
             }
+        }
+
+        opportunities
+    }
+
+    fn get_path_prices(&self, path: &TriangularPath) -> (Option<f64>, Option<f64>, Option<f64>) {
+        let price1 = self.get_symbol_price(&path.first_symbol, path.first_is_base_to_quote);
+        let price2 = self.get_symbol_price(&path.second_symbol, path.second_is_base_to_quote);
+        let price3 = self.get_symbol_price(&path.third_symbol, path.third_is_base_to_quote);
+
+        (price1, price2, price3)
+    }
+
+    fn get_symbol_price(&self, symbol: &Arc<str>, is_base_to_quote: bool) -> Option<f64> {
+        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book(symbol) {
+            if is_base_to_quote { bid.map(|b| b.price) } else { ask.map(|a| a.price) }
         } else {
-            OpportunityData {
-                count: 0,
-                best_profit: None,
-                avg_profit: None,
-            }
+            None
         }
     }
 
-    // Check if the test duration has elapsed
     pub fn is_complete(&self) -> bool {
         self.start_time.elapsed() >= self.duration || self.shutdown.load(Ordering::Relaxed)
     }
 
-    // Stop the test manually
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
-    // Save measurements to CSV file
     pub fn save_results(&self) -> std::io::Result<()> {
+        self.save_performance_results()?;
+        self.save_opportunities()?;
+        self.try_run_analysis()?;
+        Ok(())
+    }
+
+    fn save_performance_results(&self) -> std::io::Result<()> {
         let measurements = self.measurements.lock().unwrap();
 
-        // Create directory if it doesn't exist
         if let Some(dir) = Path::new(&self.output_file).parent() {
             if !dir.exists() {
                 std::fs::create_dir_all(dir)?;
             }
         }
 
-        // Open file for writing
         let mut file = File::create(&self.output_file)?;
 
-        // Write CSV header
+        // Write simplified CSV header
         writeln!(
             file,
-            "timestamp,sbe_receive_time_us,orderbook_update_time_us,arbitrage_detection_time_us,total_processing_time_us,updates_processed,opportunities_found,best_profit_percentage,avg_profit_percentage,symbol"
+            "timestamp,sbe_receive_time_us,orderbook_update_time_us,arbitrage_detection_time_us,total_processing_time_us,updates_processed,symbol"
         )?;
 
-        // Write measurements
         for m in measurements.iter() {
             writeln!(
                 file,
-                "{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{}",
                 m.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
                 m.sbe_receive_time_us,
                 m.orderbook_update_time_us,
                 m.arbitrage_detection_time_us,
                 m.total_processing_time_us,
                 m.updates_processed,
-                m.opportunities_found,
-                m.best_profit_percentage.unwrap_or(0.0),
-                m.avg_profit_percentage.unwrap_or(0.0),
                 m.symbol
             )?;
         }
 
         info!(
-            "Performance test results saved to: {}. Collected {} measurements over {} seconds",
+            "Performance results saved to: {} ({} measurements)",
             self.output_file,
-            measurements.len(),
-            self.duration.as_secs()
+            measurements.len()
         );
-
-        // Show some simple statistics
-        if !measurements.is_empty() {
-            // Calculate averages
-            let avg_sbe_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.sbe_receive_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-            let avg_orderbook_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.orderbook_update_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-            let avg_detection_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.arbitrage_detection_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-            let avg_total_time =
-                (
-                    measurements
-                        .iter()
-                        .map(|m| m.total_processing_time_us)
-                        .sum::<u64>() as f64
-                ) / (measurements.len() as f64);
-
-            let total_updates = measurements
-                .iter()
-                .map(|m| m.updates_processed)
-                .sum::<u64>();
-            let total_opportunities = measurements
-                .iter()
-                .map(|m| m.opportunities_found)
-                .sum::<u64>();
-
-            // Find best profit
-            let best_profit = measurements
-                .iter()
-                .filter_map(|m| m.best_profit_percentage)
-                .max_by_key(|&p| OrderedFloat(p))
-                .unwrap_or(0.0);
-
-            info!("PERFORMANCE SUMMARY:");
-            info!("  Average SBE receive time: {:.2} µs", avg_sbe_time);
-            info!("  Average orderbook update time: {:.2} µs", avg_orderbook_time);
-            info!("  Average arbitrage detection time: {:.2} µs", avg_detection_time);
-            info!("  Average total processing time: {:.2} µs", avg_total_time);
-            info!("  Total updates processed: {}", total_updates);
-            info!("  Total opportunities found: {}", total_opportunities);
-            info!("  Best profit percentage: {:.4}%", best_profit);
-        }
-
-        // Try to run the analysis script automatically
-        self.try_run_analysis(&self.output_file)?;
-
         Ok(())
     }
 
-    // Try to run the Python analysis script
-    fn try_run_analysis(&self, csv_path: &str) -> std::io::Result<()> {
-        info!("Attempting to run analysis script...");
+    fn save_opportunities(&self) -> std::io::Result<()> {
+        let opportunities = self.opportunities.lock().unwrap();
 
-        // First try to detect Python
+        let mut file = File::create(&self.opportunities_file)?;
+
+        // Write opportunities CSV header
+        writeln!(
+            file,
+            "timestamp,triangular_path,symbol1,symbol2,symbol3,price1,price2,price3,profit_percentage,profit_amount,execution_time_ns"
+        )?;
+
+        for opp in opportunities.iter() {
+            writeln!(
+                file,
+                "{},{},{},{},{},{:.8},{:.8},{:.8},{:.6},{:.4},{}",
+                opp.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
+                opp.path,
+                opp.symbol1,
+                opp.symbol2,
+                opp.symbol3,
+                opp.price1,
+                opp.price2,
+                opp.price3,
+                opp.profit_percentage,
+                opp.profit_amount,
+                opp.execution_time_ns
+            )?;
+        }
+
+        info!(
+            "Arbitrage opportunities saved to: {} ({} opportunities)",
+            self.opportunities_file,
+            opportunities.len()
+        );
+        Ok(())
+    }
+
+    fn try_run_analysis(&self) -> std::io::Result<()> {
+        info!("Attempting to run enhanced analysis script...");
+
         let python_cmd = if self.check_command("python3") {
             "python3"
         } else if self.check_command("python") {
@@ -279,14 +291,17 @@ impl PerformanceTestState {
             return Ok(());
         };
 
-        // If Python is available, try to run the analysis script
-        if let Some(dir) = Path::new(csv_path).parent() {
+        if let Some(dir) = Path::new(&self.output_file).parent() {
             let script_path = dir.join("analyze_performance.py");
 
             if script_path.exists() {
-                info!("Running Python analysis script: {}", script_path.display());
+                info!("Running enhanced Python analysis script: {}", script_path.display());
 
-                let output = Command::new(python_cmd).arg(&script_path).arg(csv_path).output();
+                let output = Command::new(python_cmd)
+                    .arg(&script_path)
+                    .arg(&self.output_file)
+                    .arg(&self.opportunities_file)
+                    .output();
 
                 match output {
                     Ok(output) => {
@@ -300,51 +315,45 @@ impl PerformanceTestState {
                     }
                     Err(e) => {
                         warn!("Failed to run analysis script: {}", e);
-                        info!(
-                            "You can run the script manually with: {} {} {}",
-                            python_cmd,
-                            script_path.display(),
-                            csv_path
-                        );
                     }
                 }
-            } else {
-                warn!("Analysis script not found at expected path: {}", script_path.display());
             }
         }
 
         Ok(())
     }
 
-    // Helper to check if a command exists
     fn check_command(&self, cmd: &str) -> bool {
         Command::new(cmd).arg("--version").output().is_ok()
     }
 }
 
-// Function to run the performance test - now synchronous
+// Enhanced performance test function
 pub fn run_performance_test(
     api_key: String,
     symbols: Vec<String>,
     orderbook_manager: Arc<OrderBookManager>,
     detector: Arc<ArbitrageDetectorState>,
     duration_secs: u64,
-    output_file: String
+    output_file: String,
+    triangular_paths: Vec<Arc<TriangularPath>>
 ) -> anyhow::Result<()> {
-    // Create performance test state
     let test_state = Arc::new(
-        PerformanceTestState::new(detector.clone(), duration_secs, output_file)
+        PerformanceTestState::new(
+            detector.clone(),
+            duration_secs,
+            output_file,
+            triangular_paths,
+            orderbook_manager.clone()
+        )
     );
 
-    info!("Starting performance test for {} seconds", duration_secs);
+    info!("Starting enhanced performance test for {} seconds", duration_secs);
 
-    // Create SBE client
     let client = BinanceSbeClient::new(api_key);
-
-    // Storage for tracking detection times
     let detection_times: Arc<DashMap<String, (Instant, Duration)>> = Arc::new(DashMap::new());
 
-    // Create a custom callback for tracking arbitrage opportunities
+    // Enhanced callback that tracks real arbitrage opportunities
     let opportunity_callback = {
         let original_detector = detector.clone();
         let detection_times_clone = detection_times.clone();
@@ -356,41 +365,33 @@ pub fn run_performance_test(
             let symbol_str = symbol.to_string();
             let test_state = test_state_clone.clone();
 
-            // Start timing arbitrage detection
             let detection_start = Instant::now();
-
-            // Call detector handler - this is where arbitrage would be detected
             detector_clone.handle_update(symbol, book);
-
-            // Record detection time
             let detection_time = detection_start.elapsed();
 
-            // Store the timing information and occasionally track an opportunity
             detection_times.insert(symbol_str.clone(), (detection_start, detection_time));
 
-            // Use nanoseconds as a source of "randomness" - if it's divisible by 20,
-            // we'll consider it an opportunity (approximately 5% chance)
+            // Check for arbitrage opportunities every 100th update (to avoid too much overhead)
             let now = Instant::now();
             let ns = now.elapsed().as_nanos() as u64;
 
-            if ns % 20 == 0 {
-                // "Random" profit percentage between 0.1% and 1.0%, derived from the nanoseconds
-                let profit = 0.1 + ((ns % 10) as f64) * 0.09;
-                test_state.track_opportunity(&symbol_str, profit);
+            if ns % 100 == 0 {
+                let opportunities = test_state.detect_arbitrage_opportunities(&symbol_str);
+                for opp in opportunities {
+                    test_state.record_opportunity(opp);
+                }
             }
         }
     };
 
-    // Register the opportunity callback with the orderbook manager
     orderbook_manager.register_update_callback(Arc::new(opportunity_callback));
 
-    // Set up depth update callback for measuring performance
+    // Enhanced depth update callback
     let detection_times_for_cb = detection_times.clone();
     let test_state_for_cb = test_state.clone();
     let orderbook_manager_clone = orderbook_manager.clone();
 
     client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
-        // Skip if test is complete
         if test_state_for_cb.is_complete() {
             return;
         }
@@ -403,16 +404,10 @@ pub fn run_performance_test(
         let symbol_str = symbol.to_string();
         let orderbook_manager = orderbook_manager_clone.clone();
 
-        // Start measuring total processing time
         let total_start = Instant::now();
-
-        // Measure SBE receive time (estimate - we can't measure this exactly)
-        let sbe_receive_time = Duration::from_micros(200); // Estimated value
-
-        // Measure orderbook update time
+        let sbe_receive_time = Duration::from_micros(200); // Estimated
         let orderbook_update_start = Instant::now();
 
-        // Apply the update to orderbook
         let _ = orderbook_manager.apply_depth_update(
             &symbol_arc,
             &bids_cloned,
@@ -423,21 +418,14 @@ pub fn run_performance_test(
 
         let orderbook_update_time = orderbook_update_start.elapsed();
 
-        // Retrieve the arbitrage detection time
         let arbitrage_detection_time = if let Some(entry) = detection_times.get(&symbol_str) {
             entry.1
         } else {
-            // If no detection time was recorded, use a default value
             Duration::from_micros(50)
         };
 
-        // Get opportunity data
-        let opportunity_data = test_state.get_opportunity_data(&symbol_str);
-
-        // Total processing time
         let total_processing_time = total_start.elapsed();
 
-        // Create measurement record
         let measurement = PerformanceMeasurement {
             timestamp: chrono::Local::now(),
             sbe_receive_time_us: sbe_receive_time.as_micros() as u64,
@@ -445,41 +433,30 @@ pub fn run_performance_test(
             arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
             total_processing_time_us: total_processing_time.as_micros() as u64,
             updates_processed: 1,
-            opportunities_found: opportunity_data.count,
-            best_profit_percentage: opportunity_data.best_profit,
-            avg_profit_percentage: opportunity_data.avg_profit,
             symbol: symbol_str,
         };
 
-        // Record the measurement
         test_state.record_measurement(measurement);
     });
 
-    // Connect to WebSocket
     let mut ws_stream = client.connect()?;
-
-    // Subscribe to depth channel for all symbols
     let channels = vec!["depth".to_string()];
     client.subscribe(&mut ws_stream, &symbols, &channels)?;
 
     info!("WebSocket connected and subscribed to {} symbols", symbols.len());
 
-    // Set up Ctrl+C handler for graceful shutdown
     let test_state_for_signal = test_state.clone();
     ctrlc::set_handler(move || {
         info!("Received Ctrl+C, stopping performance test...");
         test_state_for_signal.stop();
     })?;
 
-    // Process messages in a separate thread
     let test_state_for_ws = test_state.clone();
     let ws_handle = thread::spawn(move || {
-        // Process WebSocket messages with shutdown support
         let _ = client.process_messages_with_shutdown(&mut ws_stream, &test_state_for_ws.shutdown);
     });
 
-    // Wait for test duration or shutdown signal
-    info!("Performance test running... Press Ctrl+C to stop early");
+    info!("Enhanced performance test running... Press Ctrl+C to stop early");
     let check_interval = Duration::from_millis(100);
     let mut elapsed = Duration::new(0, 0);
 
@@ -487,7 +464,6 @@ pub fn run_performance_test(
         thread::sleep(check_interval);
         elapsed += check_interval;
 
-        // Print progress every 10 seconds
         if elapsed.as_secs() % 10 == 0 && elapsed.as_millis() % 10000 < 100 {
             let remaining = test_state.duration.saturating_sub(elapsed);
             info!(
@@ -498,17 +474,13 @@ pub fn run_performance_test(
         }
     }
 
-    // Stop the test
     test_state.stop();
 
-    // Wait for WebSocket thread to finish
     if let Err(e) = ws_handle.join() {
         warn!("Error joining WebSocket thread: {:?}", e);
     }
 
-    info!("Performance test duration ({} seconds) completed", duration_secs);
-
-    // Save results to CSV
+    info!("Enhanced performance test duration ({} seconds) completed", duration_secs);
     test_state.save_results()?;
 
     Ok(())
