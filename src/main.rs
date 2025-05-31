@@ -185,25 +185,18 @@ fn run_normal_mode(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    // Create the event-driven arbitrage detector
-    // let _arbitrage_detector = arbitrage::detector::create_event_driven_detector(
-    //     orderbook_manager.clone(),
-    //     config.fee, // 0.1% fee
-    //     config.threshold, // Configured minimum profit threshold
-    //     triangular_paths,
-    //     config.trade_amount, // Start with 100 USDT,
-    //     false
-    // );
-
-    let _arbitrage_detector = arbitrage::detector::create_ultra_fast_detector_with_executor(
-        orderbook_manager.clone(),
-        config.fee, // 0.1% fee
-        config.threshold, // Configured minimum profit threshold
-        triangular_paths,
-        config.trade_amount, // Start with configured amount
-        executor.clone(), // Pass the executor
-        false // is_perf flag
-    );
+    let _arbitrage_detector =
+        arbitrage::detector::create_ultra_fast_detector_with_executor_and_volume(
+            orderbook_manager.clone(),
+            config.fee, // 0.1% fee
+            config.threshold, // Configured minimum profit threshold
+            triangular_paths,
+            config.trade_amount, // Start with configured amount
+            executor.clone(), // Pass the executor
+            config.min_volume_multiplier, // Require 2x trade amount in liquidity
+            config.volume_depth_check, // Check top 5 price levels
+            false // is_perf flag
+        );
 
     let stats_executor = executor.clone();
     std::thread::spawn(move || {
@@ -427,13 +420,15 @@ fn run_performance_test(config: Config) -> Result<()> {
         .collect();
 
     // Create the enhanced arbitrage detector
-    let detector = arbitrage::detector::create_ultra_fast_detector_with_executor(
+    let detector = arbitrage::detector::create_ultra_fast_detector_with_executor_and_volume(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
         triangular_paths.clone(),
         config.trade_amount, // Start with configured amount
         executor.clone(), // Pass the executor
+        config.min_volume_multiplier, // Require 2x trade amount in liquidity
+        config.volume_depth_check, // Check top 5 price levels
         false // is_perf flag
     );
 

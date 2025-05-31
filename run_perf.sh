@@ -54,6 +54,10 @@ echo "Results saved to: $RESULTS_FILE"
 if command -v python3 &> /dev/null; then
     echo
     echo "[4/4] Running performance analysis..."
+
+    python -m venv analyze
+
+    source .analyze/bin/activate
     
     # Check for required Python packages
     PIP_CMD="pip3"
@@ -72,6 +76,8 @@ if command -v python3 &> /dev/null; then
     
     echo
     echo "Analysis complete! Check the 'analysis' folder inside the results directory."
+    
+    deactivate
 else
     echo
     echo "[4/4] Python not found. Skipping automatic analysis."

@@ -24,6 +24,9 @@ pub struct Config {
 
     pub base_asset: String,
     pub excluded_coins: Vec<String>,
+
+    pub min_volume_multiplier: f64,
+    pub volume_depth_check: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +47,27 @@ pub enum LogRotation {
 impl Config {
     pub fn from_env() -> Result<Self> {
         // Load environment variables from .env file
-        dotenv().ok();
+        match dotenv() {
+            Ok(path) => {
+                println!("✅ Loaded .env file from: {}", path.display());
+            }
+            Err(e) => {
+                println!("⚠️  Warning: Could not load .env file: {}", e);
+                println!("   Make sure .env file exists in the current directory");
+            }
+        }
+
+        // Debug: Print current working directory
+        if let Ok(cwd) = env::current_dir() {
+            println!("📁 Current working directory: {}", cwd.display());
+        }
+
+        // Debug: Check if .env file exists
+        if std::path::Path::new(".env").exists() {
+            println!("✅ .env file found in current directory");
+        } else {
+            println!("❌ .env file NOT found in current directory");
+        }
 
         // Parse DEBUG
         let debug = env
@@ -148,6 +171,16 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect();
 
+        let min_volume_multiplier = env
+            ::var("MIN_VOLUME_MULTIPLIER")
+            .unwrap_or_else(|_| "2.0".to_string())
+            .parse::<f64>()?;
+
+        let volume_depth_check = env
+            ::var("VOLUME_DEPTH_CHECK")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse::<usize>()?;
+
         Ok(Config {
             debug,
             sbe_api_key,
@@ -162,6 +195,8 @@ impl Config {
             excluded_coins,
             trade_amount,
             fee,
+            min_volume_multiplier,
+            volume_depth_check,
         })
     }
 }
