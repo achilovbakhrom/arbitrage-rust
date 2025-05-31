@@ -37,15 +37,9 @@ fn main() -> Result<()> {
     };
 
     // Load configuration with helpful error messages
-    let mut config = Config::from_env().context(
+    let config = Config::from_env().context(
         "Failed to load configuration from environment. Make sure you have a .env file with required variables."
     )?;
-
-    // Override debug mode for performance tests
-    if matches!(command, Command::PerformanceTest) {
-        config.debug = false; // Force disable console logging for performance tests
-        config.max_triangles = 50;
-    }
 
     // Initialize logging system
     logging
