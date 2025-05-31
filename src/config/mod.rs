@@ -26,7 +26,6 @@ pub struct Config {
     pub excluded_coins: Vec<String>,
 
     pub min_volume_multiplier: f64,
-    pub volume_depth_check: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,11 +177,6 @@ impl Config {
             .unwrap_or_else(|_| "2.0".to_string())
             .parse::<f64>()?;
 
-        let volume_depth_check = env
-            ::var("TAA_VOLUME_DEPTH_CHECK")
-            .unwrap_or_else(|_| "5".to_string())
-            .parse::<usize>()?;
-
         Ok(Config {
             debug,
             sbe_api_key,
@@ -198,7 +192,6 @@ impl Config {
             trade_amount,
             fee,
             min_volume_multiplier,
-            volume_depth_check,
         })
     }
 }
