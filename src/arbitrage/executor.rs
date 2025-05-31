@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicU64, Ordering };
-use tracing::{ info, warn, error };
-use parking_lot::Mutex;
 
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageOpportunity;
@@ -38,13 +36,6 @@ pub struct ArbitrageExecutor {
     execution_counter: AtomicU64,
     total_execution_time_us: AtomicU64,
     successful_executions: AtomicU64,
-
-    // Execution control
-    execution_mutex: Mutex<()>, // Serialize executions
-
-    // Pre-computed execution parameters
-    max_slippage: f64,
-    min_liquidity_check: bool,
 }
 
 impl ArbitrageExecutor {
@@ -59,17 +50,12 @@ impl ArbitrageExecutor {
             execution_counter: AtomicU64::new(0),
             total_execution_time_us: AtomicU64::new(0),
             successful_executions: AtomicU64::new(0),
-            execution_mutex: Mutex::new(()),
-            max_slippage: 0.2, // 20% max slippage before abort
-            min_liquidity_check: true,
         }
     }
 
     /// Execute an arbitrage opportunity synchronously with maximum speed
     #[inline(always)]
     pub fn execute(&self, opportunity: &ArbitrageOpportunity) -> ExecutionResult {
-        let exec_start = Instant::now();
-
         // Fast execution without locks for maximum speed
         match self.default_strategy {
             ExecutionStrategy::FastSequential => self.execute_ultra_fast(opportunity),
@@ -178,137 +164,6 @@ impl ArbitrageExecutor {
         }
     }
 
-    /// Validate execution conditions before trading
-    #[inline]
-    fn validate_execution_conditions(&self, opportunity: &ArbitrageOpportunity) -> Option<String> {
-        let path = &opportunity.path;
-
-        // Check if all orderbooks are still synchronized
-        let books = &self.orderbook_manager.books;
-
-        if let Some(first_book) = books.get(&path.first_symbol) {
-            if !first_book.is_synced() {
-                return Some(format!("First orderbook {} not synced", path.first_symbol));
-            }
-        } else {
-            return Some(format!("First orderbook {} not found", path.first_symbol));
-        }
-
-        if let Some(second_book) = books.get(&path.second_symbol) {
-            if !second_book.is_synced() {
-                return Some(format!("Second orderbook {} not synced", path.second_symbol));
-            }
-        } else {
-            return Some(format!("Second orderbook {} not found", path.second_symbol));
-        }
-
-        if let Some(third_book) = books.get(&path.third_symbol) {
-            if !third_book.is_synced() {
-                return Some(format!("Third orderbook {} not synced", path.third_symbol));
-            }
-        } else {
-            return Some(format!("Third orderbook {} not found", path.third_symbol));
-        }
-
-        // Validate minimum liquidity if enabled
-        if self.min_liquidity_check {
-            if let Some(liquidity_error) = self.check_minimum_liquidity(opportunity) {
-                return Some(liquidity_error);
-            }
-        }
-
-        None
-    }
-
-    /// Check if there's sufficient liquidity for the trade
-    #[inline]
-    fn check_minimum_liquidity(&self, opportunity: &ArbitrageOpportunity) -> Option<String> {
-        let path = &opportunity.path;
-        let min_liquidity_multiple = 2.0; // Require 2x the trade amount in liquidity
-
-        let books = &self.orderbook_manager.books;
-
-        // Check first leg liquidity
-        if let Some(first_book) = books.get(&path.first_symbol) {
-            let (bid, ask) = first_book.get_cached_top_of_book();
-            let required_liquidity = opportunity.start_amount * min_liquidity_multiple;
-
-            if path.first_is_base_to_quote {
-                if let Some((_, qty)) = bid {
-                    if qty < required_liquidity {
-                        return Some(format!("Insufficient bid liquidity on {}", path.first_symbol));
-                    }
-                }
-            } else {
-                if let Some((_, qty)) = ask {
-                    if qty < required_liquidity {
-                        return Some(format!("Insufficient ask liquidity on {}", path.first_symbol));
-                    }
-                }
-            }
-        }
-
-        // Similar checks for second and third legs would go here...
-
-        None
-    }
-
-    /// Calculate realistic slippage based on market conditions
-    #[inline]
-    fn calculate_realistic_slippage(&self, opportunity: &ArbitrageOpportunity) -> f64 {
-        // Base slippage increases with profit percentage (higher profit = more competitive)
-        let base_slippage = 0.001; // 0.1% base slippage
-        let profit_multiplier = opportunity.profit_percentage() * 0.01; // Higher profit = more slippage
-
-        // Add random component to simulate market volatility
-        let random_factor = (fastrand::f64() - 0.5) * 0.002; // ±0.1% random
-
-        let total_slippage = base_slippage + profit_multiplier + random_factor;
-
-        // Clamp between 0% and max_slippage
-        total_slippage.max(0.0).min(self.max_slippage)
-    }
-
-    /// Execute a single trade leg
-    #[inline]
-    fn execute_trade_leg(
-        &self,
-        symbol: &Arc<str>,
-        amount: f64,
-        is_base_to_quote: bool,
-        leg_number: u8,
-        execution_id: u64
-    ) -> TradeResult {
-        let start_time = Instant::now();
-
-        // In a real implementation, this would:
-        // 1. Get current best bid/ask
-        // 2. Calculate exact trade amount
-        // 3. Submit market order
-        // 4. Wait for confirmation
-        // 5. Return actual received amount
-
-        // For now, simulate with realistic parameters
-        let execution_latency_us = 150 + (leg_number as u64) * 50; // Increasing latency per leg
-
-        // Busy wait to simulate execution
-        let target_time = start_time + std::time::Duration::from_micros(execution_latency_us);
-        while Instant::now() < target_time {
-            std::hint::spin_loop();
-        }
-
-        // Simulate trade execution with small slippage
-        let leg_slippage = 0.0005 * (leg_number as f64); // 0.05% slippage per leg
-        let received_amount = amount * (1.0 - leg_slippage);
-
-        TradeResult {
-            success: true,
-            amount_received: received_amount,
-            execution_time_us: start_time.elapsed().as_micros() as u64,
-            error: String::new(),
-        }
-    }
-
     /// Check if execution is disabled (e.g., during maintenance)
     #[inline]
     fn is_executing_disabled(&self) -> bool {
@@ -340,35 +195,17 @@ impl ArbitrageExecutor {
 
         ExecutionStats {
             total_executions,
-            successful_executions,
             success_rate,
             avg_execution_time_us,
             total_execution_time_us: total_time_us,
         }
     }
-
-    /// Reset performance counters
-    pub fn reset_stats(&self) {
-        self.execution_counter.store(0, Ordering::Relaxed);
-        self.successful_executions.store(0, Ordering::Relaxed);
-        self.total_execution_time_us.store(0, Ordering::Relaxed);
-    }
-}
-
-/// Result of a single trade leg
-#[derive(Debug)]
-struct TradeResult {
-    success: bool,
-    amount_received: f64,
-    execution_time_us: u64,
-    error: String,
 }
 
 /// Performance statistics for the executor
 #[derive(Debug)]
 pub struct ExecutionStats {
     pub total_executions: u64,
-    pub successful_executions: u64,
     pub success_rate: f64,
     pub avg_execution_time_us: u64,
     pub total_execution_time_us: u64,

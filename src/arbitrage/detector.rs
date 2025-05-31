@@ -11,7 +11,7 @@ use std::thread;
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
-use crate::arbitrage::executor::{ ArbitrageExecutor, ExecutionStrategy };
+use crate::arbitrage::executor::ArbitrageExecutor;
 
 /// Represents an arbitrage opportunity with volume validation
 #[derive(Debug, Clone)]
@@ -89,30 +89,6 @@ pub struct ArbitrageDetectorState {
 
 impl ArbitrageDetectorState {
     /// Create new detector with volume validation parameters
-    pub fn new(
-        orderbook_manager: Arc<OrderBookManager>,
-        fee_multiplier: f64,
-        min_profit_threshold: f64,
-        start_amount: f64,
-        min_volume_multiplier: f64,
-        volume_depth_check: usize,
-        executor: Option<Arc<ArbitrageExecutor>>
-    ) -> Self {
-        Self {
-            orderbook_manager,
-            symbol_to_paths: Arc::new(DashMap::new()),
-            all_paths: Arc::new(Vec::new()),
-            stats_counter: Arc::new(AtomicUsize::new(0)),
-            profit_counter: Arc::new(AtomicUsize::new(0)),
-            fee_multiplier,
-            min_profit_threshold,
-            start_amount,
-            min_volume_multiplier,
-            volume_depth_check,
-            executor,
-            is_executing: Arc::new(AtomicBool::new(false)),
-        }
-    }
 
     /// Calculate liquidity score for a given side and required volume
     #[inline(always)]

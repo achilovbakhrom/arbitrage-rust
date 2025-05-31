@@ -2,7 +2,7 @@ use std::{ sync::atomic::{ AtomicU64, AtomicU8, Ordering } };
 use crossbeam::atomic::AtomicCell;
 use crate::models::level::Level;
 use parking_lot::{ Mutex, RwLock };
-use tracing::{ debug, info, warn };
+use tracing::{ debug, warn };
 use std::fmt;
 
 /// Current state of the orderbook

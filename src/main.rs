@@ -3,8 +3,6 @@
 static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
 mod config;
-mod constants;
-mod enums;
 mod exchange;
 mod utils;
 mod models;

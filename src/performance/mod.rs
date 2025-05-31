@@ -10,7 +10,6 @@ use std::process::Command;
 use std::thread;
 use std::sync::atomic::{ AtomicBool, Ordering };
 
-use ordered_float::OrderedFloat;
 use tracing::{ info, warn };
 
 use crate::exchange::sbe_client::BinanceSbeClient;

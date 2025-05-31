@@ -24,8 +24,9 @@ lazy_static::lazy_static! {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BinanceDepthResponse {
-    lastUpdateId: u64,
+    last_update_id: u64,
     bids: Vec<[String; 2]>,
     asks: Vec<[String; 2]>,
 }
@@ -60,27 +61,29 @@ struct BinanceExchangeInfo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct BinanceSymbol {
     symbol: String,
     status: String,
-    baseAsset: String,
-    quoteAsset: String,
-    isSpotTradingAllowed: bool,
+
+    base_asset: String,
+    quote_asset: String,
+    is_spot_trading_allowed: bool,
     filters: Vec<BinanceSymbolFilter>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "filterType")]
 enum BinanceSymbolFilter {
-    #[serde(rename = "PRICE_FILTER")] PriceFilter {
-        minPrice: String,
-        maxPrice: String,
-        tickSize: String,
+    #[serde(rename = "PRICE_FILTER")] #[serde(rename_all = "camelCase")] PriceFilter {
+        min_price: String,
+        max_price: String,
+        tick_size: String,
     },
-    #[serde(rename = "LOT_SIZE")] LotSize {
-        minQty: String,
-        maxQty: String,
-        stepSize: String,
+    #[serde(rename = "LOT_SIZE")] #[serde(rename_all = "camelCase")] LotSize {
+        min_qty: String,
+        max_qty: String,
+        step_size: String,
     },
     #[serde(other)]
     Unknown,
@@ -139,13 +142,13 @@ impl BinanceClient {
         // Extract filter information
         for filter in &binance_symbol.filters {
             match filter {
-                BinanceSymbolFilter::LotSize { minQty, maxQty, stepSize } => {
-                    min_qty = minQty.parse::<f64>().ok();
-                    max_qty = maxQty.parse::<f64>().ok();
-                    qty_precision = Self::calculate_precision(stepSize);
+                BinanceSymbolFilter::LotSize { min_qty: minq, max_qty: maxq, step_size: ss } => {
+                    min_qty = minq.parse::<f64>().ok();
+                    max_qty = maxq.parse::<f64>().ok();
+                    qty_precision = Self::calculate_precision(ss);
                 }
-                BinanceSymbolFilter::PriceFilter { tickSize, .. } => {
-                    price_precision = Self::calculate_precision(tickSize);
+                BinanceSymbolFilter::PriceFilter { tick_size: t, .. } => {
+                    price_precision = Self::calculate_precision(t);
                 }
                 _ => {}
             }
@@ -153,14 +156,14 @@ impl BinanceClient {
 
         Symbol {
             symbol: binance_symbol.symbol.into(),
-            base_asset: binance_symbol.baseAsset.into(),
-            quote_asset: binance_symbol.quoteAsset.into(),
+            base_asset: binance_symbol.base_asset.into(),
+            quote_asset: binance_symbol.quote_asset.into(),
             min_qty,
             max_qty,
             price_precision,
             qty_precision,
             is_trading: binance_symbol.status == "TRADING",
-            is_spot_trading_allowed: binance_symbol.isSpotTradingAllowed,
+            is_spot_trading_allowed: binance_symbol.is_spot_trading_allowed,
         }
     }
 
@@ -379,7 +382,7 @@ impl ExchangeClient for BinanceClient {
         // Log the response details
         debug!(
             symbol = %symbol,
-            last_update_id = depth.lastUpdateId,
+            last_update_id = depth.last_update_id,
             bid_count = bids.len(),
             ask_count = asks.len(),
             elapsed_ms = %elapsed.as_millis(),
@@ -389,7 +392,7 @@ impl ExchangeClient for BinanceClient {
         Ok(DepthResponse {
             bids,
             asks,
-            last_update_id: depth.lastUpdateId,
+            last_update_id: depth.last_update_id,
         })
     }
 }
