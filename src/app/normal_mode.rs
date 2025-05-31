@@ -128,29 +128,17 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    let _arbitrage_detector =
-        arbitrage::detector::create_ultra_fast_detector_with_executor_and_volume(
-            orderbook_manager.clone(),
-            config.fee, // 0.1% fee
-            config.threshold, // Configured minimum profit threshold
-            triangular_paths,
-            config.trade_amount, // Start with configured amount
-            executor.clone(), // Pass the executor
-            config.min_volume_multiplier, // Require 2x trade amount in liquidity
-            config.depth, // Check top 5 price levels
-            false // is_perf flag
-        );
-
-    let stats_executor = executor.clone();
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            let stats = stats_executor.get_performance_stats();
-            if stats.total_executions > 0 {
-                info!("Executor stats: {}", stats);
-            }
-        }
-    });
+    let _arbitrage_detector = arbitrage::detector::create_detector(
+        orderbook_manager.clone(),
+        config.fee,
+        config.threshold,
+        triangular_paths,
+        config.trade_amount,
+        executor.clone(),
+        config.min_volume_multiplier,
+        config.depth,
+        false
+    );
 
     info!(
         "Created high-performance event-driven arbitrage detector with threshold: {:.2}%",
@@ -174,13 +162,16 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     // Create clones for the WebSocket thread
     let orderbook_manager_thread = orderbook_manager.clone();
-    let paths_for_msg_task = Arc::new(unique_symbols.clone());
+    let unique_symbols_cloned = Arc::new(unique_symbols.clone());
     let sbe_api_key = config.sbe_api_key.clone();
     let shutdown_for_ws = shutdown.clone();
 
     // Start WebSocket processing in a separate thread
     let ws_handle = thread::spawn(move || {
         let client = BinanceSbeClient::new(sbe_api_key);
+
+        // Keep timing disabled for production mode to maximize performance
+        client.disable_timing();
 
         let mut ws_stream = loop {
             if shutdown_for_ws.load(Ordering::Relaxed) {
@@ -204,7 +195,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         let channels = vec!["depth".to_string()];
 
         // Limit to WEBSOCKET_BUFFER_SIZE symbols per connection to avoid overwhelming
-        let subscription_symbols = paths_for_msg_task
+        let subscription_symbols = unique_symbols_cloned
             .iter()
             .take(WEBSOCKET_BUFFER_SIZE)
             .cloned()
@@ -218,19 +209,22 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
             }
         }
 
-        // Set up depth update callback
-        client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id| {
-            // Clone the data to avoid lifetime issues
-            let symbol_arc: Arc<str> = Arc::from(symbol);
+        // Set up ultra-fast depth update callback for production
+        client.set_depth_callback(
+            move |symbol, bids, asks, first_update_id, last_update_id, _receive_time_us| {
+                // Clone the data to avoid lifetime issues
+                let symbol_arc: Arc<str> = Arc::from(symbol);
 
-            orderbook_manager_thread.apply_depth_update(
-                &symbol_arc,
-                &bids,
-                &asks,
-                first_update_id,
-                last_update_id
-            );
-        });
+                // Fast path - no timing overhead in production
+                orderbook_manager_thread.apply_depth_update(
+                    &symbol_arc,
+                    &bids,
+                    &asks,
+                    first_update_id,
+                    last_update_id
+                );
+            }
+        );
 
         // Process WebSocket messages with shutdown support
         if let Err(e) = client.process_messages_with_shutdown(&mut ws_stream, &shutdown_for_ws) {

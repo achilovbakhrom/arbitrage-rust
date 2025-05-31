@@ -14,7 +14,7 @@ use tracing::{ error, info };
 
 pub fn run_performance_test(config: Config) -> Result<()> {
     // Output information
-    info!("Starting enhanced performance test for triangular arbitrage system");
+    info!("Starting optimized performance test for triangular arbitrage system");
     info!("Test duration: 120 seconds");
 
     // Create output directory
@@ -116,7 +116,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         .collect();
 
     // Create the enhanced arbitrage detector
-    let detector = arbitrage::detector::create_ultra_fast_detector_with_executor_and_volume(
+    let detector = arbitrage::detector::create_detector(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
@@ -129,13 +129,13 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     );
 
     info!(
-        "Created enhanced ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}%",
+        "Created optimized ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}%",
         config.threshold * 100.0
     );
 
-    info!("Created arbitrage detector. Starting enhanced performance test...");
+    info!("Created arbitrage detector. Starting optimized performance test...");
 
-    // Run the enhanced performance test
+    // Run the optimized performance test
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
         unique_symbols,
@@ -148,10 +148,10 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     match test_result {
         Ok(_) => {
-            info!("Enhanced performance test completed successfully!");
+            info!("Optimized performance test completed successfully!");
         }
         Err(e) => {
-            error!("Enhanced performance test failed: {}", e);
+            error!("Optimized performance test failed: {}", e);
             return Err(e);
         }
     }

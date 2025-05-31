@@ -519,7 +519,7 @@ pub fn create_ultra_fast_detector_with_volume_validation(
 }
 
 /// Convenience function with executor and volume validation
-pub fn create_ultra_fast_detector_with_executor_and_volume(
+pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
     min_profit_threshold: f64,
