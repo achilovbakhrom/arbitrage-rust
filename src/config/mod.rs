@@ -71,59 +71,61 @@ impl Config {
 
         // Parse DEBUG
         let debug = env
-            ::var("DEBUG")
+            ::var("TAA_DEBUG")
             .unwrap_or_else(|_| "false".to_string())
             .parse::<bool>()
-            .context("Failed to parse DEBUG environment variable")?;
+            .context("Failed to parse TAA_DEBUG environment variable")?;
 
         // Parse SBE_API_KEY
         let sbe_api_key = env
-            ::var("SBE_API_KEY")
+            ::var("TAA_SBE_API_KEY")
             .context("SBE_API_KEY environment variable not set")?;
 
         // Parse FIX_API
-        let fix_api = env::var("FIX_API").context("FIX_API environment variable not set")?;
+        let fix_api = env::var("TAA_FIX_API").context("TAA_FIX_API environment variable not set")?;
 
         // Parse FIX_SECRET
-        let fix_secret = env::var("FIX_SECRET").context("FIX_SECRET environment variable not set")?;
+        let fix_secret = env
+            ::var("TAA_FIX_SECRET")
+            .context("TAA_FIX_SECRET environment variable not set")?;
 
         // Parse THRESHOLD
         let threshold = env
-            ::var("THRESHOLD")
+            ::var("TAA_THRESHOLD")
             .unwrap_or_else(|_| "0.5".to_string())
             .parse::<f64>()
-            .context("Failed to parse THRESHOLD environment variable")?;
+            .context("Failed to parse TAA_THRESHOLD environment variable")?;
 
         // Parse DEPTH
         let depth = env
-            ::var("DEPTH")
+            ::var("TAA_DEPTH")
             .unwrap_or_else(|_| "20".to_string())
             .parse::<usize>()
-            .context("Failed to parse DEPTH environment variable")?;
+            .context("Failed to parse TAA_DEPTH environment variable")?;
 
         // Parse PAIRS_COUNT
         let max_triangles: usize = env
-            ::var("MAX_TRIANGLES")
+            ::var("TAA_MAX_TRIANGLES")
             .unwrap_or_else(|_| "15".to_string())
             .parse::<usize>()
-            .context("Failed to parse MAX_TRIANGLES environment variable")?;
+            .context("Failed to parse TAA_MAX_TRIANGLES environment variable")?;
 
         // Parse TRADE_AMOUNT
         let trade_amount: f64 = env
-            ::var("TRADE_AMOUNT")
+            ::var("TAA_TRADE_AMOUNT")
             .unwrap_or_else(|_| "100.0".to_string())
             .parse::<f64>()
-            .context("Failed to parse TRADE_AMOUNT environment variable")?;
+            .context("Failed to parse TAA_TRADE_AMOUNT environment variable")?;
 
         // Parse TRADE_AMOUNT
         let fee: f64 = env
-            ::var("FEE")
+            ::var("TAA_FEE")
             .unwrap_or_else(|_| "0.001".to_string())
             .parse::<f64>()
-            .context("Failed to parse FEE environment variable")?;
+            .context("Failed to parse TAA_FEE environment variable")?;
 
         // Parse LOG_LEVEL
-        let log_level_str = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+        let log_level_str = env::var("TAA_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
 
         let log_level = match log_level_str.to_lowercase().as_str() {
             "trace" => Level::TRACE,
@@ -135,13 +137,13 @@ impl Config {
         };
 
         // Set up logging configuration
-        let log_dir = env::var("LOG_DIRECTORY").unwrap_or_else(|_| "logs".to_string());
+        let log_dir = env::var("TAA_LOG_DIRECTORY").unwrap_or_else(|_| "logs".to_string());
 
         let log_prefix = env
-            ::var("LOG_FILENAME_PREFIX")
+            ::var("TAA_LOG_FILENAME_PREFIX")
             .unwrap_or_else(|_| "triangular_arbitrage".to_string());
 
-        let log_rotation_str = env::var("LOG_ROTATION").unwrap_or_else(|_| "daily".to_string());
+        let log_rotation_str = env::var("TAA_LOG_ROTATION").unwrap_or_else(|_| "daily".to_string());
 
         let log_rotation = match log_rotation_str.to_lowercase().as_str() {
             "hourly" => LogRotation::Hourly,
@@ -150,7 +152,7 @@ impl Config {
         };
 
         let max_files = env
-            ::var("LOG_MAX_FILES")
+            ::var("TAA_LOG_MAX_FILES")
             .ok()
             .and_then(|s| s.parse::<usize>().ok());
 
@@ -161,23 +163,23 @@ impl Config {
             max_files,
         };
 
-        let base_asset = env::var("BASE_ASSET").unwrap_or_else(|_| "USDT".to_string());
+        let base_asset = env::var("TAA_BASE_ASSET").unwrap_or_else(|_| "USDT".to_string());
 
         let default_fiats = "USD,EUR,GBP,JPY,AUD,CAD,CHF,CNY,RUB,TRY";
         let excluded_coins = env
-            ::var("EXCLUDED_COINS")
+            ::var("TAA_EXCLUDED_COINS")
             .unwrap_or_else(|_| default_fiats.to_string())
             .split(',')
             .map(|s| s.trim().to_string())
             .collect();
 
         let min_volume_multiplier = env
-            ::var("MIN_VOLUME_MULTIPLIER")
+            ::var("TAA_MIN_VOLUME_MULTIPLIER")
             .unwrap_or_else(|_| "2.0".to_string())
             .parse::<f64>()?;
 
         let volume_depth_check = env
-            ::var("VOLUME_DEPTH_CHECK")
+            ::var("TAA_VOLUME_DEPTH_CHECK")
             .unwrap_or_else(|_| "5".to_string())
             .parse::<usize>()?;
 
