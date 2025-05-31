@@ -16,7 +16,6 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
 use std::thread;
-use arbitrage::detector;
 use arbitrage::executor::{ ArbitrageExecutor, ExecutionStrategy };
 use models::symbol_map::SymbolMap;
 
