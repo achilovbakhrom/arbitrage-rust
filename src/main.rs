@@ -193,7 +193,7 @@ fn run_normal_mode(config: Config) -> Result<()> {
             config.trade_amount, // Start with configured amount
             executor.clone(), // Pass the executor
             config.min_volume_multiplier, // Require 2x trade amount in liquidity
-            config.volume_depth_check, // Check top 5 price levels
+            config.depth, // Check top 5 price levels
             false // is_perf flag
         );
 
@@ -427,7 +427,7 @@ fn run_performance_test(config: Config) -> Result<()> {
         config.trade_amount, // Start with configured amount
         executor.clone(), // Pass the executor
         config.min_volume_multiplier, // Require 2x trade amount in liquidity
-        config.volume_depth_check, // Check top 5 price levels
+        config.depth, // Check top 5 price levels
         false // is_perf flag
     );
 
