@@ -7,6 +7,7 @@ use crate::{
     models::symbol_map::SymbolMap,
     orderbook::manager::OrderBookManager,
     performance,
+    utils::console::print_config,
     API_TIMEOUT,
 };
 use anyhow::{ anyhow, Context, Result };
@@ -14,6 +15,7 @@ use tracing::{ error, info };
 
 pub fn run_performance_test(config: Config) -> Result<()> {
     // Output information
+    print_config(&config);
     info!("Starting optimized performance test for triangular arbitrage system");
     info!("Test duration: 120 seconds");
 
@@ -37,7 +39,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     // Create a runtime for async operations
     let rt = tokio::runtime::Builder
         ::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(4)
         .enable_all()
         .build()
         .context("Failed to create Tokio runtime")?;
