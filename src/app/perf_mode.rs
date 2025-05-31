@@ -13,12 +13,7 @@ use crate::{
 use anyhow::{ anyhow, Context, Result };
 use tracing::{ error, info };
 
-pub fn run_performance_test(config: Config) -> Result<()> {
-    // Output information
-    print_config(&config);
-    info!("Starting optimized performance test for triangular arbitrage system");
-    info!("Test duration: 120 seconds");
-
+pub fn create_output_file() -> Result<String> {
     // Create output directory
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let output_dir = format!("./performance_results/{}", timestamp);
@@ -27,6 +22,18 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         .context(format!("Failed to create output directory: {}", output_dir))?;
 
     let output_file = format!("{}/performance_results.csv", output_dir);
+    info!("Results will be saved to: {}", output_file);
+
+    Ok(output_file)
+}
+
+pub fn run_performance_test(config: Config) -> Result<()> {
+    // Output information
+    print_config(&config);
+    info!("Starting optimized performance test for triangular arbitrage system");
+    info!("Test duration: 120 seconds");
+
+    let output_file = create_output_file()?;
     info!("Results will be saved to: {}", output_file);
 
     // Initialize exchange client
