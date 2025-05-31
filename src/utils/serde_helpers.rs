@@ -1,4 +1,4 @@
-use serde::{ Deserialize, Deserializer, Serialize, Serializer };
+use serde::{ Deserializer, Serializer };
 use serde::de::{ self, Visitor };
 use std::fmt;
 use tracing::Level;
