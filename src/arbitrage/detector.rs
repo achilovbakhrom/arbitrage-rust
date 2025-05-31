@@ -13,14 +13,16 @@ use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
 use crate::arbitrage::executor::{ ArbitrageExecutor, ExecutionStrategy };
 
-/// Represents an arbitrage opportunity
+/// Represents an arbitrage opportunity with volume validation
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
     pub path: Arc<TriangularPath>,
     pub profit_ratio: f64,
     pub start_amount: f64,
     pub end_amount: f64,
-    pub execution_time_ns: u64, // Nanosecond precision for ultra-fast detection
+    pub execution_time_ns: u64,
+    pub min_volume_satisfied: bool, // NEW: Track if volume requirements are met
+    pub liquidity_scores: [f64; 3], // NEW: Liquidity score for each leg (0.0-1.0)
 }
 
 impl ArbitrageOpportunity {
@@ -30,10 +32,22 @@ impl ArbitrageOpportunity {
         (self.profit_ratio - 1.0) * 100.0
     }
 
-    /// Format opportunity for display
+    /// Check if this opportunity has sufficient liquidity for execution
+    #[inline(always)]
+    pub fn has_sufficient_liquidity(&self) -> bool {
+        self.min_volume_satisfied && self.liquidity_scores.iter().all(|&score| score > 0.5)
+    }
+
+    /// Format opportunity for display with volume information
     pub fn display(&self) -> String {
+        let liquidity_status = if self.has_sufficient_liquidity() {
+            "✓ LIQUID".green()
+        } else {
+            "⚠ LOW LIQ".yellow()
+        };
+
         format!(
-            "{} → {} → {} | Profit: {}% | Start: {} {} | End: {} {} | Time: {}ns",
+            "{} → {} → {} | Profit: {}% | Start: {} {} | End: {} {} | {} | Liq: [{:.2},{:.2},{:.2}] | Time: {}ns",
             self.path.first_symbol.to_string().green(),
             self.path.second_symbol.to_string().yellow(),
             self.path.third_symbol.to_string().green(),
@@ -42,12 +56,16 @@ impl ArbitrageOpportunity {
             self.path.start_asset,
             self.end_amount,
             self.path.end_asset,
+            liquidity_status,
+            self.liquidity_scores[0],
+            self.liquidity_scores[1],
+            self.liquidity_scores[2],
             self.execution_time_ns.to_string().cyan()
         )
     }
 }
 
-/// Ultra-fast arbitrage detector state with zero-overhead design
+/// Ultra-fast arbitrage detector state with volume validation
 pub struct ArbitrageDetectorState {
     pub orderbook_manager: Arc<OrderBookManager>,
     pub symbol_to_paths: Arc<DashMap<Arc<str>, Vec<usize>>>,
@@ -55,20 +73,112 @@ pub struct ArbitrageDetectorState {
     pub stats_counter: Arc<AtomicUsize>,
     pub profit_counter: Arc<AtomicUsize>,
 
-    // Pre-computed values (immutable after creation for zero overhead)
+    // Pre-computed values
     fee_multiplier: f64,
     min_profit_threshold: f64,
     start_amount: f64,
 
-    // Execution control (minimal overhead)
-    executor: Option<Arc<ArbitrageExecutor>>, // Set once at creation, never changed
-    is_executing: Arc<AtomicBool>, // Single atomic for execution state
+    // NEW: Volume validation parameters
+    min_volume_multiplier: f64, // Minimum volume as multiple of trade amount (e.g., 2.0 = 2x)
+    volume_depth_check: usize, // How many price levels to check for volume
+
+    // Execution control
+    executor: Option<Arc<ArbitrageExecutor>>,
+    is_executing: Arc<AtomicBool>,
 }
 
 impl ArbitrageDetectorState {
-    /// Ultra-fast path checking with zero allocations and minimal branches
+    /// Create new detector with volume validation parameters
+    pub fn new(
+        orderbook_manager: Arc<OrderBookManager>,
+        fee_multiplier: f64,
+        min_profit_threshold: f64,
+        start_amount: f64,
+        min_volume_multiplier: f64,
+        volume_depth_check: usize,
+        executor: Option<Arc<ArbitrageExecutor>>
+    ) -> Self {
+        Self {
+            orderbook_manager,
+            symbol_to_paths: Arc::new(DashMap::new()),
+            all_paths: Arc::new(Vec::new()),
+            stats_counter: Arc::new(AtomicUsize::new(0)),
+            profit_counter: Arc::new(AtomicUsize::new(0)),
+            fee_multiplier,
+            min_profit_threshold,
+            start_amount,
+            min_volume_multiplier,
+            volume_depth_check,
+            executor,
+            is_executing: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Calculate liquidity score for a given side and required volume
     #[inline(always)]
-    pub fn check_path_ultra_fast(
+    fn calculate_liquidity_score(
+        &self,
+        book: &Arc<OrderBook>,
+        is_bid_side: bool,
+        required_volume: f64
+    ) -> f64 {
+        if !book.is_synced() {
+            return 0.0;
+        }
+
+        // Get price levels up to the depth we want to check
+        let levels = if is_bid_side {
+            book.get_bids(Some(self.volume_depth_check))
+        } else {
+            book.get_asks(Some(self.volume_depth_check))
+        };
+
+        if levels.is_empty() {
+            return 0.0;
+        }
+
+        let mut available_volume = 0.0;
+        let mut weighted_price_sum = 0.0;
+        let mut total_weight = 0.0;
+
+        // Calculate available volume and volume-weighted average price
+        for level in &levels {
+            available_volume += level.quantity;
+
+            // Weight by quantity (more liquid levels have more influence)
+            let weight = level.quantity;
+            weighted_price_sum += level.price * weight;
+            total_weight += weight;
+
+            // Stop if we have enough volume
+            if available_volume >= required_volume {
+                break;
+            }
+        }
+
+        // Calculate liquidity score based on multiple factors
+        let volume_ratio = (available_volume / required_volume).min(1.0);
+
+        // Price impact score (how much price moves if we consume the volume)
+        let price_impact_score = if levels.len() > 1 && total_weight > 0.0 {
+            let avg_price = weighted_price_sum / total_weight;
+            let best_price = levels[0].price;
+            let price_deviation = ((avg_price - best_price).abs() / best_price).min(1.0);
+            1.0 - price_deviation // Lower price impact = higher score
+        } else {
+            1.0
+        };
+
+        // Depth score (more levels = better liquidity)
+        let depth_score = ((levels.len() as f64) / (self.volume_depth_check as f64)).min(1.0);
+
+        // Combined liquidity score (weighted average)
+        (volume_ratio * 0.6 + price_impact_score * 0.3 + depth_score * 0.1).max(0.0).min(1.0)
+    }
+
+    /// Enhanced path checking with volume validation
+    #[inline(always)]
+    pub fn check_path_with_volume_validation(
         &self,
         path: &Arc<TriangularPath>
     ) -> Option<ArbitrageOpportunity> {
@@ -85,20 +195,41 @@ impl ArbitrageDetectorState {
             return None;
         }
 
-        // Get cached prices - zero allocation, single atomic load each
+        // Get cached prices AND quantities - zero allocation, single atomic load each
         let (first_bid, first_ask) = first_book.get_cached_top_of_book();
         let (second_bid, second_ask) = second_book.get_cached_top_of_book();
         let (third_bid, third_ask) = third_book.get_cached_top_of_book();
 
-        // Extract prices - branchless where possible
-        let first_price = if path.first_is_base_to_quote { first_bid?.0 } else { first_ask?.0 };
-        let second_price = if path.second_is_base_to_quote { second_bid?.0 } else { second_ask?.0 };
-        let third_price = if path.third_is_base_to_quote { third_bid?.0 } else { third_ask?.0 };
+        // Extract prices and quantities
+        let (first_price, first_qty) = if path.first_is_base_to_quote {
+            (first_bid?.0, first_bid?.1)
+        } else {
+            (first_ask?.0, first_ask?.1)
+        };
 
-        // Ultra-fast calculation - pure FPU operations
+        let (second_price, second_qty) = if path.second_is_base_to_quote {
+            (second_bid?.0, second_bid?.1)
+        } else {
+            (second_ask?.0, second_ask?.1)
+        };
+
+        let (third_price, third_qty) = if path.third_is_base_to_quote {
+            (third_bid?.0, third_bid?.1)
+        } else {
+            (third_ask?.0, third_ask?.1)
+        };
+
+        // Calculate required volumes for each leg
         let mut amount = self.start_amount;
 
-        // Leg 1
+        // Leg 1: Calculate volume needed
+        let first_volume_needed = if path.first_is_base_to_quote {
+            amount // We're selling base amount
+        } else {
+            amount / first_price // We're buying base with quote
+        };
+
+        // Calculate amount after first leg for second leg volume calculation
         amount =
             (if path.first_is_base_to_quote {
                 amount * first_price
@@ -106,7 +237,14 @@ impl ArbitrageDetectorState {
                 amount / first_price
             }) * self.fee_multiplier;
 
-        // Leg 2
+        // Leg 2: Calculate volume needed
+        let second_volume_needed = if path.second_is_base_to_quote {
+            amount // We're selling base amount
+        } else {
+            amount / second_price // We're buying base with quote
+        };
+
+        // Calculate amount after second leg for third leg volume calculation
         amount =
             (if path.second_is_base_to_quote {
                 amount * second_price
@@ -114,7 +252,14 @@ impl ArbitrageDetectorState {
                 amount / second_price
             }) * self.fee_multiplier;
 
-        // Leg 3
+        // Leg 3: Calculate volume needed
+        let third_volume_needed = if path.third_is_base_to_quote {
+            amount // We're selling base amount
+        } else {
+            amount / third_price // We're buying base with quote
+        };
+
+        // Complete the calculation
         amount =
             (if path.third_is_base_to_quote {
                 amount * third_price
@@ -128,6 +273,35 @@ impl ArbitrageDetectorState {
             return None;
         }
 
+        // Volume validation - check if we have minimum required volume
+        let min_required_volume = self.start_amount * self.min_volume_multiplier;
+
+        // Quick volume check using cached top-of-book
+        let first_volume_ok = first_qty >= first_volume_needed.max(min_required_volume);
+        let second_volume_ok = second_qty >= second_volume_needed.max(min_required_volume);
+        let third_volume_ok = third_qty >= third_volume_needed.max(min_required_volume);
+
+        let min_volume_satisfied = first_volume_ok && second_volume_ok && third_volume_ok;
+
+        // Calculate detailed liquidity scores
+        let liquidity_scores = [
+            self.calculate_liquidity_score(
+                &first_book,
+                path.first_is_base_to_quote,
+                first_volume_needed
+            ),
+            self.calculate_liquidity_score(
+                &second_book,
+                path.second_is_base_to_quote,
+                second_volume_needed
+            ),
+            self.calculate_liquidity_score(
+                &third_book,
+                path.third_is_base_to_quote,
+                third_volume_needed
+            ),
+        ];
+
         let execution_time_ns = start_time.elapsed().as_nanos() as u64;
 
         Some(ArbitrageOpportunity {
@@ -136,10 +310,12 @@ impl ArbitrageDetectorState {
             start_amount: self.start_amount,
             end_amount: amount,
             execution_time_ns,
+            min_volume_satisfied,
+            liquidity_scores,
         })
     }
 
-    /// Handle orderbook update with minimal overhead
+    /// Handle orderbook update with volume-aware filtering
     #[inline]
     pub fn handle_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
         if !book.is_synced() {
@@ -153,26 +329,37 @@ impl ArbitrageDetectorState {
 
         // Get affected paths - single hash lookup
         if let Some(path_indices) = self.symbol_to_paths.get(symbol) {
-            self.process_paths_immediate(path_indices.borrow(), symbol);
+            self.process_paths_with_volume_check(path_indices.borrow(), symbol);
         }
     }
 
-    /// Process paths immediately without any threading overhead
+    /// Process paths with volume validation
     #[inline]
-    fn process_paths_immediate(&self, indices: &[usize], trigger_symbol: &Arc<str>) {
+    fn process_paths_with_volume_check(&self, indices: &[usize], trigger_symbol: &Arc<str>) {
         let mut best_opportunity: Option<ArbitrageOpportunity> = None;
 
-        // Check all affected paths in current thread - zero overhead
+        // Check all affected paths in current thread
         for &idx in indices {
             if let Some(path) = self.all_paths.get(idx) {
-                if let Some(opportunity) = self.check_path_ultra_fast(path) {
-                    match &best_opportunity {
-                        None => {
-                            best_opportunity = Some(opportunity);
-                        }
-                        Some(current_best) => {
-                            if opportunity.profit_ratio > current_best.profit_ratio {
+                if let Some(opportunity) = self.check_path_with_volume_validation(path) {
+                    // Only consider opportunities with sufficient liquidity
+                    if opportunity.has_sufficient_liquidity() {
+                        match &best_opportunity {
+                            None => {
                                 best_opportunity = Some(opportunity);
+                            }
+                            Some(current_best) => {
+                                // Prefer opportunities with better liquidity, then profit
+                                let opportunity_score =
+                                    opportunity.profit_ratio *
+                                    (1.0 + opportunity.liquidity_scores.iter().sum::<f64>() / 3.0);
+                                let current_score =
+                                    current_best.profit_ratio *
+                                    (1.0 + current_best.liquidity_scores.iter().sum::<f64>() / 3.0);
+
+                                if opportunity_score > current_score {
+                                    best_opportunity = Some(opportunity);
+                                }
                             }
                         }
                     }
@@ -180,13 +367,13 @@ impl ArbitrageDetectorState {
             }
         }
 
-        // Execute immediately if profitable
+        // Execute immediately if profitable and liquid
         if let Some(opportunity) = best_opportunity {
             self.execute_immediately(opportunity, trigger_symbol);
         }
     }
 
-    /// Execute opportunity with minimal overhead
+    /// Execute opportunity with volume validation
     #[inline]
     fn execute_immediately(&self, opportunity: ArbitrageOpportunity, trigger_symbol: &Arc<str>) {
         // Fast atomic compare-and-swap to claim execution
@@ -195,9 +382,24 @@ impl ArbitrageDetectorState {
                 .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
         {
-            println!("\n{}", "=== ARBITRAGE OPPORTUNITY ===".bright_purple().bold());
+            println!(
+                "\n{}",
+                "=== ARBITRAGE OPPORTUNITY (VOLUME VALIDATED) ===".bright_purple().bold()
+            );
             println!("Triggered by: {}", trigger_symbol.to_string().cyan());
             println!("Opportunity: {}", opportunity.display());
+
+            // Additional volume information
+            println!("Volume Analysis:");
+            println!(
+                "  Min Volume Required: ${:.2}",
+                self.start_amount * self.min_volume_multiplier
+            );
+            println!("  Liquidity Status: {}", if opportunity.has_sufficient_liquidity() {
+                "✓ SUFFICIENT".green()
+            } else {
+                "⚠ INSUFFICIENT".yellow()
+            });
 
             // Execute synchronously if executor available
             if let Some(ref executor) = self.executor {
@@ -207,12 +409,15 @@ impl ArbitrageDetectorState {
 
                 if result.success {
                     info!(
-                        "SUCCESS: Profit={:.6} {}, Exec={}μs, Total={}μs, Slippage={:.2}%",
+                        "SUCCESS: Profit={:.6} {}, Exec={}μs, Total={}μs, Slippage={:.2}%, Liquidity=[{:.2},{:.2},{:.2}]",
                         result.profit_amount,
                         opportunity.path.end_asset,
                         result.execution_time_us,
                         total_time_ns / 1000,
-                        result.slippage_factor * 100.0
+                        result.slippage_factor * 100.0,
+                        opportunity.liquidity_scores[0],
+                        opportunity.liquidity_scores[1],
+                        opportunity.liquidity_scores[2]
                     );
                 } else {
                     info!(
@@ -223,13 +428,15 @@ impl ArbitrageDetectorState {
                 }
             }
 
-            println!("{}\n", "============================".bright_purple().bold());
+            println!(
+                "{}\n",
+                "===============================================".bright_purple().bold()
+            );
 
             // Update counter and release execution lock
             self.profit_counter.fetch_add(1, Ordering::Relaxed);
             self.is_executing.store(false, Ordering::Release);
         }
-        // If compare_exchange failed, another execution is in progress - skip silently
     }
 
     /// Minimal stats task
@@ -246,7 +453,7 @@ impl ArbitrageDetectorState {
                     let scans = stats_counter.swap(0, Ordering::Relaxed);
                     let profits = profit_counter.swap(0, Ordering::Relaxed);
                     if scans > 0 || profits > 0 {
-                        info!("Stats: {} scans, {} profits", scans, profits);
+                        info!("Stats: {} scans, {} profits (volume-validated)", scans, profits);
                     }
                 }
             })
@@ -266,20 +473,24 @@ impl Clone for ArbitrageDetectorState {
             fee_multiplier: self.fee_multiplier,
             min_profit_threshold: self.min_profit_threshold,
             start_amount: self.start_amount,
+            min_volume_multiplier: self.min_volume_multiplier,
+            volume_depth_check: self.volume_depth_check,
             executor: self.executor.clone(),
             is_executing: self.is_executing.clone(),
         }
     }
 }
 
-/// Create ultra-fast detector with minimal allocations
-pub fn create_ultra_fast_detector(
+/// Create ultra-fast detector with volume validation
+pub fn create_ultra_fast_detector_with_volume_validation(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
     min_profit_threshold: f64,
     paths: Vec<Arc<TriangularPath>>,
     start_amount: f64,
     executor: Option<Arc<ArbitrageExecutor>>,
+    min_volume_multiplier: f64, // NEW: e.g., 2.0 means need 2x trade amount in volume
+    volume_depth_check: usize, // NEW: e.g., 5 means check top 5 price levels
     is_perf: bool
 ) -> Arc<ArbitrageDetectorState> {
     // Pre-allocate symbol mapping
@@ -310,6 +521,8 @@ pub fn create_ultra_fast_detector(
         fee_multiplier: 1.0 - fee_rate,
         min_profit_threshold,
         start_amount,
+        min_volume_multiplier,
+        volume_depth_check,
         executor,
         is_executing: Arc::new(AtomicBool::new(false)),
     });
@@ -329,23 +542,27 @@ pub fn create_ultra_fast_detector(
     detector_state
 }
 
-/// Convenience function with executor
-pub fn create_ultra_fast_detector_with_executor(
+/// Convenience function with executor and volume validation
+pub fn create_ultra_fast_detector_with_executor_and_volume(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
     min_profit_threshold: f64,
     paths: Vec<Arc<TriangularPath>>,
     start_amount: f64,
     executor: Arc<ArbitrageExecutor>,
+    min_volume_multiplier: f64, // e.g., 2.0 = need 2x trade amount in liquidity
+    volume_depth_check: usize, // e.g., 5 = check top 5 price levels for liquidity
     is_perf: bool
 ) -> Arc<ArbitrageDetectorState> {
-    create_ultra_fast_detector(
+    create_ultra_fast_detector_with_volume_validation(
         orderbook_manager,
         fee_rate,
         min_profit_threshold,
         paths,
         start_amount,
         Some(executor),
+        min_volume_multiplier,
+        volume_depth_check,
         is_perf
     )
 }
