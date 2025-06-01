@@ -1,12 +1,13 @@
+// src/exchange/fix_api_fixed.rs - Corrected implementation with proper TLS handling
 use base64::{ engine::general_purpose, Engine as _ };
 use chrono::Utc;
-use crossbeam_channel::{ bounded, Sender };
+use crossbeam_channel::{ bounded, unbounded, Receiver, Sender };
 use ed25519_dalek::{ Signature, Signer, SigningKey };
 use native_tls::{ TlsConnector, TlsStream };
 use parking_lot::RwLock;
 use serde::{ Deserialize, Serialize };
 use std::collections::HashMap;
-use std::io::{ BufRead, BufReader, Write };
+use std::io::{ Write, Read };
 use std::net::TcpStream;
 use std::sync::atomic::{ AtomicBool, AtomicU32, Ordering };
 use std::sync::Arc;
@@ -79,14 +80,6 @@ impl OrderSide {
             OrderSide::Sell => "2",
         }
     }
-
-    fn from_str(s: &str) -> Self {
-        match s {
-            "ask" => OrderSide::Buy,
-            "bid" => OrderSide::Sell,
-            _ => OrderSide::Buy, // default
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,16 +95,28 @@ struct OrderExecution {
     start_time: Instant,
 }
 
+// Internal message types for communication between threads
+#[derive(Debug)]
+enum InternalMessage {
+    SendMessage(String),
+    Heartbeat,
+    Shutdown,
+}
+
 pub struct FixClient {
     config: FixConfig,
-    stream: Option<TlsStream<TcpStream>>,
     seq_num: AtomicU32,
     pending_orders: Arc<RwLock<HashMap<String, OrderExecution>>>,
     signing_key: SigningKey,
     is_connected: AtomicBool,
-    _message_thread: Option<thread::JoinHandle<()>>,
-    _heartbeat_thread: Option<thread::JoinHandle<()>>,
+
+    // Communication channels
+    message_sender: Option<Sender<InternalMessage>>,
     shutdown: Arc<AtomicBool>,
+
+    // Thread handles
+    connection_handle: Option<thread::JoinHandle<()>>,
+    heartbeat_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl FixClient {
@@ -121,33 +126,39 @@ impl FixClient {
             .decode(&config.private_key_base64)
             .map_err(|e| FixError::Parse(format!("Failed to decode private key: {}", e)))?;
 
-        // Parse Ed25519 private key
+        // Parse Ed25519 private key from PKCS#8 format
         let signing_key = if key_bytes.len() == 32 {
             SigningKey::from_bytes(&key_bytes.try_into().unwrap())
-        } else {
-            // Extract from PKCS#8 format (simplified)
+        } else if key_bytes.len() > 32 {
+            // Extract from PKCS#8 format - the last 32 bytes should be the key
             let key_start = key_bytes.len().saturating_sub(32);
             let key_slice: [u8; 32] = key_bytes[key_start..]
                 .try_into()
                 .map_err(|_| FixError::Parse("Invalid private key format".to_string()))?;
             SigningKey::from_bytes(&key_slice)
+        } else {
+            return Err(FixError::Parse("Private key too short".to_string()));
         };
 
         Ok(Self {
             config,
-            stream: None,
             seq_num: AtomicU32::new(1),
             pending_orders: Arc::new(RwLock::new(HashMap::new())),
             signing_key,
             is_connected: AtomicBool::new(false),
-            _message_thread: None,
-            _heartbeat_thread: None,
+            message_sender: None,
             shutdown: Arc::new(AtomicBool::new(false)),
+            connection_handle: None,
+            heartbeat_handle: None,
         })
     }
 
     pub fn connect(&mut self) -> Result<()> {
         eprintln!("Connecting to FIX endpoint: {}", self.config.endpoint);
+
+        // Create communication channel
+        let (message_tx, message_rx) = unbounded();
+        self.message_sender = Some(message_tx);
 
         // Create TLS connection
         let connector = TlsConnector::new()?;
@@ -155,20 +166,30 @@ impl FixClient {
 
         // Set socket options for low latency
         tcp_stream.set_nodelay(true)?;
+        tcp_stream.set_nonblocking(true)?; // Make it non-blocking
         tcp_stream.set_read_timeout(Some(Duration::from_secs(1)))?;
         tcp_stream.set_write_timeout(Some(Duration::from_secs(1)))?;
 
         let domain = self.config.endpoint.split(':').next().unwrap();
-        let tls_stream = connector.connect(domain, tcp_stream).unwrap();
+        let mut tls_stream = connector.connect(domain, tcp_stream).unwrap();
 
-        self.stream = Some(tls_stream);
+        // Send logon message immediately
+        let logon_message = self.build_logon_message()?;
+        tls_stream.write_all(logon_message.as_bytes())?;
+        tls_stream.flush()?;
 
-        // Send logon message
-        self.send_logon()?;
+        // Start connection handler thread
+        let pending_orders = Arc::clone(&self.pending_orders);
+        let shutdown = Arc::clone(&self.shutdown);
 
-        // Start message processing threads
-        self.start_message_processing()?;
-        self.start_heartbeat();
+        let handle = thread::spawn(move || {
+            Self::connection_handler(tls_stream, message_rx, pending_orders, shutdown);
+        });
+
+        self.connection_handle = Some(handle);
+
+        // Start heartbeat thread
+        self.start_heartbeat()?;
 
         self.is_connected.store(true, Ordering::Release);
         eprintln!("FIX client connected successfully");
@@ -176,63 +197,37 @@ impl FixClient {
         Ok(())
     }
 
-    fn send_logon(&mut self) -> Result<()> {
+    fn build_logon_message(&self) -> Result<String> {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
+
+        // Create signature with correct format (SOH-separated)
         let signature = self.sign_logon_payload(&seq_num.to_string(), &sending_time);
 
-        let logon_msg = format!(
-            "35=A\x01\
-             49={}\x01\
-             56={}\x01\
-             34={}\x01\
-             52={}\x01\
-             98=0\x01\
-             108={}\x01\
-             141=Y\x01\
-             553={}\x01\
-             95={}\x01\
-             96={}\x01\
-             25035=1\x01",
-            self.config.sender_comp_id,
-            self.config.target_comp_id,
-            seq_num,
-            sending_time,
-            self.config.heartbeat_interval,
-            self.config.api_key,
-            signature.len(),
-            signature
-        );
+        // Build logon message with correct field ordering
+        let mut body = String::new();
 
-        let full_message = self.build_fix_message(&logon_msg);
-        self.send_raw_message(&full_message)?;
+        // Required fields in ascending numerical order
+        body.push_str(&format!("34={}\x01", seq_num)); // MsgSeqNum
+        body.push_str("35=A\x01"); // MsgType
+        body.push_str(&format!("49={}\x01", self.config.sender_comp_id)); // SenderCompID
+        body.push_str(&format!("52={}\x01", sending_time)); // SendingTime
+        body.push_str(&format!("56={}\x01", self.config.target_comp_id)); // TargetCompID
+        body.push_str(&format!("95={}\x01", signature.len())); // RawDataLength
+        body.push_str(&format!("96={}\x01", signature)); // RawData (signature)
+        body.push_str("98=0\x01"); // EncryptMethod
+        body.push_str(&format!("108={}\x01", self.config.heartbeat_interval)); // HeartBtInt
+        body.push_str("141=Y\x01"); // ResetSeqNumFlag
+        body.push_str(&format!("553={}\x01", self.config.api_key)); // Username
+        body.push_str("25035=1\x01"); // MessageHandling (UNORDERED for better performance)
 
-        eprintln!("Logon message sent");
-        Ok(())
-    }
-
-    fn send_raw_message(&mut self, message: &str) -> Result<()> {
-        if let Some(ref mut stream) = self.stream {
-            stream.write_all(message.as_bytes())?;
-            stream.flush()?;
-        }
-        Ok(())
-    }
-
-    fn build_fix_message(&self, body: &str) -> String {
-        let header = format!("8=FIX.4.4\x019={}\x01", body.len());
-        let message = format!("{}{}", header, body);
-        let checksum = self.calculate_checksum(&message);
-        format!("{}10={:03}\x01", message, checksum)
-    }
-
-    fn calculate_checksum(&self, message: &str) -> u8 {
-        message.bytes().fold(0u8, |acc, b| acc.wrapping_add(b)) % 255
+        Ok(self.build_fix_message(&body))
     }
 
     fn sign_logon_payload(&self, seq_num: &str, sending_time: &str) -> String {
+        // Correct signature payload format with SOH separators
         let payload = format!(
-            "A{}{}{}{}",
+            "A\x01{}\x01{}\x01{}\x01{}",
             self.config.sender_comp_id,
             self.config.target_comp_id,
             seq_num,
@@ -243,50 +238,147 @@ impl FixClient {
         general_purpose::STANDARD.encode(signature.to_bytes())
     }
 
-    fn start_message_processing(&mut self) -> Result<()> {
-        if let Some(mut stream) = self.stream.take() {
-            let pending_orders = Arc::clone(&self.pending_orders);
-            let shutdown = Arc::clone(&self.shutdown);
+    fn build_fix_message(&self, body: &str) -> String {
+        // Correct FIX message format with proper header
+        let header = format!("8=FIX.4.4\x019={}\x01", body.len());
+        let message = format!("{}{}", header, body);
+        let checksum = self.calculate_checksum(&message);
+        format!("{}10={:03}\x01", message, checksum)
+    }
 
-            // Clone the stream for reading
-            let read_stream = stream.get_mut().try_clone().unwrap();
-            self.stream = Some(stream);
+    fn calculate_checksum(&self, message: &str) -> u8 {
+        message.bytes().fold(0u8, |acc, b| acc.wrapping_add(b))
+    }
 
-            let handle = thread::spawn(move || {
-                let mut reader = BufReader::new(read_stream);
-                let mut buffer = String::new();
+    fn connection_handler(
+        mut stream: TlsStream<TcpStream>,
+        message_rx: Receiver<InternalMessage>,
+        pending_orders: Arc<RwLock<HashMap<String, OrderExecution>>>,
+        shutdown: Arc<AtomicBool>
+    ) {
+        // Since we can't clone TLS streams easily, we'll use a different approach
+        // We'll handle both reading and writing in the same thread
 
-                while !shutdown.load(Ordering::Relaxed) {
-                    buffer.clear();
+        let mut buffer = Vec::new();
+        let mut temp_buf = [0u8; 4096];
 
-                    match reader.read_line(&mut buffer) {
-                        Ok(0) => {
-                            eprintln!("Connection closed by server");
-                            break;
+        loop {
+            // Check for shutdown
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Handle outgoing messages (non-blocking)
+            while let Ok(msg) = message_rx.try_recv() {
+                match msg {
+                    InternalMessage::SendMessage(fix_msg) => {
+                        if let Err(e) = stream.write_all(fix_msg.as_bytes()) {
+                            eprintln!("Failed to send message: {}", e);
+                            return;
                         }
-                        Ok(_) => {
+                        if let Err(e) = stream.flush() {
+                            eprintln!("Failed to flush message: {}", e);
+                            return;
+                        }
+                    }
+                    InternalMessage::Heartbeat => {
+                        let heartbeat = Self::build_heartbeat_message();
+                        if let Err(e) = stream.write_all(heartbeat.as_bytes()) {
+                            eprintln!("Failed to send heartbeat: {}", e);
+                            return;
+                        }
+                        if let Err(e) = stream.flush() {
+                            eprintln!("Failed to flush heartbeat: {}", e);
+                            return;
+                        }
+                    }
+                    InternalMessage::Shutdown => {
+                        return;
+                    }
+                }
+            }
+
+            // Try to read incoming data (non-blocking)
+            match stream.read(&mut temp_buf) {
+                Ok(0) => {
+                    eprintln!("Connection closed by server");
+                    break;
+                }
+                Ok(n) => {
+                    buffer.extend_from_slice(&temp_buf[0..n]);
+
+                    // Process complete FIX messages (ending with \x01)
+                    while let Some(pos) = buffer.iter().position(|&b| b == 0x01) {
+                        let msg_bytes: Vec<u8> = buffer.drain(0..=pos).collect();
+                        if let Ok(msg_str) = String::from_utf8(msg_bytes) {
                             if
                                 let Err(e) = Self::process_incoming_message(
-                                    &buffer,
+                                    &msg_str,
                                     &pending_orders
                                 )
                             {
                                 eprintln!("Error processing message: {}", e);
                             }
                         }
-                        Err(e) => {
-                            if e.kind() != std::io::ErrorKind::TimedOut {
-                                eprintln!("Error reading message: {}", e);
-                                break;
-                            }
-                        }
                     }
                 }
-            });
+                Err(e) => {
+                    if
+                        e.kind() == std::io::ErrorKind::WouldBlock ||
+                        e.kind() == std::io::ErrorKind::TimedOut
+                    {
+                        // No data available, continue
+                    } else {
+                        eprintln!("Error reading from stream: {}", e);
+                        break;
+                    }
+                }
+            }
 
-            self._message_thread = Some(handle);
+            // Small sleep to prevent busy waiting
+            thread::sleep(Duration::from_millis(1));
         }
 
+        eprintln!("Connection handler thread exiting");
+    }
+
+    fn build_heartbeat_message() -> String {
+        let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
+
+        let body =
+            format!("34=1\x01\
+         35=0\x01\
+         49=RUST_ARBITRAGE\x01\
+         52={}\x01\
+         56=SPOT\x01", sending_time);
+
+        let header = format!("8=FIX.4.4\x019={}\x01", body.len());
+        let message = format!("{}{}", header, body);
+        let checksum = message.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
+        format!("{}10={:03}\x01", message, checksum)
+    }
+
+    fn start_heartbeat(&mut self) -> Result<()> {
+        let interval_secs = self.config.heartbeat_interval as u64;
+        let shutdown = Arc::clone(&self.shutdown);
+        let message_sender = self.message_sender.as_ref().unwrap().clone();
+
+        let handle = thread::spawn(move || {
+            while !shutdown.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_secs(interval_secs));
+
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                if let Err(e) = message_sender.send(InternalMessage::Heartbeat) {
+                    eprintln!("Failed to send heartbeat signal: {}", e);
+                    break;
+                }
+            }
+        });
+
+        self.heartbeat_handle = Some(handle);
         Ok(())
     }
 
@@ -317,7 +409,7 @@ impl FixClient {
                 }
             }
             Some("1") => {
-                // Test Request - would need to send heartbeat response
+                // Test Request - should send heartbeat response
                 if let Some(test_req_id) = fields.get("112") {
                     eprintln!("Received Test Request: {}", test_req_id);
                 }
@@ -326,7 +418,7 @@ impl FixClient {
                 // Heartbeat - no action needed
             }
             _ => {
-                // Unknown message type - ignore
+                // Unknown message type
             }
         }
 
@@ -357,6 +449,7 @@ impl FixClient {
             return Ok(None);
         }
 
+        // Parse execution report fields
         let client_order_id = fields.get("11").unwrap_or(&String::new()).clone();
         let order_id = fields.get("37").unwrap_or(&String::new()).clone();
         let symbol = fields.get("55").unwrap_or(&String::new()).clone();
@@ -368,27 +461,22 @@ impl FixClient {
             .get("14")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-
         let avg_price = fields
             .get("6")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-
         let cum_quote_qty = fields
             .get("25017")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-
         let leaves_qty = fields
             .get("151")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-
         let last_px = fields
             .get("31")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-
         let last_qty = fields
             .get("32")
             .and_then(|s| s.parse().ok())
@@ -413,43 +501,6 @@ impl FixClient {
         )
     }
 
-    fn start_heartbeat(&mut self) {
-        let interval_secs = self.config.heartbeat_interval as u64;
-        let seq_num = self.seq_num.get_mut().clone();
-        let sender_comp_id = self.config.sender_comp_id.clone();
-        let target_comp_id = self.config.target_comp_id.clone();
-        let shutdown = Arc::clone(&self.shutdown);
-
-        let handle = thread::spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_secs(interval_secs));
-
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
-
-                let _heartbeat_msg = format!(
-                    "35=0\x01\
-                     49={}\x01\
-                     56={}\x01\
-                     34={}\x01\
-                     52={}\x01",
-                    sender_comp_id,
-                    target_comp_id,
-                    seq_num,
-                    sending_time
-                );
-
-                // In a real implementation, you'd need a way to send this
-                // through the write stream. For now, just preparing the message.
-            }
-        });
-
-        self._heartbeat_thread = Some(handle);
-    }
-
     pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
         let start_time = Instant::now();
         let client_order_id = format!(
@@ -470,41 +521,46 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        let mut order_msg = format!(
-            "35=D\x01\
-             49={}\x01\
-             56={}\x01\
-             34={}\x01\
-             52={}\x01\
-             11={}\x01\
-             55={}\x01\
-             40=1\x01\
-             54={}\x01",
-            self.config.sender_comp_id,
-            self.config.target_comp_id,
-            seq_num,
-            sending_time,
-            client_order_id,
-            order.symbol.to_uppercase(),
-            order.side.to_fix_side()
-        );
+        // Build order message with correct field ordering
+        let mut body = String::new();
+        body.push_str(&format!("11={}\x01", client_order_id)); // ClOrdID
+        body.push_str(&format!("34={}\x01", seq_num)); // MsgSeqNum
+        body.push_str("35=D\x01"); // MsgType (NewOrderSingle)
 
-        // Add quantity fields based on order side
-        match order.side {
-            OrderSide::Buy => {
-                if let Some(quote_qty) = order.quote_quantity {
-                    order_msg.push_str(&format!("152={:.8}\x01", quote_qty));
-                } else {
-                    order_msg.push_str(&format!("38={:.8}\x01", order.quantity));
-                }
-            }
-            OrderSide::Sell => {
-                order_msg.push_str(&format!("38={:.8}\x01", order.quantity));
-            }
+        // Add quantity based on order side
+        if let Some(quote_qty) = order.quote_quantity {
+            body.push_str(&format!("38={:.8}\x01", quote_qty)); // OrderQty (for quote quantity orders)
+        } else {
+            body.push_str(&format!("38={:.8}\x01", order.quantity)); // OrderQty
         }
 
-        let full_message = self.build_fix_message(&order_msg);
-        self.send_raw_message(&full_message)?;
+        body.push_str("40=1\x01"); // OrdType (Market)
+        body.push_str(&format!("49={}\x01", self.config.sender_comp_id)); // SenderCompID
+        body.push_str(&format!("52={}\x01", sending_time)); // SendingTime
+        body.push_str(&format!("54={}\x01", order.side.to_fix_side())); // Side
+        body.push_str(&format!("55={}\x01", order.symbol.to_uppercase())); // Symbol
+        body.push_str(&format!("56={}\x01", self.config.target_comp_id)); // TargetCompID
+        body.push_str("59=4\x01"); // TimeInForce (Immediate or Cancel)
+
+        if order.quote_quantity.is_some() {
+            body.push_str(&format!("152={:.8}\x01", order.quote_quantity.unwrap())); // CashOrderQty
+        }
+
+        let full_message = self.build_fix_message(&body);
+
+        // Send order through the message channel
+        if let Some(sender) = &self.message_sender {
+            sender
+                .send(InternalMessage::SendMessage(full_message))
+                .map_err(|_|
+                    FixError::Connection(
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "Message channel closed"
+                        )
+                    )
+                )?;
+        }
 
         eprintln!(
             "Placed market order: {} {} {}",
@@ -532,8 +588,36 @@ impl FixClient {
         self.shutdown.store(true, Ordering::Release);
         self.is_connected.store(false, Ordering::Release);
 
-        if let Some(mut stream) = self.stream.take() {
-            let _ = stream.shutdown();
+        // Send logout message before disconnecting
+        let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
+        let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
+
+        let body = format!(
+            "34={}\x01\
+             35=5\x01\
+             49={}\x01\
+             52={}\x01\
+             56={}\x01",
+            seq_num,
+            self.config.sender_comp_id,
+            sending_time,
+            self.config.target_comp_id
+        );
+
+        let logout_message = self.build_fix_message(&body);
+
+        // Send logout through the message channel
+        if let Some(sender) = &self.message_sender {
+            let _ = sender.send(InternalMessage::SendMessage(logout_message));
+            let _ = sender.send(InternalMessage::Shutdown);
+        }
+
+        // Wait for threads to finish
+        if let Some(handle) = self.heartbeat_handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.connection_handle.take() {
+            let _ = handle.join();
         }
 
         eprintln!("FIX client disconnected");
