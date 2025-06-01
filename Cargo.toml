@@ -29,9 +29,8 @@ lto = true
 
 [dependencies]
 
-# Async tools
-futures = "0.3.30"
-async-trait = "0.1.77"
+async-trait = "0.1.88"
+figlet-rs = "0.1.5"
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -40,7 +39,6 @@ tungstenite = "0.26.2"
 
 # console color
 colored = "3.0"
-figlet-rs = "0.1.5"
 
 # configuration via environment
 dotenv = "0.15"
@@ -62,9 +60,6 @@ reqwest = { version = "0.12.15", features = ["json"] }
 # For concurrency
 dashmap = "6.1.0"
 
-strum = "0.27.1"
-strum_macros = "0.27.1"
-
 
 # tracing
 tracing = "0.1"
@@ -72,10 +67,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 tracing-timing = "0.6.0"
 
-
 rand = "0.9.1"
-uuid = { version = "1.17.0", features = ["v4"] }
-ordered-float = "5.0.0"
 
 lazy_static = "1.4.0"
 
@@ -90,10 +82,13 @@ url = "2.5.4"
 #rwlock
 parking_lot = "0.12.3"
 
-ahash = "0.8.12"    # Faster hasher
+
 crossbeam = "0.8.4" # For AtomicCell
-smallvec = "1.15.0" # For small vector optimizations
-rayon = "1.10.0"    # For parallel processing
-fastrand = "2.3.0"
 ctrlc = "3.4.7"
 rpmalloc = "0.2.2"
+
+native-tls = "0.2.14"
+base64 = "0.22.1"
+
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+crossbeam-channel = "0.5.15"

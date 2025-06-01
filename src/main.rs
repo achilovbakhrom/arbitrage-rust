@@ -5,6 +5,7 @@ static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 mod app;
 mod config;
 mod exchange;
+mod executor;
 mod utils;
 mod models;
 mod orderbook;
