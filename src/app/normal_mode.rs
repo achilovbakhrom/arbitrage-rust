@@ -1,9 +1,10 @@
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 
 use crate::{
-    arbitrage::{ self, executor::{ ArbitrageExecutor, ExecutionStrategy } },
+    arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
+    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
     models::symbol_map::SymbolMap,
     orderbook::manager::OrderBookManager,
     utils::console::{ print_app_started, print_app_starting, print_config },

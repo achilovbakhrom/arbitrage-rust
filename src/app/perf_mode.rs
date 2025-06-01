@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    arbitrage::{ self, executor::{ ArbitrageExecutor, ExecutionStrategy } },
+    arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
+    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
     models::symbol_map::SymbolMap,
     orderbook::manager::OrderBookManager,
     performance,
@@ -34,7 +35,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     info!("Test duration: 120 seconds");
 
     let output_file = create_output_file()?;
-    info!("Results will be saved to: {}", output_file);
 
     // Initialize exchange client
     let client = Arc::new(
@@ -150,7 +150,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 2 minutes
+        300, // 2 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );

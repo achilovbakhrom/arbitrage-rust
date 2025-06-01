@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
-use std::ptr::NonNull;
-use std::hint::unreachable_unchecked;
 
 use dashmap::DashMap;
 use std::thread;
@@ -10,7 +8,7 @@ use std::thread;
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
-use crate::arbitrage::executor::ArbitrageExecutor;
+use crate::executor::executor::ArbitrageExecutor;
 
 // Ultra-compact opportunity for immediate execution
 #[repr(C, packed)]
