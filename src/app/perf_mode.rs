@@ -1,10 +1,14 @@
+// src/app/perf_mode.rs - Updated with FIX integration
 use std::sync::Arc;
 
 use crate::{
     arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
-    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
+    executor::{
+        executor::{ ArbitrageExecutor, ExecutionStrategy },
+        fix_executor::FixArbitrageExecutor,
+    },
     models::symbol_map::SymbolMap,
     orderbook::manager::OrderBookManager,
     performance,
@@ -110,12 +114,61 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     // Create orderbook manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
-    let executor = Arc::new(
+    // Create fallback executor for compatibility
+    let fallback_executor = Arc::new(
         ArbitrageExecutor::new(
             orderbook_manager.clone(),
             ExecutionStrategy::FastSequential // Maximum speed
         )
     );
+
+    // Create FIX executor for performance testing if trading is enabled
+    let fix_executor = if
+        config.should_enable_real_trading() ||
+        config.should_enable_mock_trading()
+    {
+        info!("Creating FIX executor for performance test ({})", if config.debug {
+            "Mock"
+        } else {
+            "Real"
+        });
+
+        let fix_config = if config.debug {
+            None // Mock client doesn't need FIX config
+        } else {
+            Some(config.get_fix_client_config())
+        };
+
+        match
+            FixArbitrageExecutor::new(
+                orderbook_manager.clone(),
+                config.debug, // Use debug mode flag
+                fix_config,
+                config.max_slippage_percentage,
+                config.min_execution_profit_threshold
+            )
+        {
+            Ok(executor) => {
+                let executor = Arc::new(executor);
+
+                // Connect to FIX API
+                if let Err(e) = executor.connect() {
+                    error!("Failed to connect FIX executor: {}", e);
+                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
+                }
+
+                info!("✓ FIX executor connected for performance test");
+                Some(executor)
+            }
+            Err(e) => {
+                error!("Failed to create FIX executor: {}", e);
+                return Err(anyhow!("Failed to create FIX executor: {}", e));
+            }
+        }
+    } else {
+        info!("Trading disabled for performance test, using simulation mode only");
+        None
+    };
 
     // Convert paths to Arc for zero-copy sharing
     let triangular_paths: Vec<Arc<_>> = symbol_map
@@ -124,22 +177,29 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    // Create the enhanced arbitrage detector
-    let detector = arbitrage::detector::create_detector(
+    // Create the enhanced arbitrage detector with FIX integration
+    let detector = arbitrage::detector::create_detector_with_fix(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
         triangular_paths.clone(),
         config.trade_amount, // Start with configured amount
-        executor.clone(), // Pass the executor
+        fallback_executor.clone(), // Pass the fallback executor
+        fix_executor.clone(), // Pass the FIX executor
         config.min_volume_multiplier, // Require 2x trade amount in liquidity
-        config.depth, // Check top 5 price levels
-        false // is_perf flag
+        true // is_perf flag
     );
 
+    let detector_mode = if fix_executor.is_some() {
+        if config.debug { "FIX Mock Trading" } else { "FIX Real Trading" }
+    } else {
+        "Simulation Only"
+    };
+
     info!(
-        "Created optimized ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}%",
-        config.threshold * 100.0
+        "Created optimized ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}% (Mode: {})",
+        config.threshold * 100.0,
+        detector_mode
     );
 
     info!("Created arbitrage detector. Starting optimized performance test...");
@@ -150,14 +210,28 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        300, // 2 minutes
+        300, // 5 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );
 
+    // Cleanup: Disconnect FIX executor if it exists
+    if let Some(fix_exec) = fix_executor {
+        if let Err(e) = fix_exec.disconnect() {
+            error!("Error disconnecting FIX executor: {}", e);
+        } else {
+            info!("FIX executor disconnected successfully");
+        }
+    }
+
     match test_result {
         Ok(_) => {
             info!("Optimized performance test completed successfully!");
+
+            // Print final FIX executor stats if available
+            if let Some(fix_stats) = detector.get_fix_execution_stats() {
+                info!("Final FIX Execution Stats: {}", fix_stats);
+            }
         }
         Err(e) => {
             error!("Optimized performance test failed: {}", e);

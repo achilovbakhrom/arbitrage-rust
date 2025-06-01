@@ -4,7 +4,10 @@ use crate::{
     arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
-    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
+    executor::{
+        executor::{ ArbitrageExecutor, ExecutionStrategy },
+        fix_executor::FixArbitrageExecutor,
+    },
     models::symbol_map::SymbolMap,
     orderbook::manager::OrderBookManager,
     utils::console::{ print_app_started, print_app_starting, print_config },
@@ -115,12 +118,57 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     // Create the shared orderbook manager with optimal depth
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
-    let executor = Arc::new(
+    // Create fallback executor for simulation compatibility
+    let fallback_executor = Arc::new(
         ArbitrageExecutor::new(
             orderbook_manager.clone(),
             ExecutionStrategy::FastSequential // Maximum speed
         )
     );
+
+    // Create FIX executor based on configuration
+    let fix_executor = if
+        config.should_enable_real_trading() ||
+        config.should_enable_mock_trading()
+    {
+        info!("Creating FIX executor ({})", if config.debug { "Mock" } else { "Real" });
+
+        let fix_config = if config.debug {
+            None // Mock client doesn't need FIX config
+        } else {
+            Some(config.get_fix_client_config())
+        };
+
+        match
+            FixArbitrageExecutor::new(
+                orderbook_manager.clone(),
+                config.debug, // Use debug mode flag
+                fix_config,
+                config.max_slippage_percentage,
+                config.min_execution_profit_threshold
+            )
+        {
+            Ok(executor) => {
+                let executor = Arc::new(executor);
+
+                // Connect to FIX API
+                if let Err(e) = executor.connect() {
+                    error!("Failed to connect FIX executor: {}", e);
+                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
+                }
+
+                info!("✓ FIX executor connected successfully");
+                Some(executor)
+            }
+            Err(e) => {
+                error!("Failed to create FIX executor: {}", e);
+                return Err(anyhow!("Failed to create FIX executor: {}", e));
+            }
+        }
+    } else {
+        info!("Trading disabled, using simulation mode only");
+        None
+    };
 
     // Convert paths to Arc for zero-copy sharing
     let triangular_paths: Vec<Arc<_>> = symbol_map
@@ -129,21 +177,29 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    let _arbitrage_detector = arbitrage::detector::create_detector(
+    // Create the arbitrage detector with FIX integration
+    let _arbitrage_detector = arbitrage::detector::create_detector_with_fix(
         orderbook_manager.clone(),
         config.fee,
         config.threshold,
         triangular_paths,
         config.trade_amount,
-        executor.clone(),
+        fallback_executor.clone(),
+        fix_executor.clone(),
         config.min_volume_multiplier,
-        config.depth,
-        false
+        false // is_perf flag
     );
 
+    let detector_mode = if fix_executor.is_some() {
+        if config.debug { "FIX Mock Trading" } else { "FIX Real Trading" }
+    } else {
+        "Simulation Only"
+    };
+
     info!(
-        "Created high-performance event-driven arbitrage detector with threshold: {:.2}%",
-        config.threshold * 100.0
+        "Created high-performance event-driven arbitrage detector with threshold: {:.2}% (Mode: {})",
+        config.threshold * 100.0,
+        detector_mode
     );
 
     // Start WebSocket connection for real-time market data
@@ -166,6 +222,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let unique_symbols_cloned = Arc::new(unique_symbols.clone());
     let sbe_api_key = config.sbe_api_key.clone();
     let shutdown_for_ws = shutdown.clone();
+    let fix_executor_for_cleanup = fix_executor.clone();
 
     // Start WebSocket processing in a separate thread
     let ws_handle = thread::spawn(move || {
@@ -237,9 +294,29 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     print_app_started();
     info!("\nPress Ctrl+C to exit");
 
+    if fix_executor.is_some() {
+        if config.debug {
+            info!("🔵 Mock trading mode enabled - simulating FIX API trades");
+        } else {
+            info!("🔴 REAL TRADING MODE ENABLED - executing actual trades via FIX API");
+            info!("⚠️  Make sure you understand the risks!");
+        }
+    } else {
+        info!("🟡 Simulation mode - no actual trades will be executed");
+    }
+
     // Wait for shutdown signal
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
+    }
+
+    // Cleanup: Disconnect FIX executor
+    if let Some(fix_exec) = fix_executor_for_cleanup {
+        if let Err(e) = fix_exec.disconnect() {
+            error!("Error disconnecting FIX executor: {}", e);
+        } else {
+            info!("FIX executor disconnected successfully");
+        }
     }
 
     // Wait for WebSocket thread to finish
