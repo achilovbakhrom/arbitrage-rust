@@ -1,9 +1,9 @@
 use base64::{ engine::general_purpose, Engine as _ };
 use chrono::Utc;
-use crossbeam_channel::{ bounded, select, Receiver, Sender };
+use crossbeam_channel::{ bounded, Sender };
 use ed25519_dalek::{ Signature, Signer, SigningKey };
 use native_tls::{ TlsConnector, TlsStream };
-use parking_lot::{ Mutex, RwLock };
+use parking_lot::RwLock;
 use serde::{ Deserialize, Serialize };
 use std::collections::HashMap;
 use std::io::{ BufRead, BufReader, Write };

@@ -1,3 +1,4 @@
+// src/arbitrage/detector.rs - Updated with FIX integration
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
@@ -9,6 +10,7 @@ use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
 use crate::executor::executor::ArbitrageExecutor;
+use crate::executor::fix_executor::{ FixArbitrageExecutor, TriangularExecutionResult };
 
 // Ultra-compact opportunity for immediate execution
 #[repr(C, packed)]
@@ -106,7 +108,7 @@ struct SymbolPaths {
     _padding: [u8; 15], // Align to 64 bytes
 }
 
-/// Hyper-optimized arbitrage detector for maximum performance
+/// Hyper-optimized arbitrage detector for maximum performance with FIX execution
 pub struct ArbitrageDetectorState {
     // Core data (cache-optimized layout)
     pub orderbook_manager: Arc<OrderBookManager>,
@@ -117,7 +119,8 @@ pub struct ArbitrageDetectorState {
     symbol_map: Arc<DashMap<Arc<str>, SymbolPaths>>,
 
     // Execution control - separate cache line
-    executor: Arc<ArbitrageExecutor>,
+    fallback_executor: Arc<ArbitrageExecutor>, // For simulation mode compatibility
+    fix_executor: Option<Arc<FixArbitrageExecutor>>, // Real/mock FIX executor
     is_executing: Arc<AtomicBool>,
     execution_counter: Arc<AtomicU64>,
 
@@ -125,6 +128,7 @@ pub struct ArbitrageDetectorState {
     start_amount: f32,
     min_volume_multiplier: f32,
     min_profit_for_execution: f32, // Immediate execution threshold
+    use_fix_execution: bool, // Whether to use FIX API or fallback executor
 
     // Performance monitoring
     pub stats_counter: Arc<AtomicUsize>,
@@ -133,6 +137,101 @@ pub struct ArbitrageDetectorState {
 }
 
 impl ArbitrageDetectorState {
+    /// Create a new detector with FIX execution support
+    pub fn new_with_fix_executor(
+        orderbook_manager: Arc<OrderBookManager>,
+        paths: Vec<Arc<TriangularPath>>,
+        fee_rate: f64,
+        min_profit_threshold: f64,
+        start_amount: f64,
+        min_volume_multiplier: f64,
+        fallback_executor: Arc<ArbitrageExecutor>,
+        fix_executor: Option<Arc<FixArbitrageExecutor>>
+    ) -> Arc<Self> {
+        // Pre-compute all path data for zero-allocation hot path
+        let mut path_data = Vec::with_capacity(paths.len());
+
+        for path in &paths {
+            let directions =
+                (path.first_is_base_to_quote as u8) |
+                ((path.second_is_base_to_quote as u8) << 1) |
+                ((path.third_is_base_to_quote as u8) << 2);
+
+            path_data.push(PathData {
+                first_symbol: &path.first_symbol as *const Arc<str>,
+                second_symbol: &path.second_symbol as *const Arc<str>,
+                third_symbol: &path.third_symbol as *const Arc<str>,
+                directions,
+                fee_multiplier_cubed: ((1.0 - fee_rate) as f32).powi(3),
+                min_threshold: (1.0 + min_profit_threshold) as f32,
+                volume_multiplier: min_volume_multiplier as f32,
+                _padding: [0; 41],
+            });
+        }
+
+        // Build optimized symbol mapping
+        let symbol_map = Arc::new(DashMap::with_capacity(paths.len() * 3));
+
+        for (i, path) in paths.iter().enumerate() {
+            let idx = i as u16;
+
+            // Helper to add path to symbol
+            let add_path = |symbol: &Arc<str>, idx: u16| {
+                symbol_map
+                    .entry(symbol.clone())
+                    .and_modify(|entry: &mut SymbolPaths| {
+                        if (entry.count as usize) < MAX_PATHS_PER_SYMBOL {
+                            entry.indices[entry.count as usize] = idx;
+                            entry.count += 1;
+                        }
+                    })
+                    .or_insert_with(|| {
+                        let mut sp = SymbolPaths {
+                            count: 1,
+                            indices: [0; MAX_PATHS_PER_SYMBOL],
+                            _padding: [0; 15],
+                        };
+                        sp.indices[0] = idx;
+                        sp
+                    });
+            };
+
+            add_path(&path.first_symbol, idx);
+            add_path(&path.second_symbol, idx);
+            add_path(&path.third_symbol, idx);
+        }
+
+        let use_fix_execution = fix_executor.is_some();
+
+        let detector_state = Arc::new(ArbitrageDetectorState {
+            orderbook_manager: orderbook_manager.clone(),
+            all_paths: Arc::new(paths),
+            path_data: path_data.into_boxed_slice(),
+            symbol_map,
+            fallback_executor,
+            fix_executor,
+            is_executing: Arc::new(AtomicBool::new(false)),
+            execution_counter: Arc::new(AtomicU64::new(0)),
+            start_amount: start_amount as f32,
+            min_volume_multiplier: min_volume_multiplier as f32,
+            min_profit_for_execution: (1.0 + min_profit_threshold) as f32,
+            use_fix_execution,
+            stats_counter: Arc::new(AtomicUsize::new(0)),
+            profit_counter: Arc::new(AtomicUsize::new(0)),
+            last_execution_ns: Arc::new(AtomicU64::new(0)),
+        });
+
+        // Register ultra-fast callback
+        let callback_state = detector_state.clone();
+        orderbook_manager.register_update_callback(
+            Arc::new(move |symbol, book| {
+                callback_state.handle_update(symbol, book);
+            })
+        );
+
+        detector_state
+    }
+
     /// HYPER-OPTIMIZED: Check single path with zero allocations
     #[inline(always)]
     unsafe fn check_path_zero_alloc(&self, path_idx: u16) -> Option<FastOpportunity> {
@@ -229,7 +328,7 @@ impl ArbitrageDetectorState {
         })
     }
 
-    /// IMMEDIATE EXECUTION: Execute opportunity instantly with minimal overhead
+    /// IMMEDIATE EXECUTION: Execute opportunity instantly with FIX API or fallback
     #[inline(always)]
     fn execute_immediately_fast(&self, opportunity: FastOpportunity) -> bool {
         // Single atomic operation to claim execution
@@ -255,16 +354,44 @@ impl ArbitrageDetectorState {
             liquidity_scores: [0.8, 0.8, 0.8], // Simplified for speed
         };
 
-        // Execute synchronously for maximum speed
         let execution_start = Instant::now();
-        let result = self.executor.execute(&exec_opportunity);
+        let success = if self.use_fix_execution {
+            // Use FIX executor for real/mock trading
+            if let Some(fix_executor) = &self.fix_executor {
+                let result = fix_executor.execute_triangular_arbitrage(&exec_opportunity);
+
+                if result.success {
+                    tracing::info!(
+                        "FIX Execution successful: {:.4}% profit, {} trades, actual profit: ${:.2}",
+                        exec_opportunity.profit_percentage(),
+                        result.trades_executed,
+                        result.actual_profit
+                    );
+                } else {
+                    tracing::warn!(
+                        "FIX Execution failed: {} trades completed, error: {:?}",
+                        result.trades_executed,
+                        result.error
+                    );
+                }
+
+                result.success
+            } else {
+                false
+            }
+        } else {
+            // Use fallback executor for simulation
+            let result = self.fallback_executor.execute(&exec_opportunity);
+            result.success
+        };
+
         let execution_time = execution_start.elapsed().as_nanos() as u64;
 
         // Update counters
         self.execution_counter.fetch_add(1, Ordering::Relaxed);
         self.last_execution_ns.store(execution_time, Ordering::Relaxed);
 
-        if result.success {
+        if success {
             self.profit_counter.fetch_add(1, Ordering::Relaxed);
 
             // Minimal success logging (production)
@@ -278,7 +405,7 @@ impl ArbitrageDetectorState {
         // Release execution lock
         self.is_executing.store(false, Ordering::Release);
 
-        result.success
+        success
     }
 
     /// ULTRA-FAST: Handle orderbook update with immediate execution
@@ -334,10 +461,16 @@ impl ArbitrageDetectorState {
         )
     }
 
+    /// Get FIX executor statistics if available
+    pub fn get_fix_execution_stats(&self) -> Option<crate::executor::fix_executor::ExecutionStats> {
+        self.fix_executor.as_ref().map(|executor| executor.get_execution_stats())
+    }
+
     pub fn run_stats_task(&self) {
         let stats_counter = self.stats_counter.clone();
         let profit_counter = self.profit_counter.clone();
         let execution_counter = self.execution_counter.clone();
+        let fix_executor = self.fix_executor.clone();
 
         thread::Builder
             ::new()
@@ -356,6 +489,12 @@ impl ArbitrageDetectorState {
                             executions,
                             profits
                         );
+
+                        // Print FIX executor stats if available
+                        if let Some(fix_exec) = &fix_executor {
+                            let fix_stats = fix_exec.get_execution_stats();
+                            eprintln!("FIX Stats: {}", fix_stats);
+                        }
                     }
                 }
             })
@@ -371,12 +510,14 @@ impl Clone for ArbitrageDetectorState {
             all_paths: self.all_paths.clone(),
             path_data: self.path_data.clone(),
             symbol_map: self.symbol_map.clone(),
-            executor: self.executor.clone(),
+            fallback_executor: self.fallback_executor.clone(),
+            fix_executor: self.fix_executor.clone(),
             is_executing: self.is_executing.clone(),
             execution_counter: self.execution_counter.clone(),
             start_amount: self.start_amount,
             min_volume_multiplier: self.min_volume_multiplier,
             min_profit_for_execution: self.min_profit_for_execution,
+            use_fix_execution: self.use_fix_execution,
             stats_counter: self.stats_counter.clone(),
             profit_counter: self.profit_counter.clone(),
             last_execution_ns: self.last_execution_ns.clone(),
@@ -384,105 +525,37 @@ impl Clone for ArbitrageDetectorState {
     }
 }
 
-/// Create hyper-optimized detector with immediate execution
-pub fn create_ultra_fast_detector_with_volume_validation(
+/// Create detector with FIX executor support
+pub fn create_detector_with_fix(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
     min_profit_threshold: f64,
     paths: Vec<Arc<TriangularPath>>,
     start_amount: f64,
-    executor: Option<Arc<ArbitrageExecutor>>,
+    fallback_executor: Arc<ArbitrageExecutor>,
+    fix_executor: Option<Arc<FixArbitrageExecutor>>,
     min_volume_multiplier: f64,
-    _volume_depth_check: usize,
     is_perf: bool
 ) -> Arc<ArbitrageDetectorState> {
-    let executor = executor.expect("Executor required for immediate execution");
-
-    // Pre-compute all path data for zero-allocation hot path
-    let mut path_data = Vec::with_capacity(paths.len());
-
-    for path in &paths {
-        let directions =
-            (path.first_is_base_to_quote as u8) |
-            ((path.second_is_base_to_quote as u8) << 1) |
-            ((path.third_is_base_to_quote as u8) << 2);
-
-        path_data.push(PathData {
-            first_symbol: &path.first_symbol as *const Arc<str>,
-            second_symbol: &path.second_symbol as *const Arc<str>,
-            third_symbol: &path.third_symbol as *const Arc<str>,
-            directions,
-            fee_multiplier_cubed: ((1.0 - fee_rate) as f32).powi(3),
-            min_threshold: (1.0 + min_profit_threshold) as f32,
-            volume_multiplier: min_volume_multiplier as f32,
-            _padding: [0; 41],
-        });
-    }
-
-    // Build optimized symbol mapping
-    let symbol_map = Arc::new(DashMap::with_capacity(paths.len() * 3));
-
-    for (i, path) in paths.iter().enumerate() {
-        let idx = i as u16;
-
-        // Helper to add path to symbol
-        let add_path = |symbol: &Arc<str>, idx: u16| {
-            symbol_map
-                .entry(symbol.clone())
-                .and_modify(|entry: &mut SymbolPaths| {
-                    if (entry.count as usize) < MAX_PATHS_PER_SYMBOL {
-                        entry.indices[entry.count as usize] = idx;
-                        entry.count += 1;
-                    }
-                })
-                .or_insert_with(|| {
-                    let mut sp = SymbolPaths {
-                        count: 1,
-                        indices: [0; MAX_PATHS_PER_SYMBOL],
-                        _padding: [0; 15],
-                    };
-                    sp.indices[0] = idx;
-                    sp
-                });
-        };
-
-        add_path(&path.first_symbol, idx);
-        add_path(&path.second_symbol, idx);
-        add_path(&path.third_symbol, idx);
-    }
-
-    let detector_state = Arc::new(ArbitrageDetectorState {
-        orderbook_manager: orderbook_manager.clone(),
-        all_paths: Arc::new(paths),
-        path_data: path_data.into_boxed_slice(),
-        symbol_map,
-        executor,
-        is_executing: Arc::new(AtomicBool::new(false)),
-        execution_counter: Arc::new(AtomicU64::new(0)),
-        start_amount: start_amount as f32,
-        min_volume_multiplier: min_volume_multiplier as f32,
-        min_profit_for_execution: (1.0 + min_profit_threshold) as f32,
-        stats_counter: Arc::new(AtomicUsize::new(0)),
-        profit_counter: Arc::new(AtomicUsize::new(0)),
-        last_execution_ns: Arc::new(AtomicU64::new(0)),
-    });
-
-    // Register ultra-fast callback
-    let callback_state = detector_state.clone();
-    orderbook_manager.register_update_callback(
-        Arc::new(move |symbol, book| {
-            callback_state.handle_update(symbol, book);
-        })
+    let detector = ArbitrageDetectorState::new_with_fix_executor(
+        orderbook_manager,
+        paths,
+        fee_rate,
+        min_profit_threshold,
+        start_amount,
+        min_volume_multiplier,
+        fallback_executor,
+        fix_executor
     );
 
     if is_perf {
-        detector_state.run_stats_task();
+        detector.run_stats_task();
     }
 
-    detector_state
+    detector
 }
 
-/// Convenience function
+/// Legacy create function for backward compatibility
 pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
@@ -491,23 +564,23 @@ pub fn create_detector(
     start_amount: f64,
     executor: Arc<ArbitrageExecutor>,
     min_volume_multiplier: f64,
-    volume_depth_check: usize,
+    _volume_depth_check: usize,
     is_perf: bool
 ) -> Arc<ArbitrageDetectorState> {
-    create_ultra_fast_detector_with_volume_validation(
+    create_detector_with_fix(
         orderbook_manager,
         fee_rate,
         min_profit_threshold,
         paths,
         start_amount,
-        Some(executor),
+        executor,
+        None, // No FIX executor
         min_volume_multiplier,
-        volume_depth_check,
         is_perf
     )
 }
 
-// Branch prediction hints for stable Rust
+// Branch prediction hints for better performance
 #[allow(unused)]
 mod intrinsics {
     #[inline(always)]

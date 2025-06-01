@@ -1,3 +1,4 @@
+// src/config/mod.rs - Updated with FIX API configuration
 use anyhow::{ Context, Result };
 use dotenv::dotenv;
 use serde::{ Deserialize, Serialize };
@@ -26,6 +27,35 @@ pub struct Config {
     pub excluded_coins: Vec<String>,
 
     pub min_volume_multiplier: f64,
+
+    // FIX API Configuration
+    pub fix_config: FixApiConfig,
+
+    // Trading configuration
+    pub enable_trading: bool,
+    pub max_slippage_percentage: f64,
+    pub min_execution_profit_threshold: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixApiConfig {
+    pub private_key_base64: String,
+    pub sender_comp_id: String,
+    pub target_comp_id: String,
+    pub heartbeat_interval: u32,
+    pub endpoint: String,
+}
+
+impl Default for FixApiConfig {
+    fn default() -> Self {
+        Self {
+            private_key_base64: String::new(),
+            sender_comp_id: "RUST_ARBITRAGE".to_string(),
+            target_comp_id: "SPOT".to_string(),
+            heartbeat_interval: 30,
+            endpoint: "fix-oe.binance.com:9000".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +207,56 @@ impl Config {
             .unwrap_or_else(|_| "2.0".to_string())
             .parse::<f64>()?;
 
+        // Parse FIX API configuration
+        let fix_private_key = env
+            ::var("TAA_FIX_PRIVATE_KEY_BASE64")
+            .unwrap_or_else(|_| String::new());
+
+        let fix_sender_comp_id = env
+            ::var("TAA_FIX_SENDER_COMP_ID")
+            .unwrap_or_else(|_| "RUST_ARBITRAGE".to_string());
+
+        let fix_target_comp_id = env
+            ::var("TAA_FIX_TARGET_COMP_ID")
+            .unwrap_or_else(|_| "SPOT".to_string());
+
+        let fix_heartbeat_interval = env
+            ::var("TAA_FIX_HEARTBEAT_INTERVAL")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse::<u32>()
+            .unwrap_or(30);
+
+        let fix_endpoint = env
+            ::var("TAA_FIX_ENDPOINT")
+            .unwrap_or_else(|_| "fix-oe.binance.com:9000".to_string());
+
+        let fix_config = FixApiConfig {
+            private_key_base64: fix_private_key,
+            sender_comp_id: fix_sender_comp_id,
+            target_comp_id: fix_target_comp_id,
+            heartbeat_interval: fix_heartbeat_interval,
+            endpoint: fix_endpoint,
+        };
+
+        // Parse trading configuration
+        let enable_trading = env
+            ::var("TAA_ENABLE_TRADING")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse::<bool>()
+            .unwrap_or(false);
+
+        let max_slippage_percentage = env
+            ::var("TAA_MAX_SLIPPAGE_PERCENTAGE")
+            .unwrap_or_else(|_| "0.5".to_string())
+            .parse::<f64>()
+            .unwrap_or(0.5);
+
+        let min_execution_profit_threshold = env
+            ::var("TAA_MIN_EXECUTION_PROFIT_THRESHOLD")
+            .unwrap_or_else(|_| "0.1".to_string())
+            .parse::<f64>()
+            .unwrap_or(0.1);
+
         Ok(Config {
             debug,
             sbe_api_key,
@@ -192,6 +272,32 @@ impl Config {
             trade_amount,
             fee,
             min_volume_multiplier,
+            fix_config,
+            enable_trading,
+            max_slippage_percentage,
+            min_execution_profit_threshold,
         })
+    }
+
+    /// Get FIX configuration for the FIX client
+    pub fn get_fix_client_config(&self) -> crate::exchange::fix_api::FixConfig {
+        crate::exchange::fix_api::FixConfig {
+            api_key: self.fix_api.clone(),
+            private_key_base64: self.fix_config.private_key_base64.clone(),
+            sender_comp_id: self.fix_config.sender_comp_id.clone(),
+            target_comp_id: self.fix_config.target_comp_id.clone(),
+            heartbeat_interval: self.fix_config.heartbeat_interval,
+            endpoint: self.fix_config.endpoint.clone(),
+        }
+    }
+
+    /// Determine if trading should be enabled (requires both config flag and non-debug mode for real trading)
+    pub fn should_enable_real_trading(&self) -> bool {
+        self.enable_trading && !self.debug
+    }
+
+    /// Determine if mock trading should be used
+    pub fn should_enable_mock_trading(&self) -> bool {
+        self.enable_trading && self.debug
     }
 }
