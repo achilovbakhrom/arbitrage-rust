@@ -119,7 +119,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
     // Create fallback executor for simulation compatibility
-    let fallback_executor = Arc::new(
+    let executor_cb = Arc::new(
         ArbitrageExecutor::new(
             orderbook_manager.clone(),
             ExecutionStrategy::FastSequential // Maximum speed
@@ -184,7 +184,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         config.threshold,
         triangular_paths,
         config.trade_amount,
-        fallback_executor.clone(),
+        executor_cb.clone(),
         fix_executor.clone(),
         config.min_volume_multiplier,
         false // is_perf flag

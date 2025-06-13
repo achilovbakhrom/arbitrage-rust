@@ -8,3 +8,4 @@
 analyze
 .DS_Store
 *.lock
+flamegraph.svg

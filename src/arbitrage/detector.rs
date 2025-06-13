@@ -10,7 +10,7 @@ use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
 use crate::executor::executor::ArbitrageExecutor;
-use crate::executor::fix_executor::{ FixArbitrageExecutor, TriangularExecutionResult };
+use crate::executor::fix_executor::{ FixArbitrageExecutor };
 
 // Ultra-compact opportunity for immediate execution
 #[repr(C, packed)]
