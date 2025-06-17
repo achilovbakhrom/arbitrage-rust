@@ -1,4 +1,4 @@
-// src/app/perf_mode.rs - Updated with FIX integration
+// src/app/perf_mode.rs - Complete implementation with precision support
 use std::sync::Arc;
 
 use crate::{
@@ -122,12 +122,17 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         )
     );
 
+    // Create Arc for symbol map to share with FIX executor
+    let symbol_map_arc = Arc::new(symbol_map.clone());
+
     // Create FIX executor for performance testing if trading is enabled
     let fix_executor = if
         config.should_enable_real_trading() ||
         config.should_enable_mock_trading()
     {
-        info!("Creating FIX executor for performance test ({})", if config.debug {
+        info!("Creating FIX executor for performance test ({}) with precision support", if
+            config.debug
+        {
             "Mock"
         } else {
             "Real"
@@ -140,12 +145,13 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         };
 
         match
-            FixArbitrageExecutor::new(
+            FixArbitrageExecutor::new_with_symbol_map(
                 orderbook_manager.clone(),
                 config.debug, // Use debug mode flag
                 fix_config,
                 config.max_slippage_percentage,
-                config.min_execution_profit_threshold
+                config.min_execution_profit_threshold,
+                symbol_map_arc // Pass symbol map for precision
             )
         {
             Ok(executor) => {
@@ -157,7 +163,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
                     return Err(anyhow!("Failed to connect FIX executor: {}", e));
                 }
 
-                info!("✓ FIX executor connected for performance test");
+                info!("✓ FIX executor connected for performance test with precision support");
                 Some(executor)
             }
             Err(e) => {
@@ -210,7 +216,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 2 minutes
+        600, // 10 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );

@@ -1,4 +1,4 @@
-// src/exchange/fix_api_fixed.rs - Corrected implementation with proper TLS handling
+// src/exchange/fix_api.rs - Complete implementation with precision support
 use base64::{ engine::general_purpose, Engine as _ };
 use chrono::Utc;
 use crossbeam_channel::{ bounded, unbounded, Receiver, Sender };
@@ -88,6 +88,15 @@ pub struct MarketOrder {
     pub side: OrderSide,
     pub quantity: f64,
     pub quote_quantity: Option<f64>,
+    pub qty_precision: Option<u8>, // Add precision field
+    pub price_precision: Option<u8>, // Add price precision if needed
+}
+
+// Add a precision cache to avoid repeated lookups
+#[derive(Debug, Clone)]
+pub struct SymbolPrecision {
+    pub qty_precision: u8,
+    pub price_precision: u8,
 }
 
 struct OrderExecution {
@@ -117,6 +126,9 @@ pub struct FixClient {
     // Thread handles
     connection_handle: Option<thread::JoinHandle<()>>,
     heartbeat_handle: Option<thread::JoinHandle<()>>,
+
+    // Add precision cache
+    symbol_precisions: Arc<RwLock<HashMap<String, SymbolPrecision>>>,
 }
 
 impl FixClient {
@@ -150,7 +162,25 @@ impl FixClient {
             shutdown: Arc::new(AtomicBool::new(false)),
             connection_handle: None,
             heartbeat_handle: None,
+            symbol_precisions: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    // Add method to update symbol precision cache
+    pub fn update_symbol_precision(&self, symbol: &str, qty_precision: u8, price_precision: u8) {
+        let mut cache = self.symbol_precisions.write();
+        cache.insert(symbol.to_string(), SymbolPrecision {
+            qty_precision,
+            price_precision,
+        });
+    }
+
+    // Helper function to format quantity with correct precision
+    fn format_quantity(&self, quantity: f64, precision: Option<u8>) -> String {
+        match precision {
+            Some(p) => format!("{:.prec$}", quantity, prec = p as usize),
+            None => format!("{:.8}", quantity), // Default to 8 if not specified
+        }
     }
 
     pub fn connect(&mut self) -> Result<()> {
@@ -501,13 +531,22 @@ impl FixClient {
         )
     }
 
-    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
+    pub fn place_market_order(&mut self, mut order: MarketOrder) -> Result<ExecutionResult> {
         let start_time = Instant::now();
         let client_order_id = format!(
             "{}_{}",
             self.config.sender_comp_id,
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         );
+
+        // If precision not provided in order, try to get from cache
+        if order.qty_precision.is_none() {
+            let cache = self.symbol_precisions.read();
+            if let Some(precision_info) = cache.get(&order.symbol) {
+                order.qty_precision = Some(precision_info.qty_precision);
+                order.price_precision = Some(precision_info.price_precision);
+            }
+        }
 
         let (tx, rx) = bounded(1);
         {
@@ -527,11 +566,15 @@ impl FixClient {
         body.push_str(&format!("34={}\x01", seq_num)); // MsgSeqNum
         body.push_str("35=D\x01"); // MsgType (NewOrderSingle)
 
-        // Add quantity based on order side
+        // Format quantity with correct precision
         if let Some(quote_qty) = order.quote_quantity {
-            body.push_str(&format!("38={:.8}\x01", quote_qty)); // OrderQty (for quote quantity orders)
+            // For quote quantity orders, format with appropriate precision
+            let formatted_qty = self.format_quantity(quote_qty, order.qty_precision);
+            body.push_str(&format!("38={}\x01", formatted_qty)); // OrderQty
         } else {
-            body.push_str(&format!("38={:.8}\x01", order.quantity)); // OrderQty
+            // For base quantity orders, format with appropriate precision
+            let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
+            body.push_str(&format!("38={}\x01", formatted_qty)); // OrderQty
         }
 
         body.push_str("40=1\x01"); // OrdType (Market)
@@ -542,8 +585,10 @@ impl FixClient {
         body.push_str(&format!("56={}\x01", self.config.target_comp_id)); // TargetCompID
         body.push_str("59=4\x01"); // TimeInForce (Immediate or Cancel)
 
-        if order.quote_quantity.is_some() {
-            body.push_str(&format!("152={:.8}\x01", order.quote_quantity.unwrap())); // CashOrderQty
+        if let Some(quote_qty) = order.quote_quantity {
+            // Format CashOrderQty with appropriate precision
+            let formatted_cash_qty = self.format_quantity(quote_qty, order.qty_precision);
+            body.push_str(&format!("152={}\x01", formatted_cash_qty)); // CashOrderQty
         }
 
         let full_message = self.build_fix_message(&body);
@@ -552,25 +597,30 @@ impl FixClient {
         if let Some(sender) = &self.message_sender {
             sender
                 .send(InternalMessage::SendMessage(full_message))
-                .map_err(|_|
+                .map_err(|_| {
                     FixError::Connection(
                         std::io::Error::new(
                             std::io::ErrorKind::BrokenPipe,
                             "Message channel closed"
                         )
                     )
-                )?;
+                })?;
         }
 
         eprintln!(
-            "Placed market order: {} {} {}",
+            "Placed market order: {} {} {} (precision: {:?})",
             if matches!(order.side, OrderSide::Buy) {
                 "BUY"
             } else {
                 "SELL"
             },
             order.symbol,
-            order.quantity
+            if order.quote_quantity.is_some() {
+                self.format_quantity(order.quote_quantity.unwrap(), order.qty_precision)
+            } else {
+                self.format_quantity(order.quantity, order.qty_precision)
+            },
+            order.qty_precision
         );
 
         // Wait for execution result with timeout

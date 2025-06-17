@@ -1,16 +1,18 @@
-// src/exchange/mock_fix_api.rs
+// src/exchange/mock_fix_api.rs - Complete implementation with precision support
 use std::time::{ Duration, Instant };
 use anyhow::Result;
 use serde::{ Deserialize, Serialize };
 use tracing::{ info, warn };
+use std::collections::HashMap;
 
 use super::fix_api::{ ExecutionResult, MarketOrder, OrderSide };
 
-/// Mock FIX client for testing and debug mode
+/// Mock FIX client for testing and debug mode with precision support
 pub struct MockFixClient {
     is_connected: bool,
     simulated_latency: Duration,
     success_rate: f64, // 0.0 to 1.0
+    symbol_precisions: HashMap<String, (u8, u8)>, // (qty_precision, price_precision)
 }
 
 impl MockFixClient {
@@ -19,6 +21,7 @@ impl MockFixClient {
             is_connected: false,
             simulated_latency: Duration::from_micros(250), // Simulate 250μs latency
             success_rate: 0.95, // 95% success rate
+            symbol_precisions: HashMap::new(),
         }
     }
 
@@ -38,6 +41,30 @@ impl MockFixClient {
 
     pub fn is_connected(&self) -> bool {
         self.is_connected
+    }
+
+    /// Update symbol precision cache (for consistency with real client)
+    pub fn update_symbol_precision(
+        &mut self,
+        symbol: &str,
+        qty_precision: u8,
+        price_precision: u8
+    ) {
+        self.symbol_precisions.insert(symbol.to_string(), (qty_precision, price_precision));
+    }
+
+    /// Helper to format quantity with precision
+    fn format_quantity(&self, quantity: f64, precision: Option<u8>) -> String {
+        match precision {
+            Some(p) => format!("{:.prec$}", quantity, prec = p as usize),
+            None => format!("{:.8}", quantity),
+        }
+    }
+
+    /// Apply precision to a value
+    fn apply_precision(value: f64, precision: u8) -> f64 {
+        let factor = (10f64).powi(precision as i32);
+        (value * factor).floor() / factor
     }
 
     pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
@@ -66,6 +93,18 @@ impl MockFixClient {
                     .as_nanos()
             );
 
+            // Get precision for this symbol
+            let precision = order.qty_precision
+                .or_else(|| { self.symbol_precisions.get(&order.symbol).map(|(q, _)| *q) })
+                .unwrap_or(8);
+
+            // Apply precision to quantity
+            let precise_quantity = if let Some(quote_qty) = order.quote_quantity {
+                Self::apply_precision(quote_qty, precision)
+            } else {
+                Self::apply_precision(order.quantity, precision)
+            };
+
             // Simulate slight price slippage (0.01% to 0.05%)
             let slippage_factor = 1.0 + (rand::random::<f64>() * 0.0004 + 0.0001);
             let simulated_price = match order.side {
@@ -73,19 +112,27 @@ impl MockFixClient {
                 OrderSide::Sell => 50000.0 / slippage_factor, // Simulated sell price
             };
 
-            let filled_qty = order.quantity;
+            let filled_qty = if order.quote_quantity.is_some() {
+                // Quote order: calculate base quantity from quote
+                precise_quantity / simulated_price
+            } else {
+                // Base order: use the precise quantity
+                precise_quantity
+            };
+
             let avg_price = simulated_price;
             let cum_quote_qty = filled_qty * avg_price;
 
             info!(
-                "Mock FIX: Order executed - {} {} {} @ {:.8}",
+                "Mock FIX: Order executed - {} {} {} @ {:.8} (precision: {})",
                 match order.side {
                     OrderSide::Buy => "BUY",
                     OrderSide::Sell => "SELL",
                 },
                 order.symbol,
-                filled_qty,
-                avg_price
+                self.format_quantity(filled_qty, order.qty_precision),
+                avg_price,
+                precision
             );
 
             Ok(ExecutionResult {
@@ -108,7 +155,11 @@ impl MockFixClient {
             })
         } else {
             // Simulate execution failure
-            warn!("Mock FIX: Order execution failed for {}", order.symbol);
+            warn!(
+                "Mock FIX: Order execution failed for {} (precision: {:?})",
+                order.symbol,
+                order.qty_precision
+            );
             Err(anyhow::anyhow!("Mock execution failed - insufficient liquidity"))
         }
     }

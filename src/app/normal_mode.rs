@@ -1,3 +1,4 @@
+// src/app/normal_mode.rs - Complete implementation with precision support
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 
 use crate::{
@@ -126,12 +127,19 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         )
     );
 
-    // Create FIX executor based on configuration
+    // Create Arc for symbol map to share with FIX executor
+    let symbol_map_arc = Arc::new(symbol_map.clone());
+
+    // Create FIX executor based on configuration with symbol map for precision
     let fix_executor = if
         config.should_enable_real_trading() ||
         config.should_enable_mock_trading()
     {
-        info!("Creating FIX executor ({})", if config.debug { "Mock" } else { "Real" });
+        info!("Creating FIX executor ({}) with precision support", if config.debug {
+            "Mock"
+        } else {
+            "Real"
+        });
 
         let fix_config = if config.debug {
             None // Mock client doesn't need FIX config
@@ -139,13 +147,15 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
             Some(config.get_fix_client_config())
         };
 
+        // Create FIX executor with symbol map for precision support
         match
-            FixArbitrageExecutor::new(
+            FixArbitrageExecutor::new_with_symbol_map(
                 orderbook_manager.clone(),
                 config.debug, // Use debug mode flag
                 fix_config,
                 config.max_slippage_percentage,
-                config.min_execution_profit_threshold
+                config.min_execution_profit_threshold,
+                symbol_map_arc // Pass symbol map for precision
             )
         {
             Ok(executor) => {
@@ -157,7 +167,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
                     return Err(anyhow!("Failed to connect FIX executor: {}", e));
                 }
 
-                info!("✓ FIX executor connected successfully");
+                info!("✓ FIX executor connected successfully with precision support");
                 Some(executor)
             }
             Err(e) => {
@@ -296,9 +306,11 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     if fix_executor.is_some() {
         if config.debug {
-            info!("🔵 Mock trading mode enabled - simulating FIX API trades");
+            info!("🔵 Mock trading mode enabled - simulating FIX API trades with precision");
         } else {
-            info!("🔴 REAL TRADING MODE ENABLED - executing actual trades via FIX API");
+            info!(
+                "🔴 REAL TRADING MODE ENABLED - executing actual trades via FIX API with precision"
+            );
             info!("⚠️  Make sure you understand the risks!");
         }
     } else {

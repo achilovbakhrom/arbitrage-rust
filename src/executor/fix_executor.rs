@@ -1,4 +1,4 @@
-// src/executor/fix_executor.rs
+// src/executor/fix_executor.rs - Complete implementation with precision support
 use std::sync::{ Arc, Mutex };
 use std::time::Instant;
 use std::sync::atomic::{ AtomicU64, Ordering };
@@ -9,6 +9,7 @@ use crate::arbitrage::detector::ArbitrageOpportunity;
 use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide, ExecutionResult };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::orderbook::manager::OrderBookManager;
+use crate::models::symbol_map::SymbolMap;
 
 /// Execution result for triangular arbitrage
 #[derive(Debug)]
@@ -28,6 +29,9 @@ pub struct FixArbitrageExecutor {
     real_fix_client: Option<Arc<Mutex<FixClient>>>,
     mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
 
+    // Symbol map for precision lookup
+    symbol_map: Arc<SymbolMap>,
+
     // Debug mode flag
     is_debug_mode: bool,
 
@@ -45,13 +49,14 @@ pub struct FixArbitrageExecutor {
 }
 
 impl FixArbitrageExecutor {
-    /// Create a new FIX arbitrage executor
-    pub fn new(
+    /// Create a new FIX arbitrage executor with symbol map for precision
+    pub fn new_with_symbol_map(
         orderbook_manager: Arc<OrderBookManager>,
         is_debug_mode: bool,
         fix_config: Option<crate::exchange::fix_api::FixConfig>,
         max_slippage_percentage: f64,
-        min_profit_threshold: f64
+        min_profit_threshold: f64,
+        symbol_map: Arc<SymbolMap>
     ) -> Result<Self> {
         let (real_fix_client, mock_fix_client) = if is_debug_mode {
             // Debug mode: use mock client
@@ -60,7 +65,19 @@ impl FixArbitrageExecutor {
         } else {
             // Production mode: use real FIX client
             if let Some(config) = fix_config {
-                let real_client = FixClient::new(config).context("Failed to create FIX client")?;
+                let mut real_client = FixClient::new(config).context(
+                    "Failed to create FIX client"
+                )?;
+
+                // Pre-populate precision cache from symbol map
+                for symbol in symbol_map.get_all_symbols() {
+                    real_client.update_symbol_precision(
+                        &symbol.symbol,
+                        symbol.qty_precision,
+                        symbol.price_precision
+                    );
+                }
+
                 (Some(Arc::new(Mutex::new(real_client))), None)
             } else {
                 return Err(anyhow::anyhow!("FIX configuration required for production mode"));
@@ -70,6 +87,7 @@ impl FixArbitrageExecutor {
         Ok(Self {
             real_fix_client,
             mock_fix_client,
+            symbol_map,
             is_debug_mode,
             orderbook_manager,
             execution_counter: AtomicU64::new(0),
@@ -78,6 +96,27 @@ impl FixArbitrageExecutor {
             max_slippage_percentage,
             min_profit_threshold,
         })
+    }
+
+    /// Alternative constructor for backward compatibility
+    pub fn new(
+        orderbook_manager: Arc<OrderBookManager>,
+        is_debug_mode: bool,
+        fix_config: Option<crate::exchange::fix_api::FixConfig>,
+        max_slippage_percentage: f64,
+        min_profit_threshold: f64
+    ) -> Result<Self> {
+        // Create an empty symbol map for backward compatibility
+        let symbol_map = Arc::new(SymbolMap::new());
+
+        Self::new_with_symbol_map(
+            orderbook_manager,
+            is_debug_mode,
+            fix_config,
+            max_slippage_percentage,
+            min_profit_threshold,
+            symbol_map
+        )
     }
 
     /// Connect to the FIX API (real or mock)
@@ -112,6 +151,17 @@ impl FixArbitrageExecutor {
             }
         }
         Ok(())
+    }
+
+    /// Get precision for a symbol
+    fn get_symbol_precision(&self, symbol: &str) -> Option<(u8, u8)> {
+        self.symbol_map.get(symbol).map(|s| (s.qty_precision, s.price_precision))
+    }
+
+    /// Apply precision to a quantity value
+    fn apply_precision(value: f64, precision: u8) -> f64 {
+        let factor = (10f64).powi(precision as i32);
+        (value * factor).floor() / factor
     }
 
     /// Execute a triangular arbitrage opportunity
@@ -358,7 +408,7 @@ impl FixArbitrageExecutor {
         results
     }
 
-    /// Execute a single market order
+    /// Execute a single market order with precision
     fn execute_single_trade(
         &self,
         symbol: &str,
@@ -366,27 +416,37 @@ impl FixArbitrageExecutor {
         amount: f64,
         is_base_to_quote: bool
     ) -> Option<ExecutionResult> {
+        // Get precision for this symbol
+        let (qty_precision, price_precision) = self.get_symbol_precision(symbol).unwrap_or((8, 8)); // Default to 8 decimals if not found
+
+        // Apply precision to the amount
+        let precise_amount = Self::apply_precision(amount, qty_precision);
+
         let order = MarketOrder {
             symbol: symbol.to_string(),
             side,
             quantity: if is_base_to_quote {
-                amount
+                precise_amount
             } else {
                 0.0
             },
             quote_quantity: if is_base_to_quote {
                 None
             } else {
-                Some(amount)
+                Some(precise_amount)
             },
+            qty_precision: Some(qty_precision),
+            price_precision: Some(price_precision),
         };
 
         debug!(
             symbol = symbol,
             side = ?side,
-            quantity = amount,
+            quantity = precise_amount,
+            original_quantity = amount,
+            qty_precision = qty_precision,
             is_base_to_quote = is_base_to_quote,
-            "Executing single trade"
+            "Executing single trade with precision"
         );
 
         if self.is_debug_mode {
