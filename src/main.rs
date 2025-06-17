@@ -20,23 +20,14 @@ use anyhow::{ Context, Result };
 
 use utils::logging;
 
+use crate::{ models::command::Command, utils::helpers::get_run_command };
+
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_BUFFER_SIZE: usize = 100;
 
-// Define command line arguments enum
-#[derive(Debug)]
-enum Command {
-    Run,
-    PerformanceTest,
-}
-
 fn main() -> Result<()> {
     // Parse command line arguments
-    let command = if std::env::args().nth(1).as_deref() == Some("perf-test") {
-        Command::PerformanceTest
-    } else {
-        Command::Run
-    };
+    let command = get_run_command();
 
     // Load configuration with helpful error messages
     let config = Config::from_env().context(
