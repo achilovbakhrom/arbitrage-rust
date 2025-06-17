@@ -526,7 +526,7 @@ impl Clone for ArbitrageDetectorState {
 }
 
 /// Create detector with FIX executor support
-pub fn create_detector_with_fix(
+pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
     min_profit_threshold: f64,
@@ -553,31 +553,6 @@ pub fn create_detector_with_fix(
     }
 
     detector
-}
-
-/// Legacy create function for backward compatibility
-pub fn create_detector(
-    orderbook_manager: Arc<OrderBookManager>,
-    fee_rate: f64,
-    min_profit_threshold: f64,
-    paths: Vec<Arc<TriangularPath>>,
-    start_amount: f64,
-    executor: Arc<ArbitrageExecutor>,
-    min_volume_multiplier: f64,
-    _volume_depth_check: usize,
-    is_perf: bool
-) -> Arc<ArbitrageDetectorState> {
-    create_detector_with_fix(
-        orderbook_manager,
-        fee_rate,
-        min_profit_threshold,
-        paths,
-        start_amount,
-        executor,
-        None, // No FIX executor
-        min_volume_multiplier,
-        is_perf
-    )
 }
 
 // Branch prediction hints for better performance

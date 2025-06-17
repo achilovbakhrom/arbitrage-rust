@@ -50,7 +50,7 @@ pub struct FixArbitrageExecutor {
 
 impl FixArbitrageExecutor {
     /// Create a new FIX arbitrage executor with symbol map for precision
-    pub fn new_with_symbol_map(
+    pub fn new(
         orderbook_manager: Arc<OrderBookManager>,
         is_debug_mode: bool,
         fix_config: Option<crate::exchange::fix_api::FixConfig>,
@@ -65,9 +65,7 @@ impl FixArbitrageExecutor {
         } else {
             // Production mode: use real FIX client
             if let Some(config) = fix_config {
-                let mut real_client = FixClient::new(config).context(
-                    "Failed to create FIX client"
-                )?;
+                let real_client = FixClient::new(config).context("Failed to create FIX client")?;
 
                 // Pre-populate precision cache from symbol map
                 for symbol in symbol_map.get_all_symbols() {
@@ -96,27 +94,6 @@ impl FixArbitrageExecutor {
             max_slippage_percentage,
             min_profit_threshold,
         })
-    }
-
-    /// Alternative constructor for backward compatibility
-    pub fn new(
-        orderbook_manager: Arc<OrderBookManager>,
-        is_debug_mode: bool,
-        fix_config: Option<crate::exchange::fix_api::FixConfig>,
-        max_slippage_percentage: f64,
-        min_profit_threshold: f64
-    ) -> Result<Self> {
-        // Create an empty symbol map for backward compatibility
-        let symbol_map = Arc::new(SymbolMap::new());
-
-        Self::new_with_symbol_map(
-            orderbook_manager,
-            is_debug_mode,
-            fix_config,
-            max_slippage_percentage,
-            min_profit_threshold,
-            symbol_map
-        )
     }
 
     /// Connect to the FIX API (real or mock)
@@ -538,23 +515,6 @@ impl FixArbitrageExecutor {
             success_rate,
             avg_execution_time_us,
             total_execution_time_us: total_time_us,
-        }
-    }
-
-    /// Check if the executor is connected
-    pub fn is_connected(&self) -> bool {
-        if self.is_debug_mode {
-            if let Some(mock_client) = &self.mock_fix_client {
-                mock_client.lock().unwrap().is_connected()
-            } else {
-                false
-            }
-        } else {
-            if let Some(real_client) = &self.real_fix_client {
-                real_client.lock().unwrap().is_connected()
-            } else {
-                false
-            }
         }
     }
 }

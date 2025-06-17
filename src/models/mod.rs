@@ -1,3 +1,4 @@
+pub mod command;
 pub mod level;
 pub mod sbe;
 pub mod symbol;

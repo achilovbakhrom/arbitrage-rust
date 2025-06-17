@@ -4,16 +4,20 @@ use std::sync::Arc;
 use crate::{
     arbitrage::{ self },
     config::Config,
-    exchange::{ binance::BinanceClient, client::ExchangeClient },
-    executor::{
-        executor::{ ArbitrageExecutor, ExecutionStrategy },
-        fix_executor::FixArbitrageExecutor,
-    },
-    models::symbol_map::SymbolMap,
+    exchange::{ binance::BinanceClient },
+    executor::{ executor::{ ArbitrageExecutor, ExecutionStrategy } },
     orderbook::manager::OrderBookManager,
     performance,
-    utils::console::print_config,
-    API_TIMEOUT,
+    utils::{
+        console::print_config,
+        helpers::{
+            build_execultor,
+            build_symbol_map,
+            build_tokio_async_runtime,
+            get_all_symbols,
+            is_operational,
+        },
+    },
 };
 use anyhow::{ anyhow, Context, Result };
 use tracing::{ error, info };
@@ -48,65 +52,23 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     );
 
     // Create a runtime for async operations
-    let rt = tokio::runtime::Builder
-        ::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .context("Failed to create Tokio runtime")?;
+    let rt = build_tokio_async_runtime()?;
 
     // Verify exchange connectivity
-    let is_operational = rt.block_on(async {
-        tokio::time::timeout(API_TIMEOUT, client.is_operational()).await
-    });
-
-    match is_operational {
-        Ok(Ok(true)) => {
-            info!("✓ Exchange is operational");
-        }
-        _ => {
-            error!("❌ Exchange is not operational or timed out");
-            return Err(anyhow!("Exchange is not operational"));
-        }
+    if is_operational(&rt, client.clone()) {
+        info!("✓ Exchange is operational");
+    } else {
+        error!("❌ Exchange is not operational or timed out");
+        return Err(anyhow!("Exchange is not operational"));
     }
 
     // Fetch symbols
-    let symbols = rt.block_on(async {
-        tokio::time::timeout(API_TIMEOUT, client.get_active_spot_symbols()).await
-    });
-
-    let symbols = match symbols {
-        Ok(Ok(symbols)) => symbols,
-        Ok(Err(e)) => {
-            error!("Failed to fetch symbols: {}", e);
-            return Err(anyhow!("Failed to fetch symbols: {}", e));
-        }
-        Err(_) => {
-            error!("Timed out while fetching symbols");
-            return Err(anyhow!("Timed out while fetching symbols"));
-        }
-    };
+    let symbols = get_all_symbols(&rt, client.clone())?;
 
     info!("✓ Fetched {} symbols from exchange", symbols.len());
 
     // Create symbol map and find triangular paths
-    let mut symbol_map = SymbolMap::from_symbols(symbols.clone());
-
-    info!("Finding triangular arbitrage paths starting with {}...", config.base_asset);
-    symbol_map.find_targeted_triangular_paths(
-        &config.base_asset,
-        config.max_triangles,
-        &config.excluded_coins
-    );
-
-    let total_paths = symbol_map.get_triangular_paths().len();
-
-    if total_paths == 0 {
-        error!("No triangular paths found. Cannot continue.");
-        return Err(anyhow!("No triangular paths found. Cannot continue."));
-    }
-
-    info!("Found {} potential triangular arbitrage paths", total_paths);
+    let symbol_map = build_symbol_map(symbols.clone(), &config)?;
 
     // Get unique symbols for market data
     let unique_symbols = symbol_map.get_unique_symbols();
@@ -122,59 +84,8 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         )
     );
 
-    // Create Arc for symbol map to share with FIX executor
-    let symbol_map_arc = Arc::new(symbol_map.clone());
-
     // Create FIX executor for performance testing if trading is enabled
-    let fix_executor = if
-        config.should_enable_real_trading() ||
-        config.should_enable_mock_trading()
-    {
-        info!("Creating FIX executor for performance test ({}) with precision support", if
-            config.debug
-        {
-            "Mock"
-        } else {
-            "Real"
-        });
-
-        let fix_config = if config.debug {
-            None // Mock client doesn't need FIX config
-        } else {
-            Some(config.get_fix_client_config())
-        };
-
-        match
-            FixArbitrageExecutor::new_with_symbol_map(
-                orderbook_manager.clone(),
-                config.debug, // Use debug mode flag
-                fix_config,
-                config.max_slippage_percentage,
-                config.min_execution_profit_threshold,
-                symbol_map_arc // Pass symbol map for precision
-            )
-        {
-            Ok(executor) => {
-                let executor = Arc::new(executor);
-
-                // Connect to FIX API
-                if let Err(e) = executor.connect() {
-                    error!("Failed to connect FIX executor: {}", e);
-                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
-                }
-
-                info!("✓ FIX executor connected for performance test with precision support");
-                Some(executor)
-            }
-            Err(e) => {
-                error!("Failed to create FIX executor: {}", e);
-                return Err(anyhow!("Failed to create FIX executor: {}", e));
-            }
-        }
-    } else {
-        info!("Trading disabled for performance test, using simulation mode only");
-        None
-    };
+    let fix_executor = build_execultor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
 
     // Convert paths to Arc for zero-copy sharing
     let triangular_paths: Vec<Arc<_>> = symbol_map
@@ -184,7 +95,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         .collect();
 
     // Create the enhanced arbitrage detector with FIX integration
-    let detector = arbitrage::detector::create_detector_with_fix(
+    let detector = arbitrage::detector::create_detector(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
         config.threshold, // Configured minimum profit threshold
@@ -216,7 +127,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 2 minutes
+        600, // 10 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );
