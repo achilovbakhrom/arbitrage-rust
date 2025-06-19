@@ -48,7 +48,6 @@ pub struct ArbitrageOpportunity {
 
 // Optimized state with lock-free counters where possible
 pub struct PerformanceTestState {
-    pub detector: Arc<ArbitrageDetectorState>,
     pub measurements: Arc<Mutex<VecDeque<PerformanceMeasurement>>>,
     pub opportunities: Arc<Mutex<VecDeque<ArbitrageOpportunity>>>,
     pub start_time: Instant,
@@ -67,7 +66,6 @@ pub struct PerformanceTestState {
 
 impl PerformanceTestState {
     pub fn new(
-        detector: Arc<ArbitrageDetectorState>,
         duration_secs: u64,
         output_file: String,
         triangular_paths: Vec<Arc<TriangularPath>>,
@@ -79,7 +77,6 @@ impl PerformanceTestState {
         );
 
         Self {
-            detector,
             measurements: Arc::new(Mutex::new(VecDeque::with_capacity(50000))), // Larger capacity
             opportunities: Arc::new(Mutex::new(VecDeque::with_capacity(5000))),
             start_time: Instant::now(),
@@ -407,7 +404,6 @@ pub fn run_performance_test(
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
         PerformanceTestState::new(
-            detector.clone(),
             duration_secs,
             output_file,
             triangular_paths,
