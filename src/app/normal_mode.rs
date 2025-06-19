@@ -1,10 +1,11 @@
+// src/app/normal_mode.rs - Updated to use optimizations
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 
 use crate::{
     arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
-    executor::{ executor::{ ArbitrageExecutor, ExecutionStrategy } },
+    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
     models::triangular_path::TriangularPath,
     orderbook::manager::OrderBookManager,
     utils::{
@@ -58,8 +59,11 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     // Get unique symbols for market data
     let unique_symbols = symbol_map.get_unique_symbols();
 
-    // Create the shared orderbook manager with optimal depth
+    // Create the shared orderbook manager with optimal depth and optimizations
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
+
+    // Preload symbols for optimization
+    orderbook_manager.preload_symbols(&unique_symbols);
 
     // Create fallback executor for simulation compatibility
     let executor_cb = Arc::new(
@@ -79,7 +83,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    // Create the arbitrage detector with FIX integration
+    // Create the arbitrage detector with FIX integration and optimizations
     arbitrage::detector::create_detector(
         orderbook_manager.clone(),
         config.fee,
@@ -93,19 +97,28 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     );
 
     let detector_mode = if fix_executor.is_some() {
-        if config.debug { "FIX Mock Trading" } else { "FIX Real Trading" }
+        if config.debug { "FIX Mock Trading (Optimized)" } else { "FIX Real Trading (Optimized)" }
     } else {
-        "Simulation Only"
+        "Simulation Only (Optimized)"
     };
 
     info!(
-        "Created high-performance event-driven arbitrage detector with threshold: {:.2}% (Mode: {})",
+        "Created OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
         config.threshold * 100.0,
         detector_mode
     );
 
+    // Print optimization stats
+    let opt_stats = orderbook_manager.get_optimization_stats();
+    info!(
+        "Optimization stats: {} books, {} interner entries, {} hash cache entries",
+        opt_stats.total_books,
+        opt_stats.interner_string_entries,
+        opt_stats.symbol_hash_cache_size
+    );
+
     // Start WebSocket connection for real-time market data
-    info!("Starting WebSocket connection for real-time market data...");
+    info!("Starting OPTIMIZED WebSocket connection...");
 
     // Create shutdown signal
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -149,7 +162,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
             }
         };
 
-        info!("Connected to Binance SBE WebSocket");
+        info!("Connected to Binance SBE WebSocket (OPTIMIZED)");
 
         // Subscribe to depth stream for each symbol
         let channels = vec!["depth".to_string()];
@@ -169,15 +182,12 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
             }
         }
 
-        // Set up ultra-fast depth update callback for production
+        // Set up ultra-fast depth update callback for production with optimization
         client.set_depth_callback(
             move |symbol, bids, asks, first_update_id, last_update_id, _receive_time_us| {
-                // Clone the data to avoid lifetime issues
-                let symbol_arc: Arc<str> = Arc::from(symbol);
-
-                // Fast path - no timing overhead in production
-                orderbook_manager_thread.apply_depth_update(
-                    &symbol_arc,
+                // Use optimized string-based method to avoid Arc creation overhead
+                orderbook_manager_thread.apply_depth_update_str(
+                    symbol, // Pass as &str directly
                     &bids,
                     &asks,
                     first_update_id,
@@ -198,15 +208,13 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     if fix_executor.is_some() {
         if config.debug {
-            info!("🔵 Mock trading mode enabled - simulating FIX API trades with precision");
+            info!("🔵 OPTIMIZED mock trading mode enabled");
         } else {
-            info!(
-                "🔴 REAL TRADING MODE ENABLED - executing actual trades via FIX API with precision"
-            );
+            info!("🔴 OPTIMIZED REAL TRADING MODE ENABLED");
             info!("⚠️  Make sure you understand the risks!");
         }
     } else {
-        info!("🟡 Simulation mode - no actual trades will be executed");
+        info!("🟡 OPTIMIZED simulation mode");
     }
 
     // Wait for shutdown signal
@@ -231,6 +239,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     // Give threads a moment to clean up
     thread::sleep(Duration::from_millis(200));
 
-    info!("Triangular arbitrage system stopped");
+    info!("OPTIMIZED triangular arbitrage system stopped");
     Ok(())
 }

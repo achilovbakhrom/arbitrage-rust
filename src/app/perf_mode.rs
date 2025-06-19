@@ -1,11 +1,11 @@
-// src/app/perf_mode.rs - Complete implementation with precision support
+// src/app/perf_mode.rs - Updated to use optimizations
 use std::sync::Arc;
 
 use crate::{
     arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient },
-    executor::{ executor::{ ArbitrageExecutor, ExecutionStrategy } },
+    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
     orderbook::manager::OrderBookManager,
     performance,
     utils::{
@@ -39,7 +39,7 @@ pub fn create_output_file() -> Result<String> {
 pub fn run_performance_test(config: Config) -> Result<()> {
     // Output information
     print_config(&config);
-    info!("Starting optimized performance test for triangular arbitrage system");
+    info!("Starting ULTRA-OPTIMIZED performance test for triangular arbitrage system");
     info!("Test duration: 120 seconds");
 
     let output_file = create_output_file()?;
@@ -73,8 +73,11 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     // Get unique symbols for market data
     let unique_symbols = symbol_map.get_unique_symbols();
 
-    // Create orderbook manager
+    // Create OPTIMIZED orderbook manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
+
+    // Preload symbols for maximum optimization
+    orderbook_manager.preload_symbols(&unique_symbols);
 
     // Create fallback executor for compatibility
     let fallback_executor = Arc::new(
@@ -94,7 +97,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         .map(|p| Arc::new(p.clone()))
         .collect();
 
-    // Create the enhanced arbitrage detector with FIX integration
+    // Create the ULTRA-OPTIMIZED arbitrage detector with FIX integration
     let detector = arbitrage::detector::create_detector(
         orderbook_manager.clone(),
         config.fee, // 0.1% fee
@@ -108,18 +111,36 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     );
 
     let detector_mode = if fix_executor.is_some() {
-        if config.debug { "FIX Mock Trading" } else { "FIX Real Trading" }
+        if config.debug {
+            "FIX Mock Trading (Ultra-Optimized)"
+        } else {
+            "FIX Real Trading (Ultra-Optimized)"
+        }
     } else {
-        "Simulation Only"
+        "Simulation Only (Ultra-Optimized)"
     };
 
     info!(
-        "Created optimized ultra-fast arbitrage detector with synchronous execution, threshold: {:.2}% (Mode: {})",
+        "Created ULTRA-OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
         config.threshold * 100.0,
         detector_mode
     );
 
-    info!("Created arbitrage detector. Starting optimized performance test...");
+    // Print optimization stats
+    let opt_stats = orderbook_manager.get_optimization_stats();
+    let detector_opt_stats = detector.get_optimization_stats();
+    info!(
+        "Optimization stats - OrderBook: {} books, {} interner entries",
+        opt_stats.total_books,
+        opt_stats.interner_string_entries
+    );
+    info!(
+        "Optimization stats - Detector: {} paths, {} symbol map entries",
+        detector_opt_stats.total_paths,
+        detector_opt_stats.symbol_map_entries
+    );
+
+    info!("Starting ULTRA-OPTIMIZED performance test...");
 
     // Run the optimized performance test
     let test_result = performance::run_performance_test(
@@ -143,15 +164,35 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     match test_result {
         Ok(_) => {
-            info!("Optimized performance test completed successfully!");
+            info!("ULTRA-OPTIMIZED performance test completed successfully!");
+
+            // Print final optimization stats
+            let final_opt_stats = orderbook_manager.get_optimization_stats();
+            let final_detector_stats = detector.get_optimization_stats();
+
+            info!(
+                "Final optimization stats: {} books, {} interner entries, {} hash cache",
+                final_opt_stats.total_books,
+                final_opt_stats.interner_string_entries,
+                final_opt_stats.symbol_hash_cache_size
+            );
 
             // Print final FIX executor stats if available
             if let Some(fix_stats) = detector.get_fix_execution_stats() {
                 info!("Final FIX Execution Stats: {}", fix_stats);
             }
+
+            // Print final execution stats
+            let exec_stats = detector.get_execution_stats();
+            info!(
+                "Final execution stats: {} opportunities, {} executions, {} profitable",
+                exec_stats.0,
+                exec_stats.1,
+                exec_stats.2
+            );
         }
         Err(e) => {
-            error!("Optimized performance test failed: {}", e);
+            error!("ULTRA-OPTIMIZED performance test failed: {}", e);
             return Err(e);
         }
     }
