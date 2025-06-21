@@ -15,7 +15,7 @@ use crate::utils::string_interner::SymbolInterner;
 // Ultra-compact opportunity for immediate execution
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-pub struct FastOpportunity {
+pub struct Opportunity {
     pub path_index: u16,
     pub profit_ratio: f32, // f32 for cache efficiency
     pub execution_time_ns: u32,
@@ -133,7 +133,7 @@ pub struct ArbitrageDetectorState {
 
 impl ArbitrageDetectorState {
     /// Create a new detector with FIX execution support and optimization
-    pub fn new_with_fix_executor(
+    pub fn new(
         orderbook_manager: Arc<OrderBookManager>,
         paths: Vec<Arc<TriangularPath>>,
         fee_rate: f64,
@@ -156,6 +156,7 @@ impl ArbitrageDetectorState {
                 ]
             })
             .collect();
+
         symbol_interner.preload(&all_symbols);
 
         // Pre-compute all path data for zero-allocation hot path
@@ -253,103 +254,113 @@ impl ArbitrageDetectorState {
 
     /// HYPER-OPTIMIZED: Check single path with zero allocations and Symbol ID lookups
     #[inline(always)]
-    unsafe fn check_path_zero_alloc(&self, path_idx: u16) -> Option<FastOpportunity> {
-        let path_data = self.path_data.get_unchecked(path_idx as usize);
+    fn check_path_zero_alloc(&self, path_idx: u16) -> Option<Opportunity> {
+        unsafe {
+            let path_data = self.path_data.get_unchecked(path_idx as usize);
 
-        // Get orderbooks by Symbol ID (O(1) array access)
-        let first_book = self.orderbook_manager.get_or_create_book_by_id(path_data.first_symbol_id);
-        let second_book = self.orderbook_manager.get_or_create_book_by_id(
-            path_data.second_symbol_id
-        );
-        let third_book = self.orderbook_manager.get_or_create_book_by_id(path_data.third_symbol_id);
+            // Get orderbooks by Symbol ID (O(1) array access)
+            let first_book = self.orderbook_manager.get_or_create_book_by_id(
+                path_data.first_symbol_id
+            );
+            let second_book = self.orderbook_manager.get_or_create_book_by_id(
+                path_data.second_symbol_id
+            );
+            let third_book = self.orderbook_manager.get_or_create_book_by_id(
+                path_data.third_symbol_id
+            );
 
-        // Ultra-fast sync check with branch prediction hint
-        if unlikely(!first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()) {
-            return None;
+            // Ultra-fast sync check with branch prediction hint
+            if
+                unlikely(
+                    !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()
+                )
+            {
+                return None;
+            }
+
+            // Get cached prices (single atomic load per book)
+            let (first_bid, first_ask) = first_book.get_cached_top_of_book();
+            let (second_bid, second_ask) = second_book.get_cached_top_of_book();
+            let (third_bid, third_ask) = third_book.get_cached_top_of_book();
+
+            // Branch-free price selection using pre-computed directions
+            let (first_price, first_qty) = if path_data.first_is_base_to_quote() {
+                first_bid?
+            } else {
+                first_ask?
+            };
+
+            let (second_price, second_qty) = if path_data.second_is_base_to_quote() {
+                second_bid?
+            } else {
+                second_ask?
+            };
+
+            let (third_price, third_qty) = if path_data.third_is_base_to_quote() {
+                third_bid?
+            } else {
+                third_ask?
+            };
+
+            // SIMD-style profit calculation using pre-computed values
+            let mut amount = self.start_amount;
+
+            // Branchless execution path calculation
+            amount = if path_data.first_is_base_to_quote() {
+                amount * (first_price as f32)
+            } else {
+                amount / (first_price as f32)
+            };
+
+            amount = if path_data.second_is_base_to_quote() {
+                amount * (second_price as f32)
+            } else {
+                amount / (second_price as f32)
+            };
+
+            amount = if path_data.third_is_base_to_quote() {
+                amount * (third_price as f32)
+            } else {
+                amount / (third_price as f32)
+            };
+
+            // Apply pre-computed fee multiplier
+            amount *= path_data.fee_multiplier_cubed;
+
+            let profit_ratio = amount / self.start_amount;
+
+            // Fast profitability check with branch prediction
+            if unlikely(profit_ratio <= path_data.min_threshold) {
+                return None;
+            }
+
+            // Ultra-fast volume check (approximation for speed)
+            let min_vol = self.start_amount * self.min_volume_multiplier;
+            let volume_ok =
+                (first_qty as f32) >= min_vol &&
+                (second_qty as f32) >= min_vol &&
+                (third_qty as f32) >= min_vol;
+
+            if unlikely(!volume_ok) {
+                return None;
+            }
+
+            // Fast liquidity score (simplified for performance)
+            let avg_qty = ((first_qty + second_qty + third_qty) as f32) / 3.0;
+            let liquidity_score = ((avg_qty / min_vol).min(2.0) * 127.5) as u8;
+
+            Some(Opportunity {
+                path_index: path_idx,
+                profit_ratio,
+                execution_time_ns: 0, // Will be filled by caller
+                liquidity_score,
+            })
         }
-
-        // Get cached prices (single atomic load per book)
-        let (first_bid, first_ask) = first_book.get_cached_top_of_book();
-        let (second_bid, second_ask) = second_book.get_cached_top_of_book();
-        let (third_bid, third_ask) = third_book.get_cached_top_of_book();
-
-        // Branch-free price selection using pre-computed directions
-        let (first_price, first_qty) = if path_data.first_is_base_to_quote() {
-            first_bid?
-        } else {
-            first_ask?
-        };
-
-        let (second_price, second_qty) = if path_data.second_is_base_to_quote() {
-            second_bid?
-        } else {
-            second_ask?
-        };
-
-        let (third_price, third_qty) = if path_data.third_is_base_to_quote() {
-            third_bid?
-        } else {
-            third_ask?
-        };
-
-        // SIMD-style profit calculation using pre-computed values
-        let mut amount = self.start_amount;
-
-        // Branchless execution path calculation
-        amount = if path_data.first_is_base_to_quote() {
-            amount * (first_price as f32)
-        } else {
-            amount / (first_price as f32)
-        };
-
-        amount = if path_data.second_is_base_to_quote() {
-            amount * (second_price as f32)
-        } else {
-            amount / (second_price as f32)
-        };
-
-        amount = if path_data.third_is_base_to_quote() {
-            amount * (third_price as f32)
-        } else {
-            amount / (third_price as f32)
-        };
-
-        // Apply pre-computed fee multiplier
-        amount *= path_data.fee_multiplier_cubed;
-
-        let profit_ratio = amount / self.start_amount;
-
-        // Fast profitability check with branch prediction
-        if unlikely(profit_ratio <= path_data.min_threshold) {
-            return None;
-        }
-
-        // Ultra-fast volume check (approximation for speed)
-        let min_vol = self.start_amount * self.min_volume_multiplier;
-        let volume_ok =
-            (first_qty as f32) >= min_vol &&
-            (second_qty as f32) >= min_vol &&
-            (third_qty as f32) >= min_vol;
-
-        if unlikely(!volume_ok) {
-            return None;
-        }
-
-        // Fast liquidity score (simplified for performance)
-        let avg_qty = ((first_qty + second_qty + third_qty) as f32) / 3.0;
-        let liquidity_score = ((avg_qty / min_vol).min(2.0) * 127.5) as u8;
-
-        Some(FastOpportunity {
-            path_index: path_idx,
-            profit_ratio,
-            execution_time_ns: 0, // Will be filled by caller
-            liquidity_score,
-        })
     }
 
     /// IMMEDIATE EXECUTION: Execute opportunity instantly with FIX API or fallback
     #[inline(always)]
-    fn execute_immediately_fast(&self, opportunity: FastOpportunity) -> bool {
+    fn execute_immediately_fast(&self, opportunity: Opportunity) -> bool {
         // Single atomic operation to claim execution
         if
             self.is_executing
@@ -455,8 +466,7 @@ impl ArbitrageDetectorState {
             for i in 0..count.min(8) {
                 // Limit to 8 paths for latency
                 let path_idx = unsafe { *symbol_paths.indices.get_unchecked(i) };
-
-                if let Some(opportunity) = (unsafe { self.check_path_zero_alloc(path_idx) }) {
+                if let Some(opportunity) = self.check_path_zero_alloc(path_idx) {
                     // Immediate execution if profitable enough
                     if opportunity.profit_ratio >= self.min_profit_for_execution {
                         if self.execute_immediately_fast(opportunity) {
@@ -467,15 +477,6 @@ impl ArbitrageDetectorState {
                     }
                 }
             }
-        }
-    }
-
-    /// Legacy method for string-based updates (converts to ID then calls fast version)
-    #[inline]
-    pub fn handle_update_optimized(&self, symbol: &str, book: &Arc<OrderBook>) {
-        let interned = self.symbol_interner.intern(symbol);
-        if let Some(symbol_id) = self.orderbook_manager.symbol_to_id.get(&interned).map(|id| *id) {
-            self.handle_update_by_id(symbol_id, book);
         }
     }
 
@@ -593,7 +594,7 @@ pub fn create_detector(
 
     orderbook_manager.preload_symbols(&all_symbols);
 
-    let detector = ArbitrageDetectorState::new_with_fix_executor(
+    let detector = ArbitrageDetectorState::new(
         orderbook_manager,
         paths,
         fee_rate,

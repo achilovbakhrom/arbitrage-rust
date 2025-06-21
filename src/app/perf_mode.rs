@@ -90,11 +90,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let fix_executor = build_execultor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
 
     // Convert paths to Arc for zero-copy sharing
-    let triangular_paths: Vec<Arc<_>> = symbol_map
-        .get_triangular_paths()
-        .iter()
-        .map(|p| Arc::new(p.clone()))
-        .collect();
+    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
 
     // Create the ULTRA-OPTIMIZED arbitrage detector with FIX integration
     let detector = arbitrage::detector::create_detector(
@@ -147,7 +143,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120, // 10 minutes
+        240, // 10 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );

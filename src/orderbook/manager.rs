@@ -196,7 +196,7 @@ impl OrderBookManager {
 
     /// ULTRA-FAST: Apply depth update using symbol ID - main hot path
     #[inline(always)]
-    pub fn apply_depth_update_fast(
+    pub fn apply_depth_update_internal(
         &self,
         symbol_id: SymbolId,
         bids: &[(f64, f64)],
@@ -251,7 +251,7 @@ impl OrderBookManager {
         last_update_id: u64
     ) -> bool {
         if let Some(symbol_id) = self.get_symbol_id(symbol_str) {
-            self.apply_depth_update_fast(symbol_id, bids, asks, first_update_id, last_update_id)
+            self.apply_depth_update_internal(symbol_id, bids, asks, first_update_id, last_update_id)
         } else {
             // Symbol not preloaded - this shouldn't happen in optimized flow
             warn!("Symbol {} not preloaded, falling back to slow path", symbol_str);
