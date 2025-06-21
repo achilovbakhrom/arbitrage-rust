@@ -16,11 +16,25 @@ debug = false
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C",
-    "target-cpu=apple-m1",                # or apple-m2 for M2
+    "target-cpu=apple-m1",
     "-C",
     "target-feature=+neon,+fp16,+crypto",
     "-C",
+    "opt-level=3",
+    "-C",
+    "lto=fat",
+    "-C",
     "link-arg=-Wl,-dead_strip",
+]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C",
+    "target-cpu=native",
+    "-C",
+    "target-feature=+avx,+avx2,+sse4.2",
+    "-C",
+    "opt-level=3",
 ]
 
 [profile.pgo]
@@ -95,3 +109,4 @@ crossbeam-channel = "0.5.15"
 
 string_cache = "0.8.9"
 ahash = "0.8.12"
+asm = "0.3.0"
