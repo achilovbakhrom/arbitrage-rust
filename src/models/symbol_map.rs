@@ -244,6 +244,14 @@ impl SymbolMap {
     }
 
     #[inline]
+    pub fn get_trangular_paths_as_arc(&self) -> Vec<Arc<TriangularPath>> {
+        self.get_triangular_paths()
+            .iter()
+            .map(|p| Arc::new(p.clone()))
+            .collect()
+    }
+
+    #[inline]
     pub fn get_all_symbols(&self) -> Vec<Symbol> {
         self.symbols
             .iter()

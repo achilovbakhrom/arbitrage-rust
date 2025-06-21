@@ -534,7 +534,7 @@ pub fn run_performance_test(
             let orderbook_update_start = Instant::now();
 
             // Use ULTRA-FAST Symbol ID based method - NO STRING OPERATIONS
-            let _ = orderbook_manager_clone.apply_depth_update_fast(
+            let _ = orderbook_manager_clone.apply_depth_update_internal(
                 symbol_id, // Pass Symbol ID directly
                 &bids,
                 &asks,

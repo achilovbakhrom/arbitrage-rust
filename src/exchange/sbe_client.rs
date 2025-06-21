@@ -16,12 +16,13 @@ use std::cell::UnsafeCell;
 use parking_lot::RwLock;
 use std::sync::atomic::{ AtomicBool, Ordering };
 
+const DEPTH: usize = 5;
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
 
 // Thread-safe buffer wrapper
 struct BufferCell {
-    bids: UnsafeCell<[(f64, f64); 100]>,
-    asks: UnsafeCell<[(f64, f64); 100]>,
+    bids: UnsafeCell<[(f64, f64); DEPTH]>,
+    asks: UnsafeCell<[(f64, f64); DEPTH]>,
 }
 
 unsafe impl Sync for BufferCell {}
@@ -30,14 +31,18 @@ unsafe impl Send for BufferCell {}
 impl BufferCell {
     fn new() -> Self {
         Self {
-            bids: UnsafeCell::new([(0.0, 0.0); 100]),
-            asks: UnsafeCell::new([(0.0, 0.0); 100]),
+            bids: UnsafeCell::new([(0.0, 0.0); DEPTH]),
+            asks: UnsafeCell::new([(0.0, 0.0); DEPTH]),
         }
     }
 }
 
 pub struct BinanceSbeClient<F>
-    where F: Fn(&str, [(f64, f64); 100], [(f64, f64); 100], u64, u64, u64) + Send + Sync + 'static {
+    where
+        F: Fn(&str, [(f64, f64); DEPTH], [(f64, f64); DEPTH], u64, u64, u64) +
+            Send +
+            Sync +
+            'static {
     api_key: Arc<str>,
     endpoint: String,
     depth_callback: RwLock<Option<F>>,
@@ -48,7 +53,8 @@ pub struct BinanceSbeClient<F>
 }
 
 impl<F> BinanceSbeClient<F>
-    where F: Fn(&str, [(f64, f64); 100], [(f64, f64); 100], u64, u64, u64) + Send + Sync + 'static
+    where
+        F: Fn(&str, [(f64, f64); DEPTH], [(f64, f64); DEPTH], u64, u64, u64) + Send + Sync + 'static
 {
     pub fn new(api_key: String) -> Self {
         Self {
@@ -270,12 +276,12 @@ impl<F> BinanceSbeClient<F>
 
         // Optimized buffer clearing - use ptr::write_bytes for bulk zero
         unsafe {
-            std::ptr::write_bytes(bid_buffer.as_mut_ptr(), 0, 100);
-            std::ptr::write_bytes(ask_buffer.as_mut_ptr(), 0, 100);
+            std::ptr::write_bytes(bid_buffer.as_mut_ptr(), 0, DEPTH);
+            std::ptr::write_bytes(ask_buffer.as_mut_ptr(), 0, DEPTH);
         }
 
         // Optimized bid parsing - unrolled for better performance
-        let bid_limit = bid_count.min(100);
+        let bid_limit = bid_count.min(DEPTH);
         for i in 0..bid_limit {
             let price_raw = unsafe { read_i64_fast(data, offset) as f64 };
             offset += 8;
@@ -286,8 +292,8 @@ impl<F> BinanceSbeClient<F>
         }
 
         // Skip remaining bids if any
-        if bid_count > 100 {
-            offset += (bid_count - 100) * 16;
+        if bid_count > DEPTH {
+            offset += (bid_count - DEPTH) * 16;
         }
 
         // Read ask count
@@ -296,7 +302,7 @@ impl<F> BinanceSbeClient<F>
         offset += 2;
 
         // Optimized ask parsing
-        let ask_limit = ask_count.min(100);
+        let ask_limit = ask_count.min(DEPTH);
         for i in 0..ask_limit {
             let price_raw = unsafe { read_i64_fast(data, offset) as f64 };
             offset += 8;
@@ -307,8 +313,8 @@ impl<F> BinanceSbeClient<F>
         }
 
         // Skip remaining asks if any
-        if ask_count > 100 {
-            offset += (ask_count - 100) * 16;
+        if ask_count > DEPTH {
+            offset += (ask_count - DEPTH) * 16;
         }
 
         // Extract symbol length with bounds check

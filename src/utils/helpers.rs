@@ -71,14 +71,15 @@ pub fn build_symbol_map(
         &config.excluded_coins
     );
 
-    let total_paths = symbol_map.get_triangular_paths().len();
+    let paths = symbol_map.get_triangular_paths();
+
+    let total_paths = paths.len();
 
     info!("Found {} potential triangular arbitrage paths", total_paths);
 
     if total_paths > 0 {
         // Log a sample of paths (limit to avoid excessive logging)
-        let examples = symbol_map
-            .get_triangular_paths()
+        let examples = paths
             .iter()
             .take(5) // Only show first 5 examples
             .enumerate()

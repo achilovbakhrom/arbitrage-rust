@@ -66,21 +66,13 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     orderbook_manager.preload_symbols(&unique_symbols);
 
     // Create fallback executor for simulation compatibility
-    let executor_cb = Arc::new(
-        ArbitrageExecutor::new(
-            ExecutionStrategy::FastSequential // Maximum speed
-        )
-    );
+    let executor_cb = Arc::new(ArbitrageExecutor::new(ExecutionStrategy::FastSequential));
 
     // Create FIX executor based on configuration with symbol map for precision
     let fix_executor = build_execultor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
 
     // Convert paths to Arc for zero-copy sharing
-    let triangular_paths: Vec<Arc<TriangularPath>> = symbol_map
-        .get_triangular_paths()
-        .iter()
-        .map(|p| Arc::new(p.clone()))
-        .collect();
+    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
 
     // Create the arbitrage detector with FIX integration and optimizations
     arbitrage::detector::create_detector(
@@ -92,7 +84,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         executor_cb.clone(),
         fix_executor.clone(),
         config.min_volume_multiplier,
-        false // is_perf flag
+        false
     );
 
     let detector_mode = if fix_executor.is_some() {
@@ -173,18 +165,17 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         }
 
         // Set up ultra-fast depth update callback for production with optimization
-        client.set_depth_callback(
-            move |symbol, bids, asks, first_update_id, last_update_id, _receive_time_us| {
-                // Use optimized string-based method to avoid Arc creation overhead
-                orderbook_manager_thread.apply_depth_update(
-                    symbol,
-                    &bids,
-                    &asks,
-                    first_update_id,
-                    last_update_id
-                );
-            }
-        );
+        client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id, _| {
+            println!("symbol: {}, bids: {:?}, asks: {:?}", symbol, bids, asks);
+            // Use optimized string-based method to avoid Arc creation overhead
+            orderbook_manager_thread.apply_depth_update(
+                symbol,
+                &bids,
+                &asks,
+                first_update_id,
+                last_update_id
+            );
+        });
 
         // Process WebSocket messages with shutdown support
         if let Err(e) = client.process_messages_with_shutdown(&mut ws_stream, &shutdown_for_ws) {

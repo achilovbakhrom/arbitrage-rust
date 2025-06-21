@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use parking_lot::RwLock;
 use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
-use std::time::{ Duration, Instant };
+use std::time::Duration;
 use dashmap::DashMap;
 use std::thread;
 
@@ -196,7 +196,7 @@ impl OrderBookManager {
 
     /// ULTRA-FAST: Apply depth update using symbol ID - main hot path
     #[inline(always)]
-    pub fn apply_depth_update_fast(
+    pub fn apply_depth_update_internal(
         &self,
         symbol_id: SymbolId,
         bids: &[(f64, f64)],
@@ -251,7 +251,7 @@ impl OrderBookManager {
         last_update_id: u64
     ) -> bool {
         if let Some(symbol_id) = self.get_symbol_id(symbol_str) {
-            self.apply_depth_update_fast(symbol_id, bids, asks, first_update_id, last_update_id)
+            self.apply_depth_update_internal(symbol_id, bids, asks, first_update_id, last_update_id)
         } else {
             // Symbol not preloaded - this shouldn't happen in optimized flow
             warn!("Symbol {} not preloaded, falling back to slow path", symbol_str);
@@ -305,12 +305,6 @@ impl OrderBookManager {
         });
     }
 
-    pub fn trigger_recovery(&self, symbol: &Arc<str>) {
-        if let Some(symbol_id) = self.symbol_to_id.get(symbol).map(|id| *id) {
-            self.trigger_recovery_by_id(symbol_id);
-        }
-    }
-
     /// Apply snapshot with symbol string conversion
     pub fn apply_snapshot(
         &self,
@@ -357,15 +351,16 @@ impl OrderBookManager {
 
         // Notify callbacks with symbol ID
         self.notify_update(symbol_id, &book);
-
-        if let Some(symbol) = (unsafe { &*self.id_to_symbol.as_ptr().add(symbol_id as usize) }) {
-            debug!(
-                symbol = %symbol,
-                update_id = last_update_id,
-                bid_count = bids.len(),
-                ask_count = asks.len(),
-                "Applied orderbook snapshot"
-            );
+        unsafe {
+            if let Some(symbol) = &*self.id_to_symbol.as_ptr().add(symbol_id as usize) {
+                debug!(
+                    symbol = %symbol,
+                    update_id = last_update_id,
+                    bid_count = bids.len(),
+                    ask_count = asks.len(),
+                    "Applied orderbook snapshot"
+                );
+            }
         }
     }
 
@@ -437,16 +432,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Get top of book using string slice - converts to ID then calls fast version
-    #[inline]
-    pub fn get_top_of_book(&self, symbol_str: &str) -> Option<(Option<Level>, Option<Level>)> {
-        if let Some(symbol_id) = self.get_symbol_id(symbol_str) {
-            self.get_top_of_book_by_id(symbol_id)
-        } else {
-            None
-        }
-    }
-
     pub fn get_top_of_book_internal(
         &self,
         symbol: &Arc<str>
@@ -508,7 +493,7 @@ pub struct OptimizationStats {
 impl Clone for OrderBookManager {
     fn clone(&self) -> Self {
         // Clone the atomic arrays properly
-        let mut new_last_recovery = Box::new(
+        let new_last_recovery = Box::new(
             [const { std::sync::atomic::AtomicU64::new(0) }; MAX_SYMBOLS]
         );
         for i in 0..MAX_SYMBOLS {
