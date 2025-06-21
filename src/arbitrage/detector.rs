@@ -360,7 +360,7 @@ impl ArbitrageDetectorState {
 
     /// IMMEDIATE EXECUTION: Execute opportunity instantly with FIX API or fallback
     #[inline(always)]
-    fn execute_immediately_fast(&self, opportunity: Opportunity) -> bool {
+    fn execute_immediately(&self, opportunity: Opportunity) -> bool {
         // Single atomic operation to claim execution
         if
             self.is_executing
@@ -469,7 +469,7 @@ impl ArbitrageDetectorState {
                 if let Some(opportunity) = self.check_path_zero_alloc(path_idx) {
                     // Immediate execution if profitable enough
                     if opportunity.profit_ratio >= self.min_profit_for_execution {
-                        if self.execute_immediately_fast(opportunity) {
+                        if self.execute_immediately(opportunity) {
                             // Success - exit immediately to avoid processing more
                             self.stats_counter.fetch_add(1, Ordering::Relaxed);
                             return;
