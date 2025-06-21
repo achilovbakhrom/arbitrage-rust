@@ -14,12 +14,9 @@ use crate::models::symbol_map::SymbolMap;
 /// Execution result for triangular arbitrage
 #[derive(Debug)]
 pub struct TriangularExecutionResult {
-    pub opportunity: ArbitrageOpportunity,
     pub success: bool,
     pub actual_profit: f64,
-    pub execution_time_us: u64,
     pub trades_executed: u8, // Number of successful trades (0-3)
-    pub trade_results: Vec<ExecutionResult>,
     pub error: Option<String>,
 }
 
@@ -43,8 +40,6 @@ pub struct FixArbitrageExecutor {
     successful_executions: AtomicU64,
     total_execution_time_us: AtomicU64,
 
-    // Configuration
-    max_slippage_percentage: f64,
     min_profit_threshold: f64,
 }
 
@@ -54,7 +49,6 @@ impl FixArbitrageExecutor {
         orderbook_manager: Arc<OrderBookManager>,
         is_debug_mode: bool,
         fix_config: Option<crate::exchange::fix_api::FixConfig>,
-        max_slippage_percentage: f64,
         min_profit_threshold: f64,
         symbol_map: Arc<SymbolMap>
     ) -> Result<Self> {
@@ -91,7 +85,6 @@ impl FixArbitrageExecutor {
             execution_counter: AtomicU64::new(0),
             successful_executions: AtomicU64::new(0),
             total_execution_time_us: AtomicU64::new(0),
-            max_slippage_percentage,
             min_profit_threshold,
         })
     }
@@ -159,12 +152,9 @@ impl FixArbitrageExecutor {
         // Validate opportunity is still profitable
         if !self.validate_opportunity(opportunity) {
             return TriangularExecutionResult {
-                opportunity: opportunity.clone(),
                 success: false,
                 actual_profit: 0.0,
-                execution_time_us: start_time.elapsed().as_micros() as u64,
                 trades_executed: 0,
-                trade_results: Vec::new(),
                 error: Some("Opportunity no longer profitable".to_string()),
             };
         }
@@ -198,12 +188,9 @@ impl FixArbitrageExecutor {
         }
 
         TriangularExecutionResult {
-            opportunity: opportunity.clone(),
             success,
             actual_profit,
-            execution_time_us,
             trades_executed,
-            trade_results,
             error: if success {
                 None
             } else {
@@ -215,9 +202,15 @@ impl FixArbitrageExecutor {
     /// Validate that the opportunity is still profitable with current prices
     fn validate_opportunity(&self, opportunity: &ArbitrageOpportunity) -> bool {
         // Get current top of book for all three symbols
-        let first_book = self.orderbook_manager.get_top_of_book(&opportunity.path.first_symbol);
-        let second_book = self.orderbook_manager.get_top_of_book(&opportunity.path.second_symbol);
-        let third_book = self.orderbook_manager.get_top_of_book(&opportunity.path.third_symbol);
+        let first_book = self.orderbook_manager.get_top_of_book_internal(
+            &opportunity.path.first_symbol
+        );
+        let second_book = self.orderbook_manager.get_top_of_book_internal(
+            &opportunity.path.second_symbol
+        );
+        let third_book = self.orderbook_manager.get_top_of_book_internal(
+            &opportunity.path.third_symbol
+        );
 
         if
             let (

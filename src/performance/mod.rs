@@ -1,4 +1,4 @@
-// src/performance/mod.rs - Optimized version with minimal overhead
+// src/performance/mod.rs - Fixed version for optimized callbacks
 use std::sync::Arc;
 use std::time::{ Duration, Instant };
 use std::fs::File;
@@ -219,7 +219,8 @@ impl PerformanceTestState {
 
     #[inline(always)]
     fn get_symbol_price(&self, symbol: &Arc<str>, is_base_to_quote: bool) -> Option<f64> {
-        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book(symbol) {
+        // Use the optimized string-based method
+        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book(symbol.as_ref()) {
             if is_base_to_quote { bid.map(|b| b.price) } else { ask.map(|a| a.price) }
         } else {
             None
@@ -424,15 +425,16 @@ pub fn run_performance_test(
 
     let detection_times: Arc<DashMap<String, Duration>> = Arc::new(DashMap::with_capacity(1000));
 
-    // Optimized callback with reduced allocations
+    // FIXED: Optimized callback with correct signature (&str instead of &Arc<str>)
     let opportunity_callback = {
         let original_detector = detector.clone();
         let detection_times_clone = detection_times.clone();
         let test_state_clone = test_state.clone();
 
-        move |symbol: &Arc<str>, book: &Arc<crate::orderbook::orderbook::OrderBook>| {
+        move |symbol: &str, book: &Arc<crate::orderbook::orderbook::OrderBook>| {
             let detection_start = Instant::now();
-            original_detector.handle_update(symbol, book);
+            // Use optimized handle_update method
+            original_detector.handle_update_optimized(symbol, book);
             let detection_time = detection_start.elapsed();
 
             // Use try_insert to avoid blocking
@@ -441,9 +443,7 @@ pub fn run_performance_test(
             // Reduced frequency opportunity detection
             let count = test_state_clone.measurement_counter.load(Ordering::Relaxed);
             if count % 500 == 0 {
-                let opportunities = test_state_clone.detect_arbitrage_opportunities(
-                    symbol.as_ref()
-                );
+                let opportunities = test_state_clone.detect_arbitrage_opportunities(symbol);
                 for opp in opportunities {
                     test_state_clone.record_opportunity(opp);
                 }
@@ -464,14 +464,14 @@ pub fn run_performance_test(
                 return;
             }
 
-            let symbol_arc: Arc<str> = Arc::from(symbol);
             let symbol_str = symbol.to_string();
 
             let total_start = Instant::now();
             let orderbook_update_start = Instant::now();
 
+            // Use optimized string-based method
             let _ = orderbook_manager_clone.apply_depth_update(
-                &symbol_arc,
+                symbol, // Pass as &str directly
                 &bids,
                 &asks,
                 first_update_id,

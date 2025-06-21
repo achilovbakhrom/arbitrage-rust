@@ -8,7 +8,6 @@ mod exchange;
 mod executor;
 mod utils;
 mod models;
-mod monitor;
 mod orderbook;
 mod arbitrage;
 mod performance;

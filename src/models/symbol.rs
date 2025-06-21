@@ -7,8 +7,6 @@ pub struct Symbol {
     pub symbol: Arc<str>, // Using Arc<str> to reduce clone costs
     pub base_asset: Arc<str>,
     pub quote_asset: Arc<str>,
-    pub min_qty: Option<f64>,
-    pub max_qty: Option<f64>,
     pub price_precision: u8,
     pub qty_precision: u8,
     pub is_trading: bool,

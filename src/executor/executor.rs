@@ -1,8 +1,6 @@
-use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicU64, Ordering };
 
-use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageOpportunity;
 
 /// Execution strategy options
@@ -19,17 +17,11 @@ pub enum ExecutionStrategy {
 /// Result of an arbitrage execution
 #[derive(Debug)]
 pub struct ExecutionResult {
-    pub opportunity: ArbitrageOpportunity,
     pub success: bool,
-    pub profit_amount: f64,
-    pub execution_time_us: u64, // Changed to microseconds for precision
-    pub error: Option<String>,
-    pub slippage_factor: f64, // How much profit was lost to slippage
 }
 
 /// High-performance synchronous arbitrage executor
 pub struct ArbitrageExecutor {
-    orderbook_manager: Arc<OrderBookManager>,
     default_strategy: ExecutionStrategy,
 
     // Performance tracking
@@ -40,12 +32,8 @@ pub struct ArbitrageExecutor {
 
 impl ArbitrageExecutor {
     /// Create a new high-performance arbitrage executor
-    pub fn new(
-        orderbook_manager: Arc<OrderBookManager>,
-        default_strategy: ExecutionStrategy
-    ) -> Self {
+    pub fn new(default_strategy: ExecutionStrategy) -> Self {
         Self {
-            orderbook_manager,
             default_strategy,
             execution_counter: AtomicU64::new(0),
             total_execution_time_us: AtomicU64::new(0),
@@ -89,12 +77,7 @@ impl ArbitrageExecutor {
         }
 
         ExecutionResult {
-            opportunity: opportunity.clone(),
             success: actual_profit > 0.0,
-            profit_amount: actual_profit,
-            execution_time_us,
-            error: None,
-            slippage_factor: slippage_clamped,
         }
     }
 
@@ -106,12 +89,7 @@ impl ArbitrageExecutor {
         // Quick validation
         if self.is_executing_disabled() {
             return ExecutionResult {
-                opportunity: opportunity.clone(),
                 success: false,
-                profit_amount: 0.0,
-                execution_time_us: start_time.elapsed().as_micros() as u64,
-                error: Some("Execution disabled".to_string()),
-                slippage_factor: 0.0,
             };
         }
 
@@ -134,12 +112,7 @@ impl ArbitrageExecutor {
         }
 
         ExecutionResult {
-            opportunity: opportunity.clone(),
             success: actual_profit > 0.0,
-            profit_amount: actual_profit,
-            execution_time_us,
-            error: None,
-            slippage_factor: slippage_clamped,
         }
     }
 
@@ -155,12 +128,7 @@ impl ArbitrageExecutor {
         self.successful_executions.fetch_add(1, Ordering::Relaxed);
 
         ExecutionResult {
-            opportunity: opportunity.clone(),
             success: true,
-            profit_amount: simulated_profit,
-            execution_time_us,
-            error: None,
-            slippage_factor: 0.0,
         }
     }
 
@@ -173,53 +141,5 @@ impl ArbitrageExecutor {
         // - Risk management triggers
         // - Exchange connectivity
         false
-    }
-
-    /// Get execution performance statistics
-    pub fn get_performance_stats(&self) -> ExecutionStats {
-        let total_executions = self.execution_counter.load(Ordering::Relaxed);
-        let successful_executions = self.successful_executions.load(Ordering::Relaxed);
-        let total_time_us = self.total_execution_time_us.load(Ordering::Relaxed);
-
-        let success_rate = if total_executions > 0 {
-            (successful_executions as f64) / (total_executions as f64)
-        } else {
-            0.0
-        };
-
-        let avg_execution_time_us = if total_executions > 0 {
-            total_time_us / total_executions
-        } else {
-            0
-        };
-
-        ExecutionStats {
-            total_executions,
-            success_rate,
-            avg_execution_time_us,
-            total_execution_time_us: total_time_us,
-        }
-    }
-}
-
-/// Performance statistics for the executor
-#[derive(Debug)]
-pub struct ExecutionStats {
-    pub total_executions: u64,
-    pub success_rate: f64,
-    pub avg_execution_time_us: u64,
-    pub total_execution_time_us: u64,
-}
-
-impl std::fmt::Display for ExecutionStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Executions: {}, Success Rate: {:.2}%, Avg Time: {}μs, Total Time: {}μs",
-            self.total_executions,
-            self.success_rate * 100.0,
-            self.avg_execution_time_us,
-            self.total_execution_time_us
-        )
     }
 }
