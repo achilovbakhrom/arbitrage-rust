@@ -109,14 +109,12 @@ impl OrderBook {
     #[inline(always)]
     pub fn process_price_updates_raw(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
         // Process all bid updates without cache updates
-        unsafe {
-            for &(price, quantity) in bids {
-                self.insert_bid_unchecked(price, quantity);
-            }
+        for &(price, quantity) in bids {
+            self.insert_bid_unchecked(price, quantity);
+        }
 
-            for &(price, quantity) in asks {
-                self.insert_ask_unchecked(price, quantity);
-            }
+        for &(price, quantity) in asks {
+            self.insert_ask_unchecked(price, quantity);
         }
 
         // Single cache update at the end
@@ -157,136 +155,140 @@ impl OrderBook {
 
     /// Ultra-fast bid insertion with branch optimization - unchanged but critical
     #[inline(always)]
-    unsafe fn insert_bid_unchecked(&self, price: f64, quantity: f64) -> bool {
-        let bids_ptr = self.bids.as_ptr() as *mut (f64, f64);
-        let mut count = self.bid_count.load() as usize;
+    fn insert_bid_unchecked(&self, price: f64, quantity: f64) -> bool {
+        unsafe {
+            let bids_ptr = self.bids.as_ptr() as *mut (f64, f64);
+            let mut count = self.bid_count.load() as usize;
 
-        if quantity == 0.0 {
-            // Remove operation - find and shift
+            if quantity == 0.0 {
+                // Remove operation - find and shift
+                for i in 0..count {
+                    let level = bids_ptr.add(i);
+                    if (*level).0 == price {
+                        // Shift remaining elements
+                        std::ptr::copy(level.add(1), level, count - i - 1);
+                        count -= 1;
+                        self.bid_count.store(count as u16);
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Insert/update operation
+            let mut insert_pos = count;
+
+            // Find position (bids sorted highest to lowest)
             for i in 0..count {
                 let level = bids_ptr.add(i);
                 if (*level).0 == price {
-                    // Shift remaining elements
-                    std::ptr::copy(level.add(1), level, count - i - 1);
-                    count -= 1;
-                    self.bid_count.store(count as u16);
+                    // Update existing
+                    (*level).1 = quantity;
                     return true;
+                } else if (*level).0 < price {
+                    insert_pos = i;
+                    break;
                 }
             }
-            return false;
-        }
 
-        // Insert/update operation
-        let mut insert_pos = count;
-
-        // Find position (bids sorted highest to lowest)
-        for i in 0..count {
-            let level = bids_ptr.add(i);
-            if (*level).0 == price {
-                // Update existing
-                (*level).1 = quantity;
-                return true;
-            } else if (*level).0 < price {
-                insert_pos = i;
-                break;
-            }
-        }
-
-        // Insert new level if within depth limit
-        if insert_pos < (self.max_depth as usize) {
-            if count < (self.max_depth as usize) {
-                // Shift elements to make room
-                if insert_pos < count {
+            // Insert new level if within depth limit
+            if insert_pos < (self.max_depth as usize) {
+                if count < (self.max_depth as usize) {
+                    // Shift elements to make room
+                    if insert_pos < count {
+                        std::ptr::copy(
+                            bids_ptr.add(insert_pos),
+                            bids_ptr.add(insert_pos + 1),
+                            count - insert_pos
+                        );
+                    }
+                    count += 1;
+                } else if insert_pos < count {
+                    // Shift and replace worst level
                     std::ptr::copy(
                         bids_ptr.add(insert_pos),
                         bids_ptr.add(insert_pos + 1),
-                        count - insert_pos
+                        count - insert_pos - 1
                     );
+                } else {
+                    return false; // Price too low to include
                 }
-                count += 1;
-            } else if insert_pos < count {
-                // Shift and replace worst level
-                std::ptr::copy(
-                    bids_ptr.add(insert_pos),
-                    bids_ptr.add(insert_pos + 1),
-                    count - insert_pos - 1
-                );
-            } else {
-                return false; // Price too low to include
-            }
 
-            let level = bids_ptr.add(insert_pos);
-            *level = (price, quantity);
-            self.bid_count.store(count as u16);
-            true
-        } else {
-            false
+                let level = bids_ptr.add(insert_pos);
+                *level = (price, quantity);
+                self.bid_count.store(count as u16);
+                true
+            } else {
+                false
+            }
         }
     }
 
     /// Ultra-fast ask insertion with branch optimization - unchanged but critical
     #[inline(always)]
-    unsafe fn insert_ask_unchecked(&self, price: f64, quantity: f64) -> bool {
-        let asks_ptr = self.asks.as_ptr() as *mut (f64, f64);
-        let mut count = self.ask_count.load() as usize;
+    fn insert_ask_unchecked(&self, price: f64, quantity: f64) -> bool {
+        unsafe {
+            let asks_ptr = self.asks.as_ptr() as *mut (f64, f64);
+            let mut count = self.ask_count.load() as usize;
 
-        if quantity == 0.0 {
-            // Remove operation
-            for i in 0..count {
-                let level = asks_ptr.add(i);
-                if (*level).0 == price {
-                    std::ptr::copy(level.add(1), level, count - i - 1);
-                    count -= 1;
-                    self.ask_count.store(count as u16);
-                    return true;
+            if quantity == 0.0 {
+                // Remove operation
+                for i in 0..count {
+                    let level = asks_ptr.add(i);
+                    if (*level).0 == price {
+                        std::ptr::copy(level.add(1), level, count - i - 1);
+                        count -= 1;
+                        self.ask_count.store(count as u16);
+                        return true;
+                    }
                 }
-            }
-            return false;
-        }
-
-        // Insert/update operation
-        let mut insert_pos = count;
-
-        // Find position (asks sorted lowest to highest)
-        for i in 0..count {
-            let level = asks_ptr.add(i);
-            if (*level).0 == price {
-                // Update existing
-                (*level).1 = quantity;
-                return true;
-            } else if (*level).0 > price {
-                insert_pos = i;
-                break;
-            }
-        }
-
-        // Insert new level if within depth limit
-        if insert_pos < (self.max_depth as usize) {
-            if count < (self.max_depth as usize) {
-                if insert_pos < count {
-                    std::ptr::copy(
-                        asks_ptr.add(insert_pos),
-                        asks_ptr.add(insert_pos + 1),
-                        count - insert_pos
-                    );
-                }
-                count += 1;
-            } else if insert_pos < count {
-                std::ptr::copy(
-                    asks_ptr.add(insert_pos),
-                    asks_ptr.add(insert_pos + 1),
-                    count - insert_pos - 1
-                );
-            } else {
                 return false;
             }
 
-            let level = asks_ptr.add(insert_pos);
-            *level = (price, quantity);
-            self.ask_count.store(count as u16);
-            true
-        } else {
-            false
+            // Insert/update operation
+            let mut insert_pos = count;
+
+            // Find position (asks sorted lowest to highest)
+            for i in 0..count {
+                let level = asks_ptr.add(i);
+                if (*level).0 == price {
+                    // Update existing
+                    (*level).1 = quantity;
+                    return true;
+                } else if (*level).0 > price {
+                    insert_pos = i;
+                    break;
+                }
+            }
+
+            // Insert new level if within depth limit
+            if insert_pos < (self.max_depth as usize) {
+                if count < (self.max_depth as usize) {
+                    if insert_pos < count {
+                        std::ptr::copy(
+                            asks_ptr.add(insert_pos),
+                            asks_ptr.add(insert_pos + 1),
+                            count - insert_pos
+                        );
+                    }
+                    count += 1;
+                } else if insert_pos < count {
+                    std::ptr::copy(
+                        asks_ptr.add(insert_pos),
+                        asks_ptr.add(insert_pos + 1),
+                        count - insert_pos - 1
+                    );
+                } else {
+                    return false;
+                }
+
+                let level = asks_ptr.add(insert_pos);
+                *level = (price, quantity);
+                self.ask_count.store(count as u16);
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -319,11 +321,6 @@ impl OrderBook {
             0.0
         };
         self.cached_mid_price.store(mid_price);
-    }
-
-    /// Batch process price updates for maximum throughput (LEGACY: for Vec compatibility)
-    pub fn process_price_updates(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
-        self.process_price_updates_raw(bids, asks);
     }
 
     /// Apply snapshot with optimized bulk operations
@@ -439,18 +436,6 @@ impl OrderBook {
         }
     }
 
-    /// Apply depth update with optimized fast path (LEGACY: for Vec compatibility)
-    pub fn apply_depth_update(
-        &self,
-        bids: &[(f64, f64)],
-        asks: &[(f64, f64)],
-        first_update_id: u64,
-        last_update_id: u64
-    ) -> Result<bool, ()> {
-        // Delegate to raw version for maximum performance
-        self.apply_depth_update_raw(bids, asks, first_update_id, last_update_id)
-    }
-
     // Simplified utility methods
     pub fn buffer_event(
         &self,
@@ -484,56 +469,5 @@ impl OrderBook {
     #[inline(always)]
     pub fn is_synced(&self) -> bool {
         self.get_state() == OrderBookState::Synced
-    }
-
-    #[inline(always)]
-    pub fn get_last_update_id(&self) -> u64 {
-        self.last_update_id.load(Ordering::Acquire)
-    }
-
-    /// Get multiple price levels for a symbol
-    pub fn get_bids(&self, depth: Option<usize>) -> Vec<Level> {
-        let depth = depth.unwrap_or(self.max_depth as usize).min(self.max_depth as usize);
-        let count = self.bid_count.load() as usize;
-        let mut result = Vec::with_capacity(depth.min(count));
-
-        unsafe {
-            let bids_ptr = self.bids.as_ptr();
-            for i in 0..depth.min(count) {
-                let level = *bids_ptr.add(i);
-                if !Self::is_empty_level(level) {
-                    result.push(Level { price: level.0, quantity: level.1 });
-                }
-            }
-        }
-
-        result
-    }
-
-    pub fn get_asks(&self, depth: Option<usize>) -> Vec<Level> {
-        let depth = depth.unwrap_or(self.max_depth as usize).min(self.max_depth as usize);
-        let count = self.ask_count.load() as usize;
-        let mut result = Vec::with_capacity(depth.min(count));
-
-        unsafe {
-            let asks_ptr = self.asks.as_ptr();
-            for i in 0..depth.min(count) {
-                let level = *asks_ptr.add(i);
-                if !Self::is_empty_level(level) {
-                    result.push(Level { price: level.0, quantity: level.1 });
-                }
-            }
-        }
-
-        result
-    }
-
-    pub fn mid_price(&self) -> Option<f64> {
-        let mid = self.cached_mid_price.load();
-        if mid > 0.0 {
-            Some(mid)
-        } else {
-            None
-        }
     }
 }
