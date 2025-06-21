@@ -271,7 +271,7 @@ impl ArbitrageDetectorState {
 
             // Ultra-fast sync check with branch prediction hint
             if
-                unlikely(
+                core::hint::unlikely(
                     !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()
                 )
             {
@@ -330,7 +330,7 @@ impl ArbitrageDetectorState {
             let profit_ratio = amount / self.start_amount;
 
             // Fast profitability check with branch prediction
-            if unlikely(profit_ratio <= path_data.min_threshold) {
+            if core::hint::unlikely(profit_ratio <= path_data.min_threshold) {
                 return None;
             }
 
@@ -341,7 +341,7 @@ impl ArbitrageDetectorState {
                 (second_qty as f32) >= min_vol &&
                 (third_qty as f32) >= min_vol;
 
-            if unlikely(!volume_ok) {
+            if core::hint::unlikely(!volume_ok) {
                 return None;
             }
 
@@ -611,20 +611,3 @@ pub fn create_detector(
 
     detector
 }
-
-// Branch prediction hints for better performance
-#[allow(unused)]
-mod intrinsics {
-    #[inline(always)]
-    pub fn likely(b: bool) -> bool {
-        if b { true } else { false }
-    }
-
-    #[inline(always)]
-    pub fn unlikely(b: bool) -> bool {
-        if b { true } else { false }
-    }
-}
-
-// Re-export for compatibility
-pub use intrinsics::*;
