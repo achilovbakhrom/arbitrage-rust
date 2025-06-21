@@ -143,7 +143,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        240, // 10 minutes
+        120, // 10 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );

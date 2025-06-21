@@ -210,7 +210,7 @@ impl OrderBookManager {
             unsafe {
                 let books_ptr = self.books.as_ptr();
                 if let Some(book) = &*books_ptr.add(symbol_id as usize) {
-                    book.clone()
+                    book
                 } else {
                     // Book doesn't exist, trigger recovery
                     self.trigger_recovery_by_id(symbol_id);
