@@ -31,7 +31,8 @@ echo "[2/4] Running performance test (duration: 300 seconds)..."
 echo "This will take approximately 5 minutes to complete."
 echo
 
-# Execute the performance test 
+# Execute the performance test
+RUSTFLAGS="-C target-cpu=apple-m1"
 ./target/release/rust-arb-optimized perf-test
 if [ $? -ne 0 ]; then
     echo "Error: Performance test failed."

@@ -1,5 +1,4 @@
-// use std::rc::Rc;
-// // src/arbitrage/detector.rs - Updated with FIX integration
+// // src/arbitrage/detector.rs - Optimized version replacing existing
 // use std::sync::Arc;
 // use std::time::Instant;
 // use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
@@ -12,6 +11,7 @@
 // use crate::orderbook::orderbook::OrderBook;
 // use crate::executor::executor::ArbitrageExecutor;
 // use crate::executor::fix_executor::{ FixArbitrageExecutor };
+// use crate::utils::string_interner::SymbolInterner;
 
 // // Ultra-compact opportunity for immediate execution
 // #[repr(C, packed)]
@@ -31,19 +31,12 @@
 //     pub start_amount: f64,
 //     pub end_amount: f64,
 //     pub execution_time_ns: u64,
-//     pub min_volume_satisfied: bool,
-//     pub liquidity_scores: [f64; 3],
 // }
 
 // impl ArbitrageOpportunity {
 //     #[inline(always)]
 //     pub fn profit_percentage(&self) -> f64 {
 //         (self.profit_ratio - 1.0) * 100.0
-//     }
-
-//     #[inline(always)]
-//     pub fn has_sufficient_liquidity(&self) -> bool {
-//         self.min_volume_satisfied && self.liquidity_scores.iter().all(|&score| score > 0.5)
 //     }
 
 //     pub fn display(&self) -> String {
@@ -58,16 +51,16 @@
 //     }
 // }
 
-// // Pre-computed path data for zero-allocation hot path
+// // Pre-computed path data for zero-allocation hot path - optimized with hashes
 // #[repr(C, align(64))] // Cache line aligned
 // #[derive(Clone, Debug)]
 // struct PathData {
-//     // Path references (8 bytes each)
-//     first_symbol: *const Arc<str>,
-//     second_symbol: *const Arc<str>,
-//     third_symbol: *const Arc<str>,
+//     // Symbol hashes instead of pointers (8 bytes each)
+//     first_symbol_hash: u64,
+//     second_symbol_hash: u64,
+//     third_symbol_hash: u64,
 
-//     // Direction flags (1 byte each, packed)
+//     // Direction flags (1 byte, packed)
 //     directions: u8, // bits: [unused:5][third:1][second:1][first:1]
 
 //     // Pre-computed values (4 bytes each)
@@ -76,11 +69,8 @@
 //     volume_multiplier: f32,
 
 //     // Padding to 64 bytes for cache alignment
-//     _padding: [u8; 41],
+//     _padding: [u8; 17],
 // }
-
-// unsafe impl Send for PathData {}
-// unsafe impl Sync for PathData {}
 
 // impl PathData {
 //     #[inline(always)]
@@ -99,7 +89,7 @@
 //     }
 // }
 
-// // Symbol to path indices mapping - optimized for cache efficiency
+// // Symbol to path indices mapping - optimized for cache efficiency using hashes
 // const MAX_PATHS_PER_SYMBOL: usize = 16;
 
 // #[repr(C, align(64))]
@@ -115,9 +105,15 @@
 //     pub orderbook_manager: Arc<OrderBookManager>,
 //     pub all_paths: Arc<Vec<Arc<TriangularPath>>>,
 
+//     // String interner for symbol deduplication
+//     symbol_interner: Arc<SymbolInterner>,
+
 //     // Hot path data - pre-computed and cache-aligned
 //     path_data: Box<[PathData]>, // Heap allocated, cache-aligned array
-//     symbol_map: Arc<DashMap<Arc<str>, SymbolPaths>>,
+//     symbol_map: Arc<DashMap<u64, SymbolPaths>>, // Use hashes instead of Arc<str>
+
+//     // Hash to symbol mapping for reverse lookups
+//     hash_to_symbol: Arc<DashMap<u64, Arc<str>>>,
 
 //     // Execution control - separate cache line
 //     fallback_executor: Arc<ArbitrageExecutor>, // For simulation mode compatibility
@@ -138,7 +134,7 @@
 // }
 
 // impl ArbitrageDetectorState {
-//     /// Create a new detector with FIX execution support
+//     /// Create a new detector with FIX execution support and optimization
 //     pub fn new_with_fix_executor(
 //         orderbook_manager: Arc<OrderBookManager>,
 //         paths: Vec<Arc<TriangularPath>>,
@@ -149,37 +145,63 @@
 //         fallback_executor: Arc<ArbitrageExecutor>,
 //         fix_executor: Option<Arc<FixArbitrageExecutor>>
 //     ) -> Arc<Self> {
+//         let symbol_interner = Arc::new(SymbolInterner::new());
+
+//         // Preload all symbols from paths
+//         let all_symbols: Vec<String> = paths
+//             .iter()
+//             .flat_map(|path| {
+//                 [
+//                     path.first_symbol.to_string(),
+//                     path.second_symbol.to_string(),
+//                     path.third_symbol.to_string(),
+//                 ]
+//             })
+//             .collect();
+//         symbol_interner.preload(&all_symbols);
+
 //         // Pre-compute all path data for zero-allocation hot path
 //         let mut path_data = Vec::with_capacity(paths.len());
+//         let symbol_map = Arc::new(DashMap::with_capacity(paths.len() * 3));
+//         let hash_to_symbol = Arc::new(DashMap::with_capacity(paths.len() * 3));
 
-//         for path in &paths {
+//         for (i, path) in paths.iter().enumerate() {
+//             // Intern symbols and compute hashes
+//             let first_symbol = symbol_interner.intern(&path.first_symbol);
+//             let second_symbol = symbol_interner.intern(&path.second_symbol);
+//             let third_symbol = symbol_interner.intern(&path.third_symbol);
+
+//             let first_hash = Self::hash_symbol(&first_symbol);
+//             let second_hash = Self::hash_symbol(&second_symbol);
+//             let third_hash = Self::hash_symbol(&third_symbol);
+
+//             // Store hash to symbol mappings
+//             hash_to_symbol.insert(first_hash, first_symbol.clone());
+//             hash_to_symbol.insert(second_hash, second_symbol.clone());
+//             hash_to_symbol.insert(third_hash, third_symbol.clone());
+
 //             let directions =
 //                 (path.first_is_base_to_quote as u8) |
 //                 ((path.second_is_base_to_quote as u8) << 1) |
 //                 ((path.third_is_base_to_quote as u8) << 2);
 
 //             path_data.push(PathData {
-//                 first_symbol: &path.first_symbol as *const Arc<str>,
-//                 second_symbol: &path.second_symbol as *const Arc<str>,
-//                 third_symbol: &path.third_symbol as *const Arc<str>,
+//                 first_symbol_hash: first_hash,
+//                 second_symbol_hash: second_hash,
+//                 third_symbol_hash: third_hash,
 //                 directions,
 //                 fee_multiplier_cubed: ((1.0 - fee_rate) as f32).powi(3),
 //                 min_threshold: (1.0 + min_profit_threshold) as f32,
 //                 volume_multiplier: min_volume_multiplier as f32,
-//                 _padding: [0; 41],
+//                 _padding: [0; 17],
 //             });
-//         }
 
-//         // Build optimized symbol mapping
-//         let symbol_map = Arc::new(DashMap::with_capacity(paths.len() * 3));
-
-//         for (i, path) in paths.iter().enumerate() {
 //             let idx = i as u16;
 
-//             // Helper to add path to symbol
-//             let add_path = |symbol: &Arc<str>, idx: u16| {
+//             // Helper to add path to symbol using hashes
+//             let add_path = |hash: u64, idx: u16| {
 //                 symbol_map
-//                     .entry(symbol.clone())
+//                     .entry(hash)
 //                     .and_modify(|entry: &mut SymbolPaths| {
 //                         if (entry.count as usize) < MAX_PATHS_PER_SYMBOL {
 //                             entry.indices[entry.count as usize] = idx;
@@ -197,9 +219,9 @@
 //                     });
 //             };
 
-//             add_path(&path.first_symbol, idx);
-//             add_path(&path.second_symbol, idx);
-//             add_path(&path.third_symbol, idx);
+//             add_path(first_hash, idx);
+//             add_path(second_hash, idx);
+//             add_path(third_hash, idx);
 //         }
 
 //         let use_fix_execution = fix_executor.is_some();
@@ -207,8 +229,10 @@
 //         let detector_state = Arc::new(ArbitrageDetectorState {
 //             orderbook_manager: orderbook_manager.clone(),
 //             all_paths: Arc::new(paths),
+//             symbol_interner,
 //             path_data: path_data.into_boxed_slice(),
 //             symbol_map,
+//             hash_to_symbol,
 //             fallback_executor,
 //             fix_executor,
 //             is_executing: Arc::new(AtomicBool::new(false)),
@@ -225,25 +249,38 @@
 //         // Register ultra-fast callback
 //         let callback_state = detector_state.clone();
 //         orderbook_manager.register_update_callback(
-//             Arc::new(move |symbol, book| {
-//                 callback_state.handle_update(symbol, book);
+//             Arc::new(move |symbol: &str, book: &Arc<OrderBook>| {
+//                 callback_state.handle_update_optimized(symbol, book);
 //             })
 //         );
 
 //         detector_state
 //     }
 
-//     /// HYPER-OPTIMIZED: Check single path with zero allocations
+//     #[inline]
+//     fn hash_symbol(symbol: &Arc<str>) -> u64 {
+//         use std::hash::{ Hash, Hasher };
+//         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+//         symbol.hash(&mut hasher);
+//         hasher.finish()
+//     }
+
+//     /// HYPER-OPTIMIZED: Check single path with zero allocations and hash-based lookups
 //     #[inline(always)]
 //     unsafe fn check_path_zero_alloc(&self, path_idx: u16) -> Option<FastOpportunity> {
 //         let path_data = self.path_data.get_unchecked(path_idx as usize);
 
-//         // Get orderbooks via raw pointer arithmetic for maximum speed
+//         // Get symbols by hash lookups (faster than pointer dereferencing)
+//         let first_symbol = self.hash_to_symbol.get(&path_data.first_symbol_hash)?;
+//         let second_symbol = self.hash_to_symbol.get(&path_data.second_symbol_hash)?;
+//         let third_symbol = self.hash_to_symbol.get(&path_data.third_symbol_hash)?;
+
+//         // Get orderbooks via optimized access
 //         let books = &self.orderbook_manager.books;
 
-//         let first_book = books.get(&**path_data.first_symbol)?;
-//         let second_book = books.get(&**path_data.second_symbol)?;
-//         let third_book = books.get(&**path_data.third_symbol)?;
+//         let first_book = books.get(&*first_symbol)?;
+//         let second_book = books.get(&*second_symbol)?;
+//         let third_book = books.get(&*third_symbol)?;
 
 //         // Ultra-fast sync check with branch prediction hint
 //         if unlikely(!first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()) {
@@ -255,7 +292,7 @@
 //         let (second_bid, second_ask) = second_book.get_cached_top_of_book();
 //         let (third_bid, third_ask) = third_book.get_cached_top_of_book();
 
-//         // Branch-free price selection using intrinsics
+//         // Branch-free price selection using pre-computed directions
 //         let (first_price, first_qty) = if path_data.first_is_base_to_quote() {
 //             first_bid?
 //         } else {
@@ -351,8 +388,6 @@
 //             start_amount: self.start_amount as f64,
 //             end_amount: (self.start_amount as f64) * (opportunity.profit_ratio as f64),
 //             execution_time_ns: 0,
-//             min_volume_satisfied: true,
-//             liquidity_scores: [0.8, 0.8, 0.8], // Simplified for speed
 //         };
 
 //         let execution_start = Instant::now();
@@ -409,9 +444,9 @@
 //         success
 //     }
 
-//     /// ULTRA-FAST: Handle orderbook update with immediate execution
+//     /// ULTRA-FAST: Handle orderbook update with immediate execution - optimized with hashes
 //     #[inline]
-//     pub fn handle_update(&self, symbol: &Rc<str>, _book: &Arc<OrderBook>) {
+//     pub fn handle_update_optimized(&self, symbol: &str, _book: &Arc<OrderBook>) {
 //         // Rate limiting: max 1 check per 10μs globally
 //         let now_ns = std::time::SystemTime
 //             ::now()
@@ -430,8 +465,12 @@
 //             return;
 //         }
 
-//         // Get paths for this symbol
-//         if let Some(symbol_paths) = self.symbol_map.get(symbol) {
+//         // Hash-based symbol lookup
+//         let symbol_arc = self.symbol_interner.intern(symbol);
+//         let symbol_hash = Self::hash_symbol(&symbol_arc);
+
+//         // Get paths for this symbol using hash
+//         if let Some(symbol_paths) = self.symbol_map.get(&symbol_hash) {
 //             let count = symbol_paths.count as usize;
 
 //             // Process paths with immediate execution on first profitable find
@@ -465,6 +504,14 @@
 //     /// Get FIX executor statistics if available
 //     pub fn get_fix_execution_stats(&self) -> Option<crate::executor::fix_executor::ExecutionStats> {
 //         self.fix_executor.as_ref().map(|executor| executor.get_execution_stats())
+//     }
+
+//     /// Get optimization statistics
+//     pub fn get_optimization_stats(&self) -> DetectorOptimizationStats {
+//         DetectorOptimizationStats {
+//             total_paths: self.all_paths.len(),
+//             symbol_map_entries: self.symbol_map.len(),
+//         }
 //     }
 
 //     pub fn run_stats_task(&self) {
@@ -503,14 +550,22 @@
 //     }
 // }
 
+// #[derive(Debug)]
+// pub struct DetectorOptimizationStats {
+//     pub total_paths: usize,
+//     pub symbol_map_entries: usize,
+// }
+
 // // Zero-cost clone
 // impl Clone for ArbitrageDetectorState {
 //     fn clone(&self) -> Self {
 //         Self {
 //             orderbook_manager: self.orderbook_manager.clone(),
 //             all_paths: self.all_paths.clone(),
+//             symbol_interner: self.symbol_interner.clone(),
 //             path_data: self.path_data.clone(),
 //             symbol_map: self.symbol_map.clone(),
+//             hash_to_symbol: self.hash_to_symbol.clone(),
 //             fallback_executor: self.fallback_executor.clone(),
 //             fix_executor: self.fix_executor.clone(),
 //             is_executing: self.is_executing.clone(),
@@ -526,7 +581,7 @@
 //     }
 // }
 
-// /// Create detector with FIX executor support
+// /// Create detector with FIX executor support - same signature for compatibility
 // pub fn create_detector(
 //     orderbook_manager: Arc<OrderBookManager>,
 //     fee_rate: f64,
@@ -538,6 +593,20 @@
 //     min_volume_multiplier: f64,
 //     is_perf: bool
 // ) -> Arc<ArbitrageDetectorState> {
+//     // Preload symbols into orderbook manager if possible
+//     let all_symbols: Vec<String> = paths
+//         .iter()
+//         .flat_map(|path| {
+//             [
+//                 path.first_symbol.to_string(),
+//                 path.second_symbol.to_string(),
+//                 path.third_symbol.to_string(),
+//             ]
+//         })
+//         .collect();
+
+//     orderbook_manager.preload_symbols(&all_symbols);
+
 //     let detector = ArbitrageDetectorState::new_with_fix_executor(
 //         orderbook_manager,
 //         paths,
@@ -573,7 +642,7 @@
 // // Re-export for compatibility
 // pub use intrinsics::*;
 
-// src/arbitrage/detector.rs - Optimized version replacing existing
+// src/arbitrage/detector.rs - Ultra-optimized version with Symbol ID system
 use std::sync::Arc;
 use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
@@ -626,14 +695,14 @@ impl ArbitrageOpportunity {
     }
 }
 
-// Pre-computed path data for zero-allocation hot path - optimized with hashes
+// Pre-computed path data for zero-allocation hot path - optimized with Symbol IDs
 #[repr(C, align(64))] // Cache line aligned
 #[derive(Clone, Debug)]
 struct PathData {
-    // Symbol hashes instead of pointers (8 bytes each)
-    first_symbol_hash: u64,
-    second_symbol_hash: u64,
-    third_symbol_hash: u64,
+    // Symbol IDs instead of hashes (2 bytes each - much smaller!)
+    first_symbol_id: u16,
+    second_symbol_id: u16,
+    third_symbol_id: u16,
 
     // Direction flags (1 byte, packed)
     directions: u8, // bits: [unused:5][third:1][second:1][first:1]
@@ -644,7 +713,7 @@ struct PathData {
     volume_multiplier: f32,
 
     // Padding to 64 bytes for cache alignment
-    _padding: [u8; 17],
+    _padding: [u8; 49],
 }
 
 impl PathData {
@@ -664,10 +733,12 @@ impl PathData {
     }
 }
 
-// Symbol to path indices mapping - optimized for cache efficiency using hashes
+// Symbol to path indices mapping - optimized with Symbol IDs
 const MAX_PATHS_PER_SYMBOL: usize = 16;
+const MAX_SYMBOLS: usize = 2048;
 
 #[repr(C, align(64))]
+#[derive(Clone)]
 struct SymbolPaths {
     count: u8,
     indices: [u16; MAX_PATHS_PER_SYMBOL],
@@ -685,10 +756,7 @@ pub struct ArbitrageDetectorState {
 
     // Hot path data - pre-computed and cache-aligned
     path_data: Box<[PathData]>, // Heap allocated, cache-aligned array
-    symbol_map: Arc<DashMap<u64, SymbolPaths>>, // Use hashes instead of Arc<str>
-
-    // Hash to symbol mapping for reverse lookups
-    hash_to_symbol: Arc<DashMap<u64, Arc<str>>>,
+    symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>, // Array instead of DashMap for O(1) access
 
     // Execution control - separate cache line
     fallback_executor: Arc<ArbitrageExecutor>, // For simulation mode compatibility
@@ -722,7 +790,7 @@ impl ArbitrageDetectorState {
     ) -> Arc<Self> {
         let symbol_interner = Arc::new(SymbolInterner::new());
 
-        // Preload all symbols from paths
+        // Preload all symbols from paths and get their IDs
         let all_symbols: Vec<String> = paths
             .iter()
             .flat_map(|path| {
@@ -737,23 +805,30 @@ impl ArbitrageDetectorState {
 
         // Pre-compute all path data for zero-allocation hot path
         let mut path_data = Vec::with_capacity(paths.len());
-        let symbol_map = Arc::new(DashMap::with_capacity(paths.len() * 3));
-        let hash_to_symbol = Arc::new(DashMap::with_capacity(paths.len() * 3));
+        let mut symbol_map = Box::new(
+            [
+                const {
+                    SymbolPaths {
+                        count: 0,
+                        indices: [0; MAX_PATHS_PER_SYMBOL],
+                        _padding: [0; 15],
+                    }
+                };
+                MAX_SYMBOLS
+            ]
+        );
+
+        // Helper function to get symbol ID from orderbook manager
+        let get_symbol_id = |symbol_str: &str| -> Option<u16> {
+            let interned = symbol_interner.intern(symbol_str);
+            orderbook_manager.symbol_to_id.get(&interned).map(|id| *id)
+        };
 
         for (i, path) in paths.iter().enumerate() {
-            // Intern symbols and compute hashes
-            let first_symbol = symbol_interner.intern(&path.first_symbol);
-            let second_symbol = symbol_interner.intern(&path.second_symbol);
-            let third_symbol = symbol_interner.intern(&path.third_symbol);
-
-            let first_hash = Self::hash_symbol(&first_symbol);
-            let second_hash = Self::hash_symbol(&second_symbol);
-            let third_hash = Self::hash_symbol(&third_symbol);
-
-            // Store hash to symbol mappings
-            hash_to_symbol.insert(first_hash, first_symbol.clone());
-            hash_to_symbol.insert(second_hash, second_symbol.clone());
-            hash_to_symbol.insert(third_hash, third_symbol.clone());
+            // Get symbol IDs from the orderbook manager
+            let first_symbol_id = get_symbol_id(&path.first_symbol).unwrap();
+            let second_symbol_id = get_symbol_id(&path.second_symbol).unwrap();
+            let third_symbol_id = get_symbol_id(&path.third_symbol).unwrap();
 
             let directions =
                 (path.first_is_base_to_quote as u8) |
@@ -761,42 +836,32 @@ impl ArbitrageDetectorState {
                 ((path.third_is_base_to_quote as u8) << 2);
 
             path_data.push(PathData {
-                first_symbol_hash: first_hash,
-                second_symbol_hash: second_hash,
-                third_symbol_hash: third_hash,
+                first_symbol_id,
+                second_symbol_id,
+                third_symbol_id,
                 directions,
                 fee_multiplier_cubed: ((1.0 - fee_rate) as f32).powi(3),
                 min_threshold: (1.0 + min_profit_threshold) as f32,
                 volume_multiplier: min_volume_multiplier as f32,
-                _padding: [0; 17],
+                _padding: [0; 49],
             });
 
             let idx = i as u16;
 
-            // Helper to add path to symbol using hashes
-            let add_path = |hash: u64, idx: u16| {
-                symbol_map
-                    .entry(hash)
-                    .and_modify(|entry: &mut SymbolPaths| {
-                        if (entry.count as usize) < MAX_PATHS_PER_SYMBOL {
-                            entry.indices[entry.count as usize] = idx;
-                            entry.count += 1;
-                        }
-                    })
-                    .or_insert_with(|| {
-                        let mut sp = SymbolPaths {
-                            count: 1,
-                            indices: [0; MAX_PATHS_PER_SYMBOL],
-                            _padding: [0; 15],
-                        };
-                        sp.indices[0] = idx;
-                        sp
-                    });
+            // Helper to add path to symbol using Symbol IDs (O(1) array access)
+            let mut add_path = |symbol_id: u16, idx: u16| {
+                if (symbol_id as usize) < MAX_SYMBOLS {
+                    let symbol_paths = &mut symbol_map[symbol_id as usize];
+                    if (symbol_paths.count as usize) < MAX_PATHS_PER_SYMBOL {
+                        symbol_paths.indices[symbol_paths.count as usize] = idx;
+                        symbol_paths.count += 1;
+                    }
+                }
             };
 
-            add_path(first_hash, idx);
-            add_path(second_hash, idx);
-            add_path(third_hash, idx);
+            add_path(first_symbol_id, idx);
+            add_path(second_symbol_id, idx);
+            add_path(third_symbol_id, idx);
         }
 
         let use_fix_execution = fix_executor.is_some();
@@ -807,7 +872,6 @@ impl ArbitrageDetectorState {
             symbol_interner,
             path_data: path_data.into_boxed_slice(),
             symbol_map,
-            hash_to_symbol,
             fallback_executor,
             fix_executor,
             is_executing: Arc::new(AtomicBool::new(false)),
@@ -821,41 +885,28 @@ impl ArbitrageDetectorState {
             last_execution_ns: Arc::new(AtomicU64::new(0)),
         });
 
-        // Register ultra-fast callback
+        // Register ultra-fast callback with Symbol ID
         let callback_state = detector_state.clone();
         orderbook_manager.register_update_callback(
-            Arc::new(move |symbol: &str, book: &Arc<OrderBook>| {
-                callback_state.handle_update_optimized(symbol, book);
+            Arc::new(move |symbol_id: u16, book: &Arc<OrderBook>| {
+                callback_state.handle_update_by_id(symbol_id, book);
             })
         );
 
         detector_state
     }
 
-    #[inline]
-    fn hash_symbol(symbol: &Arc<str>) -> u64 {
-        use std::hash::{ Hash, Hasher };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        symbol.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// HYPER-OPTIMIZED: Check single path with zero allocations and hash-based lookups
+    /// HYPER-OPTIMIZED: Check single path with zero allocations and Symbol ID lookups
     #[inline(always)]
     unsafe fn check_path_zero_alloc(&self, path_idx: u16) -> Option<FastOpportunity> {
         let path_data = self.path_data.get_unchecked(path_idx as usize);
 
-        // Get symbols by hash lookups (faster than pointer dereferencing)
-        let first_symbol = self.hash_to_symbol.get(&path_data.first_symbol_hash)?;
-        let second_symbol = self.hash_to_symbol.get(&path_data.second_symbol_hash)?;
-        let third_symbol = self.hash_to_symbol.get(&path_data.third_symbol_hash)?;
-
-        // Get orderbooks via optimized access
-        let books = &self.orderbook_manager.books;
-
-        let first_book = books.get(&*first_symbol)?;
-        let second_book = books.get(&*second_symbol)?;
-        let third_book = books.get(&*third_symbol)?;
+        // Get orderbooks by Symbol ID (O(1) array access)
+        let first_book = self.orderbook_manager.get_or_create_book_by_id(path_data.first_symbol_id);
+        let second_book = self.orderbook_manager.get_or_create_book_by_id(
+            path_data.second_symbol_id
+        );
+        let third_book = self.orderbook_manager.get_or_create_book_by_id(path_data.third_symbol_id);
 
         // Ultra-fast sync check with branch prediction hint
         if unlikely(!first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()) {
@@ -1019,9 +1070,9 @@ impl ArbitrageDetectorState {
         success
     }
 
-    /// ULTRA-FAST: Handle orderbook update with immediate execution - optimized with hashes
-    #[inline]
-    pub fn handle_update_optimized(&self, symbol: &str, _book: &Arc<OrderBook>) {
+    /// ULTRA-FAST: Handle orderbook update with immediate execution - Symbol ID based
+    #[inline(always)]
+    pub fn handle_update_by_id(&self, symbol_id: u16, _book: &Arc<OrderBook>) {
         // Rate limiting: max 1 check per 10μs globally
         let now_ns = std::time::SystemTime
             ::now()
@@ -1040,12 +1091,9 @@ impl ArbitrageDetectorState {
             return;
         }
 
-        // Hash-based symbol lookup
-        let symbol_arc = self.symbol_interner.intern(symbol);
-        let symbol_hash = Self::hash_symbol(&symbol_arc);
-
-        // Get paths for this symbol using hash
-        if let Some(symbol_paths) = self.symbol_map.get(&symbol_hash) {
+        // Array-based symbol lookup (O(1))
+        if (symbol_id as usize) < MAX_SYMBOLS {
+            let symbol_paths = &self.symbol_map[symbol_id as usize];
             let count = symbol_paths.count as usize;
 
             // Process paths with immediate execution on first profitable find
@@ -1067,6 +1115,15 @@ impl ArbitrageDetectorState {
         }
     }
 
+    /// Legacy method for string-based updates (converts to ID then calls fast version)
+    #[inline]
+    pub fn handle_update_optimized(&self, symbol: &str, book: &Arc<OrderBook>) {
+        let interned = self.symbol_interner.intern(symbol);
+        if let Some(symbol_id) = self.orderbook_manager.symbol_to_id.get(&interned).map(|id| *id) {
+            self.handle_update_by_id(symbol_id, book);
+        }
+    }
+
     /// Get execution statistics
     pub fn get_execution_stats(&self) -> (u64, u64, u64) {
         (
@@ -1085,7 +1142,7 @@ impl ArbitrageDetectorState {
     pub fn get_optimization_stats(&self) -> DetectorOptimizationStats {
         DetectorOptimizationStats {
             total_paths: self.all_paths.len(),
-            symbol_map_entries: self.symbol_map.len(),
+            symbol_map_entries: self.orderbook_manager.symbol_to_id.len(),
         }
     }
 
@@ -1140,7 +1197,6 @@ impl Clone for ArbitrageDetectorState {
             symbol_interner: self.symbol_interner.clone(),
             path_data: self.path_data.clone(),
             symbol_map: self.symbol_map.clone(),
-            hash_to_symbol: self.hash_to_symbol.clone(),
             fallback_executor: self.fallback_executor.clone(),
             fix_executor: self.fix_executor.clone(),
             is_executing: self.is_executing.clone(),
@@ -1156,7 +1212,7 @@ impl Clone for ArbitrageDetectorState {
     }
 }
 
-/// Create detector with FIX executor support - same signature for compatibility
+/// Create detector with FIX executor support - updated to use Symbol ID optimization
 pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
@@ -1168,7 +1224,7 @@ pub fn create_detector(
     min_volume_multiplier: f64,
     is_perf: bool
 ) -> Arc<ArbitrageDetectorState> {
-    // Preload symbols into orderbook manager if possible
+    // Preload symbols into orderbook manager for Symbol ID assignment
     let all_symbols: Vec<String> = paths
         .iter()
         .flat_map(|path| {
