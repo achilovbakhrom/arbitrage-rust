@@ -165,15 +165,16 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
         // Set up ultra-fast depth update callback for production with optimization
         client.set_depth_callback(move |symbol, bids, asks, first_update_id, last_update_id, _| {
-            println!("symbol: {}, bids: {:?}, asks: {:?}", symbol, bids, asks);
-            // Use optimized string-based method to avoid Arc creation overhead
-            orderbook_manager_thread.apply_depth_update(
-                symbol,
-                &bids,
-                &asks,
-                first_update_id,
-                last_update_id
-            );
+            if let Some(symbol_id) = orderbook_manager_thread.get_symbol_id(symbol) {
+                // Use optimized string-based method to avoid Arc creation overhead
+                orderbook_manager_thread.apply_depth_update_internal(
+                    symbol_id,
+                    &bids,
+                    &asks,
+                    first_update_id,
+                    last_update_id
+                );
+            }
         });
 
         // Process WebSocket messages with shutdown support
