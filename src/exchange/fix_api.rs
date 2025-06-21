@@ -673,8 +673,4 @@ impl FixClient {
         eprintln!("FIX client disconnected");
         Ok(())
     }
-
-    pub fn is_connected(&self) -> bool {
-        self.is_connected.load(Ordering::Acquire)
-    }
 }

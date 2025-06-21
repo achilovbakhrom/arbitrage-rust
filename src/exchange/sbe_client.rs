@@ -208,18 +208,15 @@ impl<F> BinanceSbeClient<F>
 
     #[inline(always)]
     fn handle_binary_message_optimized(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
-        // Ultra-fast bounds check with likely hint
-        if unlikely(data.len() < 32) {
+        if data.len() < 32 {
             return Ok(());
         }
 
-        // Optimized template ID extraction - single operation
         let template_id = unsafe {
             u16::from_le_bytes([*data.get_unchecked(2), *data.get_unchecked(3)])
         };
 
-        // Fast path for depth messages only - branch predictor friendly
-        if likely(template_id == 10003) {
+        if template_id == 10003 {
             self.parse_depth_message_ultra_fast(data, receive_time_us)
         } else {
             Ok(())
@@ -231,31 +228,35 @@ impl<F> BinanceSbeClient<F>
         let mut offset = 8; // Skip header
 
         // Unsafe optimized read functions - no bounds checking for speed
-        unsafe fn read_i64_fast(data: &[u8], offset: usize) -> i64 {
-            let ptr = data.as_ptr().add(offset) as *const i64;
-            i64::from_le(ptr.read_unaligned())
+        fn read_i64_fast(data: &[u8], offset: usize) -> i64 {
+            unsafe {
+                let ptr = data.as_ptr().add(offset) as *const i64;
+                i64::from_le(ptr.read_unaligned())
+            }
         }
 
-        unsafe fn read_u16_fast(data: &[u8], offset: usize) -> u16 {
-            let ptr = data.as_ptr().add(offset) as *const u16;
-            u16::from_le(ptr.read_unaligned())
+        fn read_u16_fast(data: &[u8], offset: usize) -> u16 {
+            unsafe {
+                let ptr = data.as_ptr().add(offset) as *const u16;
+                u16::from_le(ptr.read_unaligned())
+            }
         }
 
-        unsafe fn read_i8_fast(data: &[u8], offset: usize) -> i8 {
-            *data.get_unchecked(offset) as i8
+        fn read_i8_fast(data: &[u8], offset: usize) -> i8 {
+            unsafe { *data.get_unchecked(offset) as i8 }
         }
 
         // Read fixed fields with unsafe optimizations
-        let _event_time = unsafe { read_i64_fast(data, offset) };
+        let _event_time = read_i64_fast(data, offset);
         offset += 8;
-        let first_update_id = unsafe { read_i64_fast(data, offset) as u64 };
+        let first_update_id = read_i64_fast(data, offset) as u64;
         offset += 8;
-        let last_update_id = unsafe { read_i64_fast(data, offset) as u64 };
+        let last_update_id = read_i64_fast(data, offset) as u64;
         offset += 8;
 
-        let price_exp = unsafe { read_i8_fast(data, offset) };
+        let price_exp = read_i8_fast(data, offset);
         offset += 1;
-        let qty_exp = unsafe { read_i8_fast(data, offset) };
+        let qty_exp = read_i8_fast(data, offset);
         offset += 1;
 
         // Pre-calculate multipliers
@@ -264,7 +265,7 @@ impl<F> BinanceSbeClient<F>
 
         // Read bid count
         offset += 2; // Skip block length
-        let bid_count = unsafe { read_u16_fast(data, offset) as usize };
+        let bid_count = read_u16_fast(data, offset) as usize;
         offset += 2;
 
         // Get mutable access to buffers through UnsafeCell
@@ -283,9 +284,9 @@ impl<F> BinanceSbeClient<F>
         // Optimized bid parsing - unrolled for better performance
         let bid_limit = bid_count.min(DEPTH);
         for i in 0..bid_limit {
-            let price_raw = unsafe { read_i64_fast(data, offset) as f64 };
+            let price_raw = read_i64_fast(data, offset) as f64;
             offset += 8;
-            let qty_raw = unsafe { read_i64_fast(data, offset) as f64 };
+            let qty_raw = read_i64_fast(data, offset) as f64;
             offset += 8;
 
             bid_buffer[i] = (price_raw * price_mult, qty_raw * qty_mult);
@@ -298,15 +299,15 @@ impl<F> BinanceSbeClient<F>
 
         // Read ask count
         offset += 2; // Skip block length
-        let ask_count = unsafe { read_u16_fast(data, offset) as usize };
+        let ask_count = read_u16_fast(data, offset) as usize;
         offset += 2;
 
         // Optimized ask parsing
         let ask_limit = ask_count.min(DEPTH);
         for i in 0..ask_limit {
-            let price_raw = unsafe { read_i64_fast(data, offset) as f64 };
+            let price_raw = read_i64_fast(data, offset) as f64;
             offset += 8;
-            let qty_raw = unsafe { read_i64_fast(data, offset) as f64 };
+            let qty_raw = read_i64_fast(data, offset) as f64;
             offset += 8;
 
             ask_buffer[i] = (price_raw * price_mult, qty_raw * qty_mult);
@@ -318,7 +319,7 @@ impl<F> BinanceSbeClient<F>
         }
 
         // Extract symbol length with bounds check
-        if unlikely(offset >= data.len()) {
+        if offset >= data.len() {
             return Err(anyhow::anyhow!("Invalid symbol offset"));
         }
 
@@ -326,7 +327,7 @@ impl<F> BinanceSbeClient<F>
         offset += 1;
 
         // Bounds check for symbol
-        if unlikely(offset + symbol_len > data.len()) {
+        if offset + symbol_len > data.len() {
             return Err(anyhow::anyhow!("Invalid symbol length"));
         }
 
@@ -368,36 +369,5 @@ impl<F> BinanceSbeClient<F>
         let arc_str: Arc<str> = Arc::from(symbol);
         self.symbol_pool.insert(trimmed.to_vec().into_boxed_slice(), arc_str.clone());
         arc_str
-    }
-}
-
-// Branch prediction hints for better performance
-// #[inline(always)]
-// fn likely(b: bool) -> bool {
-//     std::intrinsics::likely(b)
-// }
-
-// #[inline(always)]
-// fn unlikely(b: bool) -> bool {
-//     std::intrinsics::unlikely(b)
-// }
-
-#[inline(always)]
-fn likely(b: bool) -> bool {
-    // For stable Rust, we can use cold/inline attributes instead
-    if b {
-        true
-    } else {
-        false
-    }
-}
-
-#[inline(always)]
-fn unlikely(b: bool) -> bool {
-    // For stable Rust, we can use cold/inline attributes instead
-    if b {
-        true
-    } else {
-        false
     }
 }

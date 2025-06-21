@@ -270,11 +270,7 @@ impl ArbitrageDetectorState {
             );
 
             // Ultra-fast sync check with branch prediction hint
-            if
-                unlikely(
-                    !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()
-                )
-            {
+            if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
                 return None;
             }
 
@@ -330,7 +326,7 @@ impl ArbitrageDetectorState {
             let profit_ratio = amount / self.start_amount;
 
             // Fast profitability check with branch prediction
-            if unlikely(profit_ratio <= path_data.min_threshold) {
+            if profit_ratio <= path_data.min_threshold {
                 return None;
             }
 
@@ -341,7 +337,7 @@ impl ArbitrageDetectorState {
                 (second_qty as f32) >= min_vol &&
                 (third_qty as f32) >= min_vol;
 
-            if unlikely(!volume_ok) {
+            if !volume_ok {
                 return None;
             }
 
@@ -360,7 +356,7 @@ impl ArbitrageDetectorState {
 
     /// IMMEDIATE EXECUTION: Execute opportunity instantly with FIX API or fallback
     #[inline(always)]
-    fn execute_immediately_fast(&self, opportunity: Opportunity) -> bool {
+    fn execute_immediately(&self, opportunity: Opportunity) -> bool {
         // Single atomic operation to claim execution
         if
             self.is_executing
@@ -469,7 +465,7 @@ impl ArbitrageDetectorState {
                 if let Some(opportunity) = self.check_path_zero_alloc(path_idx) {
                     // Immediate execution if profitable enough
                     if opportunity.profit_ratio >= self.min_profit_for_execution {
-                        if self.execute_immediately_fast(opportunity) {
+                        if self.execute_immediately(opportunity) {
                             // Success - exit immediately to avoid processing more
                             self.stats_counter.fetch_add(1, Ordering::Relaxed);
                             return;
@@ -611,20 +607,3 @@ pub fn create_detector(
 
     detector
 }
-
-// Branch prediction hints for better performance
-#[allow(unused)]
-mod intrinsics {
-    #[inline(always)]
-    pub fn likely(b: bool) -> bool {
-        if b { true } else { false }
-    }
-
-    #[inline(always)]
-    pub fn unlikely(b: bool) -> bool {
-        if b { true } else { false }
-    }
-}
-
-// Re-export for compatibility
-pub use intrinsics::*;

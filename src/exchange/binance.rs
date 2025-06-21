@@ -136,7 +136,7 @@ impl BinanceClient {
         // Extract filter information
         for filter in &binance_symbol.filters {
             match filter {
-                BinanceSymbolFilter::LotSize { min_qty: minq, max_qty: maxq, step_size: ss } => {
+                BinanceSymbolFilter::LotSize { min_qty: _minq, max_qty: _maxq, step_size: ss } => {
                     qty_precision = Self::calculate_precision(ss);
                 }
                 BinanceSymbolFilter::PriceFilter { tick_size: t, .. } => {
