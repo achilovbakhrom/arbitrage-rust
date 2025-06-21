@@ -30,7 +30,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     // Initialize exchange api client with proper error handling
     let client = Arc::new(
-        BinanceClient::new(config.fix_api.clone(), config.fix_secret.clone(), config.debug).context(
+        BinanceClient::new(config.fix_api.clone(), config.debug).context(
             "Failed to create Binance client"
         )?
     );
@@ -68,7 +68,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     // Create fallback executor for simulation compatibility
     let executor_cb = Arc::new(
         ArbitrageExecutor::new(
-            orderbook_manager.clone(),
             ExecutionStrategy::FastSequential // Maximum speed
         )
     );
@@ -106,15 +105,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         "Created OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
         config.threshold * 100.0,
         detector_mode
-    );
-
-    // Print optimization stats
-    let opt_stats = orderbook_manager.get_optimization_stats();
-    info!(
-        "Optimization stats: {} books, {} interner entries, {} hash cache entries",
-        opt_stats.total_books,
-        opt_stats.interner_string_entries,
-        opt_stats.symbol_hash_cache_size
     );
 
     // Start WebSocket connection for real-time market data
@@ -186,8 +176,8 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         client.set_depth_callback(
             move |symbol, bids, asks, first_update_id, last_update_id, _receive_time_us| {
                 // Use optimized string-based method to avoid Arc creation overhead
-                orderbook_manager_thread.apply_depth_update_str(
-                    symbol, // Pass as &str directly
+                orderbook_manager_thread.apply_depth_update(
+                    symbol,
                     &bids,
                     &asks,
                     first_update_id,

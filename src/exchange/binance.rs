@@ -38,9 +38,6 @@ pub struct BinanceClient {
     /// API key for authenticated requests
     api_key: Arc<str>,
 
-    /// API secret for request signing
-    api_secret: Arc<str>,
-
     /// Whether to use the testnet
     testnet: bool,
 
@@ -91,7 +88,7 @@ enum BinanceSymbolFilter {
 
 impl BinanceClient {
     /// Create a new Binance client
-    pub fn new(api_key: String, api_secret: String, testnet: bool) -> Result<Self> {
+    pub fn new(api_key: String, testnet: bool) -> Result<Self> {
         // Set the base URL based on whether testnet is enabled
         let base_url = if testnet {
             // Url::parse("https://testnet.binance.vision/api/").context("Invalid testnet URL")?
@@ -103,7 +100,6 @@ impl BinanceClient {
         Ok(Self {
             base_url,
             api_key: api_key.into(),
-            api_secret: api_secret.into(),
             testnet,
             symbols_cache: RwLock::new(None),
             symbols_cache_updated_at: RwLock::new(Instant::now()),
@@ -134,8 +130,6 @@ impl BinanceClient {
 
     /// Convert BinanceSymbol to our Symbol model
     fn convert_symbol(binance_symbol: BinanceSymbol) -> Symbol {
-        let mut min_qty = None;
-        let mut max_qty = None;
         let mut price_precision = 8; // Default values
         let mut qty_precision = 8;
 
@@ -143,8 +137,6 @@ impl BinanceClient {
         for filter in &binance_symbol.filters {
             match filter {
                 BinanceSymbolFilter::LotSize { min_qty: minq, max_qty: maxq, step_size: ss } => {
-                    min_qty = minq.parse::<f64>().ok();
-                    max_qty = maxq.parse::<f64>().ok();
                     qty_precision = Self::calculate_precision(ss);
                 }
                 BinanceSymbolFilter::PriceFilter { tick_size: t, .. } => {
@@ -158,8 +150,6 @@ impl BinanceClient {
             symbol: binance_symbol.symbol.into(),
             base_asset: binance_symbol.base_asset.into(),
             quote_asset: binance_symbol.quote_asset.into(),
-            min_qty,
-            max_qty,
             price_precision,
             qty_precision,
             is_trading: binance_symbol.status == "TRADING",

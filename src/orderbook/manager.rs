@@ -480,7 +480,6 @@
 // }
 
 // src/orderbook/manager.rs - Optimized version replacing existing
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use parking_lot::RwLock;
@@ -574,28 +573,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Alternative constructor that accepts a runtime handle
-    #[inline]
-    pub fn with_runtime(
-        default_depth: usize,
-        exchange_client: Arc<dyn ExchangeClient + Send + Sync>,
-        runtime_handle: tokio::runtime::Handle
-    ) -> Self {
-        let symbol_interner = Arc::new(SymbolInterner::new());
-
-        Self {
-            books: Arc::new(DashMap::with_capacity(1000)),
-            symbol_interner,
-            default_depth,
-            exchange_client,
-            recovery_mutex: Arc::new(Mutex::new(())),
-            last_recovery: Arc::new(DashMap::with_capacity(1000)),
-            update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))),
-            runtime_handle,
-            symbol_hashes: Arc::new(DashMap::with_capacity(1000)),
-        }
-    }
-
     /// Preload symbols into the interner for better performance
     pub fn preload_symbols(&self, symbols: &[String]) {
         info!("Preloading {} symbols into interner", symbols.len());
@@ -670,12 +647,6 @@ impl OrderBookManager {
         result
     }
 
-    /// Get or create orderbook using string slice (creates interned symbol)
-    pub fn get_or_create_book_str(&self, symbol_str: &str) -> Arc<OrderBook> {
-        let symbol = self.symbol_interner.intern(symbol_str);
-        self.get_or_create_book(&symbol)
-    }
-
     pub fn apply_snapshot(
         &self,
         symbol: Arc<str>,
@@ -716,18 +687,6 @@ impl OrderBookManager {
         );
     }
 
-    /// Apply snapshot using string slice
-    pub fn apply_snapshot_str(
-        &self,
-        symbol_str: &str,
-        bids: &[(f64, f64)],
-        asks: &[(f64, f64)],
-        last_update_id: u64
-    ) {
-        let symbol = self.symbol_interner.intern(symbol_str);
-        self.apply_snapshot(symbol, bids, asks, last_update_id);
-    }
-
     pub fn trigger_recovery(&self, symbol: &Arc<str>) {
         if symbol.as_ref().trim().is_empty() {
             error!("Cannot trigger recovery for empty symbol");
@@ -759,12 +718,6 @@ impl OrderBookManager {
         self.runtime_handle.spawn(async move {
             manager.recovery_task(symbol_clone).await;
         });
-    }
-
-    /// Trigger recovery using string slice
-    pub fn trigger_recovery_str(&self, symbol_str: &str) {
-        let symbol = self.symbol_interner.intern(symbol_str);
-        self.trigger_recovery(&symbol);
     }
 
     /// Internal async recovery task
@@ -830,7 +783,7 @@ impl OrderBookManager {
         }
     }
 
-    pub fn apply_depth_update(
+    pub fn apply_depth_update_internal(
         &self,
         symbol: &Arc<str>,
         bids: &[(f64, f64)],
@@ -880,7 +833,7 @@ impl OrderBookManager {
     }
 
     /// Apply depth update using string slice
-    pub fn apply_depth_update_str(
+    pub fn apply_depth_update(
         &self,
         symbol_str: &str,
         bids: &[(f64, f64)],
@@ -889,12 +842,15 @@ impl OrderBookManager {
         last_update_id: u64
     ) -> bool {
         let symbol = self.symbol_interner.intern(symbol_str);
-        self.apply_depth_update(&symbol, bids, asks, first_update_id, last_update_id)
+        self.apply_depth_update_internal(&symbol, bids, asks, first_update_id, last_update_id)
     }
 
     /// Get the best bid and ask for a symbol - fast path optimized
     #[inline]
-    pub fn get_top_of_book(&self, symbol: &Arc<str>) -> Option<(Option<Level>, Option<Level>)> {
+    pub fn get_top_of_book_internal(
+        &self,
+        symbol: &Arc<str>
+    ) -> Option<(Option<Level>, Option<Level>)> {
         // Fast path with DashMap
         match self.books.get(symbol) {
             Some(book_ref) if book_ref.is_synced() => { Some(book_ref.snapshot()) }
@@ -909,9 +865,9 @@ impl OrderBookManager {
 
     /// Get top of book using string slice
     #[inline]
-    pub fn get_top_of_book_str(&self, symbol_str: &str) -> Option<(Option<Level>, Option<Level>)> {
+    pub fn get_top_of_book(&self, symbol_str: &str) -> Option<(Option<Level>, Option<Level>)> {
         let symbol = self.symbol_interner.intern(symbol_str);
-        self.get_top_of_book(&symbol)
+        self.get_top_of_book_internal(&symbol)
     }
 
     /// Fetch full orderbook snapshot from the exchange
@@ -942,148 +898,21 @@ impl OrderBookManager {
         Ok((bids, asks, depth_response.last_update_id))
     }
 
-    /// Check if an orderbook is initialized
-    pub fn is_initialized(&self, symbol: &Arc<str>) -> bool {
-        if let Some(book_ref) = self.books.get(symbol) { book_ref.is_synced() } else { false }
-    }
-
-    /// Check if orderbook is initialized using string slice
-    pub fn is_initialized_str(&self, symbol_str: &str) -> bool {
-        let symbol = self.symbol_interner.intern(symbol_str);
-        self.is_initialized(&symbol)
-    }
-
-    /// Get all the symbols that have orderbooks
-    pub fn get_symbols(&self) -> Vec<Arc<str>> {
-        self.books
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect()
-    }
-
-    /// Get statistics about all orderbooks
-    pub fn get_stats(&self) -> HashMap<Arc<str>, (bool, u64)> {
-        let mut stats = HashMap::with_capacity(self.books.len());
-
-        for entry in self.books.iter() {
-            stats.insert(entry.key().clone(), (entry.is_synced(), entry.get_last_update_id()));
-        }
-
-        stats
-    }
-
     /// Get optimization statistics
     pub fn get_optimization_stats(&self) -> OptimizationStats {
-        let (interner_hashes, interner_strings) = self.symbol_interner.stats();
+        let (_, interner_strings) = self.symbol_interner.stats();
 
         OptimizationStats {
             total_books: self.books.len(),
-            interner_hash_entries: interner_hashes,
             interner_string_entries: interner_strings,
             symbol_hash_cache_size: self.symbol_hashes.len(),
         }
-    }
-
-    /// Get the mid-price for a symbol
-    pub fn get_mid_price(&self, symbol: &Arc<str>) -> Option<f64> {
-        if let Some(book_ref) = self.books.get(symbol) {
-            if book_ref.is_synced() { book_ref.mid_price() } else { None }
-        } else {
-            None
-        }
-    }
-
-    /// Get mid price using string slice
-    pub fn get_mid_price_str(&self, symbol_str: &str) -> Option<f64> {
-        let symbol = self.symbol_interner.intern(symbol_str);
-        self.get_mid_price(&symbol)
-    }
-
-    /// Get multiple price levels for a symbol
-    pub fn get_price_levels(
-        &self,
-        symbol: &Arc<str>,
-        depth: Option<usize>
-    ) -> Option<(Vec<Level>, Vec<Level>)> {
-        if let Some(book_ref) = self.books.get(symbol) {
-            if book_ref.is_synced() {
-                Some((book_ref.get_bids(depth), book_ref.get_asks(depth)))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Ensure all specified symbols have initialized orderbooks
-    pub async fn ensure_all_initialized(&self, symbols: &[Arc<str>]) -> Result<()> {
-        let mut failed_symbols = Vec::new();
-
-        for symbol in symbols {
-            let book = self.get_or_create_book(symbol);
-
-            if !book.is_synced() {
-                match self.fetch_snapshot(symbol.as_ref()).await {
-                    Ok((bids, asks, last_update_id)) => {
-                        self.apply_snapshot(symbol.clone(), &bids, &asks, last_update_id);
-                    }
-                    Err(e) => {
-                        error!(
-                            symbol = %symbol,
-                            error = %e,
-                            "Failed to initialize orderbook"
-                        );
-                        failed_symbols.push(symbol.clone());
-                    }
-                }
-            }
-        }
-
-        if failed_symbols.is_empty() {
-            Ok(())
-        } else {
-            let symbols_str = failed_symbols
-                .iter()
-                .map(|s| s.as_ref())
-                .collect::<Vec<&str>>()
-                .join(", ");
-
-            Err(anyhow::anyhow!("Failed to initialize orderbooks for: {}", symbols_str))
-        }
-    }
-
-    /// Ensure all symbols initialized using string slices
-    pub async fn ensure_all_initialized_str(&self, symbols: &[String]) -> Result<()> {
-        // Preload symbols first
-        self.preload_symbols(symbols);
-
-        let interned_symbols: Vec<Arc<str>> = symbols
-            .iter()
-            .map(|s| self.symbol_interner.intern(s))
-            .collect();
-
-        self.ensure_all_initialized(&interned_symbols).await
-    }
-
-    /// Clear all orderbooks
-    pub fn clear_all(&self) {
-        self.books.clear();
-        debug!("Cleared all orderbooks");
-    }
-
-    /// Synchronous version of ensure_all_initialized for use in sync contexts
-    pub fn ensure_all_initialized_sync(&self, symbols: &[Arc<str>]) -> Result<()> {
-        let manager = self.clone();
-        let symbols = symbols.to_vec();
-        self.runtime_handle.block_on(async move { manager.ensure_all_initialized(&symbols).await })
     }
 }
 
 #[derive(Debug)]
 pub struct OptimizationStats {
     pub total_books: usize,
-    pub interner_hash_entries: usize,
     pub interner_string_entries: usize,
     pub symbol_hash_cache_size: usize,
 }

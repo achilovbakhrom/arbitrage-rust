@@ -220,7 +220,7 @@ impl PerformanceTestState {
     #[inline(always)]
     fn get_symbol_price(&self, symbol: &Arc<str>, is_base_to_quote: bool) -> Option<f64> {
         // Use the optimized string-based method
-        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book_str(symbol.as_ref()) {
+        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book(symbol.as_ref()) {
             if is_base_to_quote { bid.map(|b| b.price) } else { ask.map(|a| a.price) }
         } else {
             None
@@ -470,7 +470,7 @@ pub fn run_performance_test(
             let orderbook_update_start = Instant::now();
 
             // Use optimized string-based method
-            let _ = orderbook_manager_clone.apply_depth_update_str(
+            let _ = orderbook_manager_clone.apply_depth_update(
                 symbol, // Pass as &str directly
                 &bids,
                 &asks,

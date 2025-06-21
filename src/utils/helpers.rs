@@ -128,7 +128,6 @@ pub fn build_execultor(
                 config.debug, // Use debug mode flag
                 fix_config,
                 config.max_slippage_percentage,
-                config.min_execution_profit_threshold,
                 symbol_map.clone() // Pass symbol map for precision
             )
         {

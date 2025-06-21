@@ -1,7 +1,6 @@
 // src/exchange/mock_fix_api.rs - Complete implementation with precision support
 use std::time::{ Duration, Instant };
 use anyhow::Result;
-use serde::{ Deserialize, Serialize };
 use tracing::{ info, warn };
 use std::collections::HashMap;
 
@@ -37,20 +36,6 @@ impl MockFixClient {
         info!("Mock FIX client: Disconnecting...");
         self.is_connected = false;
         Ok(())
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.is_connected
-    }
-
-    /// Update symbol precision cache (for consistency with real client)
-    pub fn update_symbol_precision(
-        &mut self,
-        symbol: &str,
-        qty_precision: u8,
-        price_precision: u8
-    ) {
-        self.symbol_precisions.insert(symbol.to_string(), (qty_precision, price_precision));
     }
 
     /// Helper to format quantity with precision
@@ -162,15 +147,5 @@ impl MockFixClient {
             );
             Err(anyhow::anyhow!("Mock execution failed - insufficient liquidity"))
         }
-    }
-
-    /// Set the simulated success rate (for testing different scenarios)
-    pub fn set_success_rate(&mut self, rate: f64) {
-        self.success_rate = rate.clamp(0.0, 1.0);
-    }
-
-    /// Set the simulated latency
-    pub fn set_latency(&mut self, latency: Duration) {
-        self.simulated_latency = latency;
     }
 }

@@ -606,19 +606,12 @@ pub struct ArbitrageOpportunity {
     pub start_amount: f64,
     pub end_amount: f64,
     pub execution_time_ns: u64,
-    pub min_volume_satisfied: bool,
-    pub liquidity_scores: [f64; 3],
 }
 
 impl ArbitrageOpportunity {
     #[inline(always)]
     pub fn profit_percentage(&self) -> f64 {
         (self.profit_ratio - 1.0) * 100.0
-    }
-
-    #[inline(always)]
-    pub fn has_sufficient_liquidity(&self) -> bool {
-        self.min_volume_satisfied && self.liquidity_scores.iter().all(|&score| score > 0.5)
     }
 
     pub fn display(&self) -> String {
@@ -970,8 +963,6 @@ impl ArbitrageDetectorState {
             start_amount: self.start_amount as f64,
             end_amount: (self.start_amount as f64) * (opportunity.profit_ratio as f64),
             execution_time_ns: 0,
-            min_volume_satisfied: true,
-            liquidity_scores: [0.8, 0.8, 0.8], // Simplified for speed
         };
 
         let execution_start = Instant::now();
@@ -1076,12 +1067,6 @@ impl ArbitrageDetectorState {
         }
     }
 
-    /// Original handle_update method for compatibility
-    #[inline]
-    pub fn handle_update(&self, symbol: &Arc<str>, book: &Arc<OrderBook>) {
-        self.handle_update_optimized(symbol.as_ref(), book);
-    }
-
     /// Get execution statistics
     pub fn get_execution_stats(&self) -> (u64, u64, u64) {
         (
@@ -1098,14 +1083,9 @@ impl ArbitrageDetectorState {
 
     /// Get optimization statistics
     pub fn get_optimization_stats(&self) -> DetectorOptimizationStats {
-        let (interner_hashes, interner_strings) = self.symbol_interner.stats();
-
         DetectorOptimizationStats {
             total_paths: self.all_paths.len(),
-            interner_hash_entries: interner_hashes,
-            interner_string_entries: interner_strings,
             symbol_map_entries: self.symbol_map.len(),
-            hash_to_symbol_entries: self.hash_to_symbol.len(),
         }
     }
 
@@ -1148,10 +1128,7 @@ impl ArbitrageDetectorState {
 #[derive(Debug)]
 pub struct DetectorOptimizationStats {
     pub total_paths: usize,
-    pub interner_hash_entries: usize,
-    pub interner_string_entries: usize,
     pub symbol_map_entries: usize,
-    pub hash_to_symbol_entries: usize,
 }
 
 // Zero-cost clone

@@ -43,7 +43,6 @@ pub struct OrderBook {
 
     /// Cold path data - less frequently accessed
     event_buffer: RwLock<Vec<(u64, u64, Vec<(f64, f64)>, Vec<(f64, f64)>)>>,
-    pub first_update_id: AtomicU64,
 }
 
 impl fmt::Debug for OrderBook {
@@ -81,7 +80,6 @@ impl OrderBook {
             cached_best_ask: AtomicCell::new((0.0, 0.0)),
             cached_mid_price: AtomicCell::new(0.0),
             event_buffer: RwLock::new(Vec::with_capacity(64)), // Smaller initial capacity
-            first_update_id: AtomicU64::new(0),
         }
     }
 
@@ -396,30 +394,6 @@ impl OrderBook {
         }
     }
 
-    /// Hot path: Get best bid (zero allocation, cache-optimized)
-    #[inline(always)]
-    pub fn best_bid(&self) -> Option<Level> {
-        if self.get_state() == OrderBookState::Synced {
-            let cached = self.cached_best_bid.load();
-            if !Self::is_empty_level(cached) {
-                return Some(Level { price: cached.0, quantity: cached.1 });
-            }
-        }
-        None
-    }
-
-    /// Hot path: Get best ask (zero allocation, cache-optimized)
-    #[inline(always)]
-    pub fn best_ask(&self) -> Option<Level> {
-        if self.get_state() == OrderBookState::Synced {
-            let cached = self.cached_best_ask.load();
-            if !Self::is_empty_level(cached) {
-                return Some(Level { price: cached.0, quantity: cached.1 });
-            }
-        }
-        None
-    }
-
     /// Hot path: Get top of book snapshot
     #[inline(always)]
     pub fn snapshot(&self) -> (Option<Level>, Option<Level>) {
@@ -442,38 +416,6 @@ impl OrderBook {
             (bid_level, ask_level)
         } else {
             (None, None)
-        }
-    }
-
-    /// Hot path: Get mid price (cached)
-    #[inline(always)]
-    pub fn mid_price(&self) -> Option<f64> {
-        if self.get_state() == OrderBookState::Synced {
-            let mid = self.cached_mid_price.load();
-            if mid > 0.0 {
-                Some(mid)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Hot path: Get spread
-    #[inline(always)]
-    pub fn spread(&self) -> Option<f64> {
-        if self.get_state() == OrderBookState::Synced {
-            let bid = self.cached_best_bid.load();
-            let ask = self.cached_best_ask.load();
-
-            if !Self::is_empty_level(bid) && !Self::is_empty_level(ask) {
-                Some(ask.0 - bid.0)
-            } else {
-                None
-            }
-        } else {
-            None
         }
     }
 
@@ -537,101 +479,8 @@ impl OrderBook {
         (bid_tuple, ask_tuple)
     }
 
-    // Cold path methods (less optimized)
-    pub fn get_bids(&self, depth: Option<usize>) -> Vec<Level> {
-        if self.get_state() != OrderBookState::Synced {
-            return Vec::new();
-        }
-
-        let count = self.bid_count.load() as usize;
-        let limit = depth.unwrap_or(self.max_depth as usize).min(count);
-
-        let mut result = Vec::with_capacity(limit);
-
-        unsafe {
-            let bids_ptr = self.bids.as_ptr();
-            for i in 0..limit {
-                let level = *bids_ptr.add(i);
-                if !Self::is_empty_level(level) {
-                    result.push(Level { price: level.0, quantity: level.1 });
-                }
-            }
-        }
-        result
-    }
-
-    pub fn get_asks(&self, depth: Option<usize>) -> Vec<Level> {
-        if self.get_state() != OrderBookState::Synced {
-            return Vec::new();
-        }
-
-        let count = self.ask_count.load() as usize;
-        let limit = depth.unwrap_or(self.max_depth as usize).min(count);
-
-        let mut result = Vec::with_capacity(limit);
-        unsafe {
-            let asks_ptr = self.asks.as_ptr();
-            for i in 0..limit {
-                let level = *asks_ptr.add(i);
-                if !Self::is_empty_level(level) {
-                    result.push(Level { price: level.0, quantity: level.1 });
-                }
-            }
-        }
-        result
-    }
-
     #[inline(always)]
     pub fn is_synced(&self) -> bool {
         self.get_state() == OrderBookState::Synced
-    }
-
-    #[inline(always)]
-    pub fn get_last_update_id(&self) -> u64 {
-        self.last_update_id.load(Ordering::Relaxed)
-    }
-
-    pub fn spread_percentage(&self) -> Option<f64> {
-        if let Some(mid) = self.mid_price() {
-            if let Some(spread_val) = self.spread() {
-                Some((spread_val / mid) * 100.0)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bid_count.load() == 0 || self.ask_count.load() == 0
-    }
-
-    pub fn bid_volume(&self) -> f64 {
-        let count = self.bid_count.load() as usize;
-        let mut total = 0.0;
-        unsafe {
-            let bids_ptr = self.bids.as_ptr();
-            for i in 0..count {
-                total += (*bids_ptr.add(i)).1; // .1 is quantity
-            }
-        }
-        total
-    }
-
-    pub fn ask_volume(&self) -> f64 {
-        let count = self.ask_count.load() as usize;
-        let mut total = 0.0;
-        unsafe {
-            let asks_ptr = self.asks.as_ptr();
-            for i in 0..count {
-                total += (*asks_ptr.add(i)).1; // .1 is quantity
-            }
-        }
-        total
-    }
-
-    pub fn volume_imbalance(&self) -> f64 {
-        self.bid_volume() - self.ask_volume()
     }
 }

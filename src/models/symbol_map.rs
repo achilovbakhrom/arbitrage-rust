@@ -244,33 +244,11 @@ impl SymbolMap {
     }
 
     #[inline]
-    pub fn get_all_assets(&self) -> Vec<Arc<str>> {
-        let mut assets = HashSet::new();
-
-        for entry in self.symbols.iter() {
-            assets.insert(entry.base_asset.clone());
-            assets.insert(entry.quote_asset.clone());
-        }
-
-        assets.into_iter().collect()
-    }
-
-    #[inline]
     pub fn get_all_symbols(&self) -> Vec<Symbol> {
         self.symbols
             .iter()
             .map(|entry| entry.value().clone())
             .collect()
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.symbols.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.symbols.is_empty()
     }
 
     #[inline]

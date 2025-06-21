@@ -46,7 +46,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     // Initialize exchange client
     let client = Arc::new(
-        BinanceClient::new(config.fix_api.clone(), config.fix_secret.clone(), config.debug).context(
+        BinanceClient::new(config.fix_api.clone(), config.debug).context(
             "Failed to create Binance client"
         )?
     );
@@ -82,7 +82,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     // Create fallback executor for compatibility
     let fallback_executor = Arc::new(
         ArbitrageExecutor::new(
-            orderbook_manager.clone(),
             ExecutionStrategy::FastSequential // Maximum speed
         )
     );
@@ -148,7 +147,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        600, // 10 minutes
+        120, // 10 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );
@@ -168,7 +167,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
             // Print final optimization stats
             let final_opt_stats = orderbook_manager.get_optimization_stats();
-            let final_detector_stats = detector.get_optimization_stats();
 
             info!(
                 "Final optimization stats: {} books, {} interner entries, {} hash cache",
