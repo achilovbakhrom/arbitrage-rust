@@ -15,43 +15,36 @@ pub enum OrderBookState {
 }
 
 const MAX_DEPTH: usize = 5;
-const PRICE_EPSILON: f64 = 1e-8; // For price comparison
+const PRICE_EPSILON: f64 = 1e-8;
 
-// CRITICAL: Single cache line for hot data (64 bytes)
 #[repr(C, align(64))]
 struct HotData {
-    bid_count: AtomicCell<u8>, // 1 byte
-    ask_count: AtomicCell<u8>, // 1 byte
-    state: AtomicU8, // 1 byte
-    _padding1: [u8; 5], // 5 bytes padding
-    last_update_id: AtomicU64, // 8 bytes
-    best_bid_price: AtomicCell<f64>, // 8 bytes
-    best_bid_qty: AtomicCell<f64>, // 8 bytes
-    best_ask_price: AtomicCell<f64>, // 8 bytes
-    best_ask_qty: AtomicCell<f64>, // 8 bytes
-    mid_price: AtomicCell<f64>, // 8 bytes
-    _padding2: [u8; 8], // 8 bytes padding = 64 bytes total
+    bid_count: AtomicCell<u8>,
+    ask_count: AtomicCell<u8>,
+    state: AtomicU8,
+    _padding1: [u8; 5],
+    last_update_id: AtomicU64,
+    best_bid_price: AtomicCell<f64>,
+    best_bid_qty: AtomicCell<f64>,
+    best_ask_price: AtomicCell<f64>,
+    best_ask_qty: AtomicCell<f64>,
+    mid_price: AtomicCell<f64>,
+    _padding2: [u8; 8],
 }
 
-// Separate cache-aligned arrays for price levels
 #[repr(C, align(64))]
 struct PriceLevels {
     bids: [(f64, f64); MAX_DEPTH],
     asks: [(f64, f64); MAX_DEPTH],
 }
 
-/// ULTRA-AGGRESSIVE: Lock-free orderbook with minimal operations
 pub struct OrderBook {
-    // Hot data in single cache line
     hot: HotData,
 
-    // Price level arrays in separate cache lines
     levels: Box<PriceLevels>,
 
-    // Configuration
     max_depth: u8,
 
-    // Cold path data (rarely accessed)
     update_mutex: Mutex<()>,
     event_buffer: RwLock<Vec<(u64, u64, Vec<(f64, f64)>, Vec<(f64, f64)>)>>,
 }
@@ -105,7 +98,6 @@ impl OrderBook {
         self.hot.state.store(state as u8, Ordering::Relaxed);
     }
 
-    /// ZERO-ALLOCATION, LOCK-FREE hot path - targeting sub-microsecond performance
     #[inline(always)]
     pub fn apply_depth_update_raw(
         &self,
@@ -114,14 +106,11 @@ impl OrderBook {
         first_update_id: u64,
         last_update_id: u64
     ) -> Result<bool, ()> {
-        // OPTIMIZATION 1: Single load, fast state check
         let state = self.hot.state.load(Ordering::Relaxed);
         if state != (OrderBookState::Synced as u8) {
-            // Avoid allocation in hot path - defer to cold path
             return Ok(false);
         }
 
-        // OPTIMIZATION 2: Fast sequence validation
         let current_id = self.hot.last_update_id.load(Ordering::Relaxed);
         if last_update_id <= current_id {
             return Ok(true);
@@ -131,45 +120,37 @@ impl OrderBook {
             return Ok(false);
         }
 
-        // OPTIMIZATION 3: Fast path for empty updates
         if bids.is_empty() && asks.is_empty() {
             self.hot.last_update_id.store(last_update_id, Ordering::Relaxed);
             return Ok(true);
         }
 
-        // OPTIMIZATION 4: Inline processing to avoid function call overhead
         self.process_updates_inline(bids, asks);
 
-        // OPTIMIZATION 5: Single atomic store
         self.hot.last_update_id.store(last_update_id, Ordering::Relaxed);
 
         Ok(true)
     }
 
-    /// INLINED: Process updates without function call overhead - UNSAFE for performance
     #[inline(always)]
     fn process_updates_inline(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
         unsafe {
             let levels_ptr = self.levels.as_ref() as *const PriceLevels as *mut PriceLevels;
 
-            // Process bids with aggressive inlining
             if !bids.is_empty() {
-                self.update_side_inline_unsafe(bids, &mut (*levels_ptr).bids, true);
+                self.update_side_inline(bids, &mut (*levels_ptr).bids, true);
             }
 
-            // Process asks with aggressive inlining
             if !asks.is_empty() {
-                self.update_side_inline_unsafe(asks, &mut (*levels_ptr).asks, false);
+                self.update_side_inline(asks, &mut (*levels_ptr).asks, false);
             }
         }
 
-        // Single cache update
         self.update_best_prices();
     }
 
-    /// ULTRA-FAST: Update one side with minimal branching - UNSAFE for max performance
     #[inline(always)]
-    unsafe fn update_side_inline_unsafe(
+    unsafe fn update_side_inline(
         &self,
         updates: &[(f64, f64)],
         levels: &mut [(f64, f64); MAX_DEPTH],
@@ -184,25 +165,14 @@ impl OrderBook {
         let mut count = current_count;
         let max_count = self.max_depth as usize;
 
-        // Process each update with minimal overhead
         for &(price, quantity) in updates {
             if quantity == 0.0 {
-                // REMOVE: Find and remove level
-                count = self.remove_level_fast_unsafe(levels, count, price);
+                count = self.remove_level(levels, count, price);
             } else {
-                // INSERT/UPDATE: Find position and insert/update
-                count = self.insert_level_fast_unsafe(
-                    levels,
-                    count,
-                    max_count,
-                    price,
-                    quantity,
-                    is_bids
-                );
+                count = self.insert_level(levels, count, max_count, price, quantity, is_bids);
             }
         }
 
-        // Single atomic store
         if is_bids {
             self.hot.bid_count.store(count as u8);
         } else {
@@ -210,15 +180,13 @@ impl OrderBook {
         }
     }
 
-    /// OPTIMIZED: Remove level with minimal memory operations - UNSAFE
     #[inline(always)]
-    unsafe fn remove_level_fast_unsafe(
+    unsafe fn remove_level(
         &self,
         levels: &mut [(f64, f64); MAX_DEPTH],
         count: usize,
         price: f64
     ) -> usize {
-        // Linear search (faster than binary search for small arrays)
         for i in 0..count {
             if (levels[i].0 - price).abs() < PRICE_EPSILON {
                 // Found - shift remaining elements
@@ -228,12 +196,11 @@ impl OrderBook {
                 return count - 1;
             }
         }
-        count // Not found
+        count
     }
 
-    /// OPTIMIZED: Insert/update level with minimal operations - UNSAFE
     #[inline(always)]
-    unsafe fn insert_level_fast_unsafe(
+    unsafe fn insert_level(
         &self,
         levels: &mut [(f64, f64); MAX_DEPTH],
         count: usize,
@@ -242,23 +209,20 @@ impl OrderBook {
         quantity: f64,
         is_bids: bool
     ) -> usize {
-        // Find insertion position
         let mut insert_pos = count;
 
         for i in 0..count {
             let level_price = levels[i].0;
 
-            // Check for exact match first
             if (level_price - price).abs() < PRICE_EPSILON {
                 levels[i].1 = quantity;
-                return count; // Updated existing
+                return count;
             }
 
-            // Find insertion point based on sort order
             let should_insert_here = if is_bids {
-                level_price < price // Bids: high to low
+                level_price < price
             } else {
-                level_price > price // Asks: low to high
+                level_price > price
             };
 
             if should_insert_here {
@@ -267,10 +231,8 @@ impl OrderBook {
             }
         }
 
-        // Insert new level if within max depth
         if insert_pos < max_count {
             let new_count = if count < max_count {
-                // Shift elements to make room
                 if insert_pos < count {
                     let src = levels.as_ptr().add(insert_pos);
                     let dst = levels.as_mut_ptr().add(insert_pos + 1);
@@ -278,7 +240,6 @@ impl OrderBook {
                 }
                 count + 1
             } else {
-                // Replace worst level
                 if insert_pos < count {
                     let src = levels.as_ptr().add(insert_pos);
                     let dst = levels.as_mut_ptr().add(insert_pos + 1);
@@ -291,10 +252,9 @@ impl OrderBook {
             return new_count;
         }
 
-        count // Outside max depth
+        count
     }
 
-    /// OPTIMIZED: Update cached best prices in single operation
     #[inline(always)]
     fn update_best_prices(&self) {
         let bid_count = self.hot.bid_count.load() as usize;
@@ -303,7 +263,6 @@ impl OrderBook {
         unsafe {
             let levels_ptr = self.levels.as_ref() as *const PriceLevels;
 
-            // Update best bid
             if bid_count > 0 {
                 let (price, qty) = (*levels_ptr).bids[0];
                 self.hot.best_bid_price.store(price);
@@ -313,7 +272,6 @@ impl OrderBook {
                 self.hot.best_bid_qty.store(0.0);
             }
 
-            // Update best ask
             if ask_count > 0 {
                 let (price, qty) = (*levels_ptr).asks[0];
                 self.hot.best_ask_price.store(price);
@@ -324,7 +282,6 @@ impl OrderBook {
             }
         }
 
-        // Update mid price
         let bid_price = self.hot.best_bid_price.load();
         let ask_price = self.hot.best_ask_price.load();
         let mid = if bid_price > 0.0 && ask_price > 0.0 {
@@ -335,7 +292,6 @@ impl OrderBook {
         self.hot.mid_price.store(mid);
     }
 
-    /// Apply snapshot with bulk operations (cold path)
     pub fn apply_snapshot(&self, bids: Vec<Level>, asks: Vec<Level>, snapshot_last_update_id: u64) {
         let _lock = self.update_mutex.lock();
 
@@ -348,7 +304,6 @@ impl OrderBook {
 
         debug!("Applying snapshot: {}", snapshot_last_update_id);
 
-        // Reset counts
         self.hot.bid_count.store(0);
         self.hot.ask_count.store(0);
 
@@ -356,18 +311,15 @@ impl OrderBook {
         let bid_len = bids.len().min(max_depth);
         let ask_len = asks.len().min(max_depth);
 
-        // Bulk copy bids and asks using unsafe for performance
         unsafe {
             let levels_ptr = self.levels.as_ref() as *const PriceLevels as *mut PriceLevels;
 
-            // Bulk copy bids
             for (i, level) in bids.into_iter().take(bid_len).enumerate() {
                 if level.quantity > 0.0 {
                     (*levels_ptr).bids[i] = (level.price, level.quantity);
                 }
             }
 
-            // Bulk copy asks
             for (i, level) in asks.into_iter().take(ask_len).enumerate() {
                 if level.quantity > 0.0 {
                     (*levels_ptr).asks[i] = (level.price, level.quantity);
@@ -422,7 +374,6 @@ impl OrderBook {
         }
     }
 
-    /// Hot path: Get top of book snapshot
     #[inline(always)]
     pub fn snapshot(&self) -> (Option<Level>, Option<Level>) {
         if self.hot.state.load(Ordering::Relaxed) != (OrderBookState::Synced as u8) {
@@ -447,23 +398,6 @@ impl OrderBook {
         };
 
         (bid_level, ask_level)
-    }
-
-    pub fn buffer_event(
-        &self,
-        first_update_id: u64,
-        last_update_id: u64,
-        bids: Vec<(f64, f64)>,
-        asks: Vec<(f64, f64)>
-    ) {
-        if self.get_state() == OrderBookState::Synced {
-            return;
-        }
-        let mut buffer = self.event_buffer.write();
-        if buffer.len() >= 50 {
-            buffer.drain(0..10);
-        }
-        buffer.push((first_update_id, last_update_id, bids, asks));
     }
 
     #[inline(always)]
