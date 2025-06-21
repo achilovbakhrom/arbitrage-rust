@@ -270,11 +270,7 @@ impl ArbitrageDetectorState {
             );
 
             // Ultra-fast sync check with branch prediction hint
-            if
-                core::hint::unlikely(
-                    !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced()
-                )
-            {
+            if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
                 return None;
             }
 
@@ -330,7 +326,7 @@ impl ArbitrageDetectorState {
             let profit_ratio = amount / self.start_amount;
 
             // Fast profitability check with branch prediction
-            if core::hint::unlikely(profit_ratio <= path_data.min_threshold) {
+            if profit_ratio <= path_data.min_threshold {
                 return None;
             }
 
@@ -341,7 +337,7 @@ impl ArbitrageDetectorState {
                 (second_qty as f32) >= min_vol &&
                 (third_qty as f32) >= min_vol;
 
-            if core::hint::unlikely(!volume_ok) {
+            if !volume_ok {
                 return None;
             }
 

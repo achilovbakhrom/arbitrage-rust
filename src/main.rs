@@ -1,4 +1,3 @@
-#![feature(likely_unlikely)]
 // for the quick data allocation on memory
 #[global_allocator]
 static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;

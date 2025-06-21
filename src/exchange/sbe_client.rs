@@ -208,18 +208,15 @@ impl<F> BinanceSbeClient<F>
 
     #[inline(always)]
     fn handle_binary_message_optimized(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
-        // Ultra-fast bounds check with likely hint
-        if core::hint::unlikely(data.len() < 32) {
+        if data.len() < 32 {
             return Ok(());
         }
 
-        // Optimized template ID extraction - single operation
         let template_id = unsafe {
             u16::from_le_bytes([*data.get_unchecked(2), *data.get_unchecked(3)])
         };
 
-        // Fast path for depth messages only - branch predictor friendly
-        if core::hint::likely(template_id == 10003) {
+        if template_id == 10003 {
             self.parse_depth_message_ultra_fast(data, receive_time_us)
         } else {
             Ok(())
@@ -322,7 +319,7 @@ impl<F> BinanceSbeClient<F>
         }
 
         // Extract symbol length with bounds check
-        if core::hint::unlikely(offset >= data.len()) {
+        if offset >= data.len() {
             return Err(anyhow::anyhow!("Invalid symbol offset"));
         }
 
@@ -330,7 +327,7 @@ impl<F> BinanceSbeClient<F>
         offset += 1;
 
         // Bounds check for symbol
-        if core::hint::unlikely(offset + symbol_len > data.len()) {
+        if offset + symbol_len > data.len() {
             return Err(anyhow::anyhow!("Invalid symbol length"));
         }
 
