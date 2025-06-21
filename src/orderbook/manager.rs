@@ -148,7 +148,7 @@ impl OrderBookManager {
 
     /// ULTRA-FAST: Get symbol ID from string - hot path optimized
     #[inline(always)]
-    fn get_symbol_id(&self, symbol_str: &str) -> Option<SymbolId> {
+    pub fn get_symbol_id(&self, symbol_str: &str) -> Option<SymbolId> {
         // Try direct lookup first (should hit after preloading)
         let interned = self.symbol_interner.intern(symbol_str);
         self.symbol_to_id.get(&interned).map(|id| *id)
@@ -241,24 +241,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Public method that converts string to ID then calls fast path
-    pub fn apply_depth_update(
-        &self,
-        symbol_str: &str,
-        bids: &[(f64, f64)],
-        asks: &[(f64, f64)],
-        first_update_id: u64,
-        last_update_id: u64
-    ) -> bool {
-        if let Some(symbol_id) = self.get_symbol_id(symbol_str) {
-            self.apply_depth_update_internal(symbol_id, bids, asks, first_update_id, last_update_id)
-        } else {
-            // Symbol not preloaded - this shouldn't happen in optimized flow
-            warn!("Symbol {} not preloaded, falling back to slow path", symbol_str);
-            false
-        }
-    }
-
     pub fn trigger_recovery_by_id(&self, symbol_id: SymbolId) {
         if symbol_id >= (MAX_SYMBOLS as u16) {
             return;
@@ -279,7 +261,7 @@ impl OrderBookManager {
         };
 
         if now < last_time + 3 {
-            return; // Too recent
+            return;
         }
 
         // Mark that we're attempting recovery
