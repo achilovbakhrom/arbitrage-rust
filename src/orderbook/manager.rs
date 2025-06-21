@@ -21,45 +21,34 @@ type SymbolId = u16;
 pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &Arc<OrderBook>) + Send + Sync>;
 
 pub struct OrderBookManager {
-    /// Core orderbook storage - now array-based for O(1) access
     pub books: Box<[Option<Arc<OrderBook>>; MAX_SYMBOLS]>, // Array instead of DashMap
 
-    /// Fast symbol mapping - compute once, use forever
     pub symbol_to_id: DashMap<Arc<str>, SymbolId>,
     id_to_symbol: Box<[Option<Arc<str>>; MAX_SYMBOLS]>,
     next_symbol_id: std::sync::atomic::AtomicU16,
 
-    /// String interner for symbol deduplication (used only during setup)
     symbol_interner: Arc<SymbolInterner>,
 
-    /// Default depth to use for new orderbooks
     default_depth: usize,
 
-    /// Exchange client for API requests
     exchange_client: Arc<dyn ExchangeClient + Send + Sync>,
 
-    /// Recovery coordination - optimized with array-based tracking
     recovery_mutex: Arc<Mutex<()>>,
     last_recovery: Box<[std::sync::atomic::AtomicU64; MAX_SYMBOLS]>, // Array for O(1) access
 
-    /// Update callbacks
     update_callbacks: Arc<RwLock<Vec<OrderbookUpdateCallback>>>,
 
-    /// Runtime handle for async operations
     runtime_handle: tokio::runtime::Handle,
 }
 
 impl OrderBookManager {
-    /// Create a new orderbook manager with default depth
     pub fn new(
         default_depth: usize,
         exchange_client: Arc<dyn ExchangeClient + Send + Sync>
     ) -> Self {
-        // Get the current runtime handle, or create a new runtime if none exists
         let runtime_handle = match tokio::runtime::Handle::try_current() {
             Ok(handle) => handle,
             Err(_) => {
-                // If no runtime exists, create a new one in a separate thread
                 let (tx, rx) = std::sync::mpsc::channel();
                 thread::spawn(move || {
                     let rt = tokio::runtime::Builder
@@ -84,11 +73,8 @@ impl OrderBookManager {
 
         let symbol_interner = Arc::new(SymbolInterner::new());
 
-        // Initialize arrays with None/default values
         let books = Box::new([const { None }; MAX_SYMBOLS]);
         let id_to_symbol = Box::new([const { None }; MAX_SYMBOLS]);
-
-        // Initialize atomic array for recovery tracking
         let last_recovery = Box::new([const { std::sync::atomic::AtomicU64::new(0) }; MAX_SYMBOLS]);
 
         Self {
@@ -124,20 +110,17 @@ impl OrderBookManager {
         );
     }
 
-    /// Get or assign a symbol ID - called only during setup/preload
     fn get_or_assign_symbol_id(&self, symbol: &Arc<str>) -> SymbolId {
         if let Some(id) = self.symbol_to_id.get(symbol) {
             return *id;
         }
 
-        // Assign new ID
         let id = self.next_symbol_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if id >= (MAX_SYMBOLS as u16) {
             panic!("Too many symbols! Increase MAX_SYMBOLS");
         }
 
         self.symbol_to_id.insert(symbol.clone(), id);
-        // SAFETY: We just checked bounds above
         unsafe {
             let id_to_symbol_ptr = self.id_to_symbol.as_ptr() as *mut Option<Arc<str>>;
             *id_to_symbol_ptr.add(id as usize) = Some(symbol.clone());
@@ -146,7 +129,6 @@ impl OrderBookManager {
         id
     }
 
-    /// ULTRA-FAST: Get symbol ID from string - hot path optimized
     #[inline(always)]
     pub fn get_symbol_id(&self, symbol_str: &str) -> Option<SymbolId> {
         // Try direct lookup first (should hit after preloading)
@@ -154,14 +136,12 @@ impl OrderBookManager {
         self.symbol_to_id.get(&interned).map(|id| *id)
     }
 
-    /// Register a callback to be notified when an orderbook is updated
     #[inline]
     pub fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
         let mut callbacks = self.update_callbacks.write();
         callbacks.push(callback);
     }
 
-    /// Optimized callback notification - uses SymbolId instead of string
     #[inline(always)]
     fn notify_update(&self, symbol_id: SymbolId, book: &Arc<OrderBook>) {
         let callbacks = self.update_callbacks.read();
@@ -169,16 +149,13 @@ impl OrderBookManager {
             return;
         }
 
-        // Execute callbacks with SymbolId for maximum speed
         for callback in callbacks.iter() {
             callback(symbol_id, book);
         }
     }
 
-    /// Get or create an orderbook for a symbol ID - ultra-fast array access
     #[inline(always)]
     pub fn get_or_create_book_by_id(&self, symbol_id: SymbolId) -> Arc<OrderBook> {
-        // SAFETY: We ensure symbol_id is valid during preloading
         unsafe {
             let books_ptr = self.books.as_ptr() as *mut Option<Arc<OrderBook>>;
             let book_option = &mut *books_ptr.add(symbol_id as usize);
@@ -187,14 +164,12 @@ impl OrderBookManager {
                 return book.clone();
             }
 
-            // Create new book
             let book = Arc::new(OrderBook::new(self.default_depth));
             *book_option = Some(book.clone());
             book
         }
     }
 
-    /// ULTRA-FAST: Apply depth update using symbol ID - main hot path
     #[inline(always)]
     pub fn apply_depth_update_internal(
         &self,
@@ -204,7 +179,6 @@ impl OrderBookManager {
         first_update_id: u64,
         last_update_id: u64
     ) -> bool {
-        // Get existing book - array access is O(1)
         let book = if symbol_id < (MAX_SYMBOLS as u16) {
             // SAFETY: We checked bounds
             unsafe {
@@ -221,20 +195,16 @@ impl OrderBookManager {
             return false;
         };
 
-        // Try to apply the update - NO ALLOCATIONS
         match book.apply_depth_update_raw(bids, asks, first_update_id, last_update_id) {
             Ok(true) => {
-                // Update applied successfully
                 self.notify_update(symbol_id, &book);
                 true
             }
             Ok(false) => {
-                // Book out of sync, need recovery
                 self.trigger_recovery_by_id(symbol_id);
                 false
             }
             Err(_) => {
-                // Error applying update
                 self.trigger_recovery_by_id(symbol_id);
                 false
             }
@@ -246,14 +216,12 @@ impl OrderBookManager {
             return;
         }
 
-        // Check if we've attempted recovery recently using array access
         let now = std::time::SystemTime
             ::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        // SAFETY: We checked bounds above
         let last_time = unsafe {
             self.last_recovery
                 .get_unchecked(symbol_id as usize)
@@ -264,14 +232,12 @@ impl OrderBookManager {
             return;
         }
 
-        // Mark that we're attempting recovery
         unsafe {
             self.last_recovery
                 .get_unchecked(symbol_id as usize)
                 .store(now, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Get symbol string for recovery
         let symbol = unsafe {
             if let Some(sym) = &*self.id_to_symbol.as_ptr().add(symbol_id as usize) {
                 sym.clone()
@@ -280,14 +246,12 @@ impl OrderBookManager {
             }
         };
 
-        // Spawn recovery task
         let manager = self.clone();
         self.runtime_handle.spawn(async move {
             manager.recovery_task(symbol).await;
         });
     }
 
-    /// Apply snapshot with symbol string conversion
     pub fn apply_snapshot(
         &self,
         symbol: Arc<str>,
@@ -300,7 +264,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Apply snapshot using symbol ID - faster version
     pub fn apply_snapshot_by_id(
         &self,
         symbol_id: SymbolId,
@@ -310,7 +273,6 @@ impl OrderBookManager {
     ) {
         let book = self.get_or_create_book_by_id(symbol_id);
 
-        // Convert to Level structs - only when needed
         let bids_levels: Vec<Level> = bids
             .iter()
             .map(|(price, qty)| Level { price: *price, quantity: *qty })
@@ -321,17 +283,14 @@ impl OrderBookManager {
             .map(|(price, qty)| Level { price: *price, quantity: *qty })
             .collect();
 
-        // Apply the snapshot
         book.apply_snapshot(bids_levels, asks_levels, last_update_id);
 
-        // Reset recovery tracker using array access
         unsafe {
             self.last_recovery
                 .get_unchecked(symbol_id as usize)
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Notify callbacks with symbol ID
         self.notify_update(symbol_id, &book);
         unsafe {
             if let Some(symbol) = &*self.id_to_symbol.as_ptr().add(symbol_id as usize) {
@@ -346,7 +305,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Internal async recovery task - unchanged
     async fn recovery_task(&self, symbol: Arc<str>) {
         let jitter = rand::random::<u64>() % 200;
         tokio::time::sleep(Duration::from_millis(jitter)).await;
@@ -388,7 +346,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Get the best bid and ask for a symbol ID - ultra-fast
     #[inline(always)]
     pub fn get_top_of_book_by_id(
         &self,
@@ -398,7 +355,6 @@ impl OrderBookManager {
             return None;
         }
 
-        // SAFETY: We checked bounds above
         unsafe {
             let books_ptr = self.books.as_ptr();
             if let Some(book) = &*books_ptr.add(symbol_id as usize) {
@@ -425,7 +381,6 @@ impl OrderBookManager {
         }
     }
 
-    /// Fetch full orderbook snapshot from the exchange - unchanged
     pub async fn fetch_snapshot(
         &self,
         symbol: &str
@@ -451,7 +406,6 @@ impl OrderBookManager {
         Ok((bids, asks, depth_response.last_update_id))
     }
 
-    /// Get optimization statistics
     pub fn get_optimization_stats(&self) -> OptimizationStats {
         let (_, interner_strings) = self.symbol_interner.stats();
         let assigned_symbols = self.next_symbol_id.load(std::sync::atomic::Ordering::Relaxed);
@@ -471,10 +425,8 @@ pub struct OptimizationStats {
     pub symbol_hash_cache_size: usize,
 }
 
-// Optimized Clone implementation
 impl Clone for OrderBookManager {
     fn clone(&self) -> Self {
-        // Clone the atomic arrays properly
         let new_last_recovery = Box::new(
             [const { std::sync::atomic::AtomicU64::new(0) }; MAX_SYMBOLS]
         );
