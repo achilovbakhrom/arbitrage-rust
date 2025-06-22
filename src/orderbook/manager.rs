@@ -1,11 +1,11 @@
 // src/orderbook/manager.rs - Ultra-optimized version with ZERO cloning in hot path
 use std::sync::Arc;
 use std::sync::Mutex;
-use parking_lot::RwLock;
 use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
 use std::time::Duration;
-use dashmap::DashMap;
+use ahash::AHashMap;
+use parking_lot::RwLock;
 use std::thread;
 
 use crate::models::level::Level;
@@ -21,9 +21,9 @@ type SymbolId = u16;
 pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &OrderBook) + Send + Sync>;
 
 pub struct OrderBookManager {
-    pub books: Box<[Option<Arc<OrderBook>>; MAX_SYMBOLS]>, // Array instead of DashMap
+    pub books: Box<[Option<Arc<OrderBook>>; MAX_SYMBOLS]>,
 
-    pub symbol_to_id: DashMap<Arc<str>, SymbolId>,
+    pub symbol_to_id: RwLock<AHashMap<Arc<str>, SymbolId>>,
     id_to_symbol: Box<[Option<Arc<str>>; MAX_SYMBOLS]>,
     next_symbol_id: std::sync::atomic::AtomicU16,
 
@@ -79,7 +79,7 @@ impl OrderBookManager {
 
         Self {
             books,
-            symbol_to_id: DashMap::with_capacity(MAX_SYMBOLS),
+            symbol_to_id: RwLock::new(AHashMap::with_capacity(MAX_SYMBOLS)),
             id_to_symbol,
             next_symbol_id: std::sync::atomic::AtomicU16::new(0),
             symbol_interner,
@@ -113,13 +113,14 @@ impl OrderBookManager {
     /// Get symbol mappings for SBE client preloading
     pub fn get_symbol_mappings(&self) -> Vec<(String, u16)> {
         self.symbol_to_id
+            .read()
             .iter()
-            .map(|entry| (entry.key().to_string(), *entry.value()))
+            .map(|entry| (entry.0.to_string(), *entry.1))
             .collect()
     }
 
     fn get_or_assign_symbol_id(&self, symbol: &Arc<str>) -> SymbolId {
-        if let Some(id) = self.symbol_to_id.get(symbol) {
+        if let Some(id) = self.symbol_to_id.read().get(symbol) {
             return *id;
         }
 
@@ -128,7 +129,7 @@ impl OrderBookManager {
             panic!("Too many symbols! Increase MAX_SYMBOLS");
         }
 
-        self.symbol_to_id.insert(symbol.clone(), id);
+        self.symbol_to_id.write().insert(symbol.clone(), id);
         unsafe {
             let id_to_symbol_ptr = self.id_to_symbol.as_ptr() as *mut Option<Arc<str>>;
             *id_to_symbol_ptr.add(id as usize) = Some(symbol.clone());
@@ -141,7 +142,10 @@ impl OrderBookManager {
     pub fn get_symbol_id(&self, symbol_str: &str) -> Option<SymbolId> {
         // Try direct lookup first (should hit after preloading)
         let interned = self.symbol_interner.intern(symbol_str);
-        self.symbol_to_id.get(&interned).map(|id| *id)
+        self.symbol_to_id
+            .read()
+            .get(&interned)
+            .map(|id| *id)
     }
 
     #[inline]
@@ -284,7 +288,12 @@ impl OrderBookManager {
         asks: &[(f64, f64)],
         last_update_id: u64
     ) {
-        if let Some(symbol_id) = self.symbol_to_id.get(&symbol).map(|id| *id) {
+        if
+            let Some(symbol_id) = self.symbol_to_id
+                .read()
+                .get(&symbol)
+                .map(|id| *id)
+        {
             self.apply_snapshot_by_id(symbol_id, bids, asks, last_update_id);
         }
     }
@@ -401,7 +410,12 @@ impl OrderBookManager {
         &self,
         symbol: &Arc<str>
     ) -> Option<(Option<Level>, Option<Level>)> {
-        if let Some(symbol_id) = self.symbol_to_id.get(symbol).map(|id| *id) {
+        if
+            let Some(symbol_id) = self.symbol_to_id
+                .read()
+                .get(symbol)
+                .map(|id| *id)
+        {
             self.get_top_of_book_by_id(symbol_id)
         } else {
             None
@@ -440,7 +454,7 @@ impl OrderBookManager {
         OptimizationStats {
             total_books: assigned_symbols as usize,
             interner_string_entries: interner_strings,
-            symbol_hash_cache_size: self.symbol_to_id.len(),
+            symbol_hash_cache_size: self.symbol_to_id.read().len(),
         }
     }
 }
@@ -464,7 +478,7 @@ impl Clone for OrderBookManager {
 
         Self {
             books: self.books.clone(),
-            symbol_to_id: self.symbol_to_id.clone(),
+            symbol_to_id: RwLock::new(self.symbol_to_id.read().clone()),
             id_to_symbol: self.id_to_symbol.clone(),
             next_symbol_id: std::sync::atomic::AtomicU16::new(
                 self.next_symbol_id.load(std::sync::atomic::Ordering::Relaxed)

@@ -113,7 +113,7 @@ pub struct ArbitrageDetectorState {
 
     // Hot path data - pre-computed and cache-aligned
     path_data: Box<[PathData]>, // Heap allocated, cache-aligned array
-    symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>, // Array instead of DashMap for O(1) access
+    symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>,
 
     // Execution control - separate cache line
     fallback_executor: Arc<ArbitrageExecutor>, // For simulation mode compatibility
@@ -185,7 +185,10 @@ impl ArbitrageDetectorState {
         // Helper function to get symbol ID from orderbook manager
         let get_symbol_id = |symbol_str: &str| -> Option<u16> {
             let interned = symbol_interner.intern(symbol_str);
-            orderbook_manager.symbol_to_id.get(&interned).map(|id| *id)
+            orderbook_manager.symbol_to_id
+                .read()
+                .get(&interned)
+                .map(|id| *id)
         };
 
         for (i, path) in unwrapped_paths.iter().enumerate() {
@@ -502,7 +505,7 @@ impl ArbitrageDetectorState {
     pub fn get_optimization_stats(&self) -> DetectorOptimizationStats {
         DetectorOptimizationStats {
             total_paths: self.all_paths.len(),
-            symbol_map_entries: self.orderbook_manager.symbol_to_id.len(),
+            symbol_map_entries: self.orderbook_manager.symbol_to_id.read().len(),
         }
     }
 

@@ -1,3 +1,4 @@
+use std::ops::DerefMut;
 // src/performance/mod.rs - Ultra-optimized version with ZERO cloning and Symbol ID system
 use std::sync::Arc;
 use std::time::{ Duration, Instant };
@@ -16,7 +17,9 @@ use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetectorState;
 use crate::models::triangular_path::TriangularPath;
-use dashmap::DashMap;
+
+use ahash::AHashMap;
+use parking_lot::RwLock;
 
 // Optimized performance measurement with reduced allocations
 #[derive(Debug, Clone)]
@@ -62,8 +65,8 @@ pub struct PerformanceTestState {
     pub orderbook_manager: Arc<OrderBookManager>,
 
     // Symbol mapping optimization
-    pub symbol_to_id: Arc<DashMap<String, u16>>, // Cache string -> ID mapping
-    pub id_to_symbol: Arc<DashMap<u16, String>>, // Cache ID -> string mapping
+    pub symbol_to_id: Arc<RwLock<AHashMap<String, u16>>>,
+    pub id_to_symbol: Arc<RwLock<AHashMap<u16, String>>>,
 
     // Performance optimizations
     pub measurement_counter: AtomicU64,
@@ -85,15 +88,15 @@ impl PerformanceTestState {
         );
 
         // Pre-build symbol mappings for ultra-fast lookup
-        let symbol_to_id = Arc::new(DashMap::with_capacity(2048));
-        let id_to_symbol = Arc::new(DashMap::with_capacity(2048));
+        let symbol_to_id = Arc::new(RwLock::new(AHashMap::with_capacity(2048)));
+        let id_to_symbol = Arc::new(RwLock::new(AHashMap::with_capacity(2048)));
 
         // Copy mappings from orderbook manager
-        for entry in orderbook_manager.symbol_to_id.iter() {
-            let symbol_str = entry.key().to_string();
-            let symbol_id = *entry.value();
-            symbol_to_id.insert(symbol_str.clone(), symbol_id);
-            id_to_symbol.insert(symbol_id, symbol_str);
+        for entry in orderbook_manager.symbol_to_id.read().iter() {
+            let symbol_str = entry.0.to_string();
+            let symbol_id = *entry.1;
+            symbol_to_id.write().insert(symbol_str.clone(), symbol_id);
+            id_to_symbol.write().insert(symbol_id, symbol_str);
         }
 
         // OPTIMIZATION: Remove Arc wrappers from paths
@@ -124,13 +127,19 @@ impl PerformanceTestState {
     /// ULTRA-FAST: Get symbol ID with O(1) lookup
     #[inline(always)]
     fn get_symbol_id(&self, symbol: &str) -> Option<u16> {
-        self.symbol_to_id.get(symbol).map(|id| *id)
+        self.symbol_to_id
+            .read()
+            .get(symbol)
+            .map(|id| *id)
     }
 
     /// ULTRA-FAST: Get symbol string with O(1) lookup
     #[inline(always)]
     fn get_symbol_string(&self, symbol_id: u16) -> Option<String> {
-        self.id_to_symbol.get(&symbol_id).map(|s| s.clone())
+        self.id_to_symbol
+            .read()
+            .get(&symbol_id)
+            .map(|s| s.clone())
     }
 
     // Optimized measurement recording with batching
@@ -484,7 +493,7 @@ pub fn run_performance_test(
 
     info!("Starting ultra-optimized performance test for {} seconds", duration_secs);
 
-    let mut client = BinanceSbeClient::new(api_key);
+    let client = BinanceSbeClient::new(api_key);
 
     // CRITICAL: Preload symbol mappings to avoid runtime string operations
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
@@ -493,7 +502,9 @@ pub fn run_performance_test(
     // Enable timing measurements for performance test
     client.enable_timing();
 
-    let detection_times: Arc<DashMap<u16, Duration>> = Arc::new(DashMap::with_capacity(2048)); // Use Symbol ID
+    let detection_times: Arc<RwLock<AHashMap<u16, Duration>>> = Arc::new(
+        RwLock::new(AHashMap::with_capacity(2048))
+    ); // Use Symbol ID
 
     // ULTRA-OPTIMIZED: Callback now uses Symbol ID and reference instead of Arc cloning
     let opportunity_callback = {
@@ -508,7 +519,7 @@ pub fn run_performance_test(
             let detection_time = detection_start.elapsed();
 
             // Use try_insert to avoid blocking - Symbol ID based
-            let _ = detection_times_clone.insert(symbol_id, detection_time);
+            let _ = detection_times_clone.write().insert(symbol_id, detection_time);
 
             // Reduced frequency opportunity detection
             let count = test_state_clone.measurement_counter.load(Ordering::Relaxed);
@@ -558,6 +569,7 @@ pub fn run_performance_test(
 
             // Fast lookup with Symbol ID
             let arbitrage_detection_time = detection_times_for_cb
+                .read()
                 .get(&symbol_id)
                 .map(|entry| *entry)
                 .unwrap_or_else(|| Duration::from_micros(25));
