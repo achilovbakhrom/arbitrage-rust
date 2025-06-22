@@ -109,4 +109,3 @@ crossbeam-channel = "0.5.15"
 
 string_cache = "0.8.9"
 ahash = "0.8.12"
-asm = "0.3.0"
