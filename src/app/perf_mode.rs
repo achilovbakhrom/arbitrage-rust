@@ -78,7 +78,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
     // CRITICAL OPTIMIZATION: Preload symbols and prepare mappings
-    let _symbol_mappings = prepare_symbol_mappings(&orderbook_manager, &unique_symbols);
+    prepare_symbol_mappings(&unique_symbols);
 
     // Create fallback executor for compatibility
     let fallback_executor = Arc::new(
@@ -140,7 +140,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        600, // 2 minutes
+        120, // 2 minutes
         output_file,
         triangular_paths // Pass the triangular paths
     );

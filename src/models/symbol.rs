@@ -13,14 +13,6 @@ pub struct Symbol {
     pub is_spot_trading_allowed: bool,
 }
 
-impl Symbol {
-    /// Returns the formatted symbol without allocating a new String
-    #[inline]
-    pub fn formatted_symbol(&self) -> String {
-        format!("{}/{}", self.base_asset, self.quote_asset)
-    }
-}
-
 impl fmt::Display for Symbol {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
