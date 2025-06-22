@@ -1,6 +1,7 @@
 // src/orderbook/manager.rs - Ultra-optimized version with ZERO cloning in hot path
 use std::sync::Arc;
 use std::sync::Mutex;
+use ahash::HashMapExt;
 use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
 use std::time::Duration;
@@ -10,7 +11,7 @@ use std::thread;
 use crate::models::level::Level;
 use crate::exchange::client::ExchangeClient;
 use crate::orderbook::orderbook::OrderBook;
-use crate::utils::types::FastStringMap;
+use crate::utils::types::FastHashMap;
 
 // Ultra-fast symbol ID mapping
 const MAX_SYMBOLS: usize = 2048;
@@ -22,7 +23,7 @@ pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &OrderBook) + Send + Syn
 pub struct OrderBookManager {
     pub books: Box<[Option<Arc<OrderBook>>; MAX_SYMBOLS]>,
 
-    pub symbol_to_id: RwLock<FastStringMap<Arc<str>, SymbolId>>,
+    pub symbol_to_id: RwLock<FastHashMap<Arc<str>, SymbolId>>,
     id_to_symbol: Box<[Option<Arc<str>>; MAX_SYMBOLS]>,
     next_symbol_id: std::sync::atomic::AtomicU16,
 
@@ -74,7 +75,7 @@ impl OrderBookManager {
 
         Self {
             books,
-            symbol_to_id: RwLock::new(FastStringMap::with_capacity(MAX_SYMBOLS)),
+            symbol_to_id: RwLock::new(FastHashMap::with_capacity(MAX_SYMBOLS)),
             id_to_symbol,
             next_symbol_id: std::sync::atomic::AtomicU16::new(0),
             default_depth,

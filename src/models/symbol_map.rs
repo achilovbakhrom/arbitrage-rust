@@ -1,15 +1,16 @@
 use std::{ collections::HashSet, sync::Arc };
 
-use crate::utils::types::FastStringMap;
+use crate::utils::types::FastHashMap;
 
 use super::{ symbol::Symbol, triangular_path::TriangularPath };
+use ahash::HashMapExt;
 use parking_lot::RwLock;
 
 #[derive(Debug)]
 pub struct SymbolMap {
-    symbols: RwLock<FastStringMap<Arc<str>, Symbol>>,
-    by_base: RwLock<FastStringMap<Arc<str>, Vec<Symbol>>>,
-    by_quote: RwLock<FastStringMap<Arc<str>, Vec<Symbol>>>,
+    symbols: RwLock<FastHashMap<Arc<str>, Symbol>>,
+    by_base: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
+    by_quote: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
     /// Pre-computed triangular paths
     triangular_paths: Vec<TriangularPath>,
 }
@@ -18,9 +19,9 @@ impl SymbolMap {
     #[inline]
     pub fn new() -> Self {
         Self {
-            symbols: RwLock::new(FastStringMap::with_capacity(1000)),
-            by_base: RwLock::new(FastStringMap::with_capacity(200)),
-            by_quote: RwLock::new(FastStringMap::with_capacity(50)),
+            symbols: RwLock::new(FastHashMap::with_capacity(1000)),
+            by_base: RwLock::new(FastHashMap::with_capacity(200)),
+            by_quote: RwLock::new(FastHashMap::with_capacity(50)),
             triangular_paths: Vec::with_capacity(5000), // Pre-allocate for paths
         }
     }
