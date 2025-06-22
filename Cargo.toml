@@ -106,3 +106,4 @@ crossbeam-channel = "0.5.15"
 
 string_cache = "0.8.9"
 ahash = "0.8.12"
+rustc-hash = "2.1.1"

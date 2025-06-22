@@ -125,11 +125,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     // Print optimization stats
     let opt_stats = orderbook_manager.get_optimization_stats();
     let detector_opt_stats = detector.get_optimization_stats();
-    info!(
-        "Optimization stats - OrderBook: {} books, {} interner entries",
-        opt_stats.total_books,
-        opt_stats.interner_string_entries
-    );
+    info!("Optimization stats - OrderBook: {} books", opt_stats.total_books);
     info!(
         "Optimization stats - Detector: {} paths, {} symbol map entries",
         detector_opt_stats.total_paths,
@@ -166,9 +162,8 @@ pub fn run_performance_test(config: Config) -> Result<()> {
             let final_opt_stats = orderbook_manager.get_optimization_stats();
 
             info!(
-                "Final optimization stats: {} books, {} interner entries, {} hash cache",
+                "Final optimization stats: {} books, {} hash cache",
                 final_opt_stats.total_books,
-                final_opt_stats.interner_string_entries,
                 final_opt_stats.symbol_hash_cache_size
             );
 

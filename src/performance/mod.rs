@@ -1,4 +1,3 @@
-use std::ops::DerefMut;
 // src/performance/mod.rs - Ultra-optimized version with ZERO cloning and Symbol ID system
 use std::sync::Arc;
 use std::time::{ Duration, Instant };
@@ -11,14 +10,15 @@ use std::process::Command;
 use std::thread;
 use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
 
+use ahash::HashMapExt;
 use tracing::{ info, warn };
 
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetectorState;
 use crate::models::triangular_path::TriangularPath;
+use crate::utils::types::{ FastIntMap, FastStringMap };
 
-use ahash::AHashMap;
 use parking_lot::RwLock;
 
 // Optimized performance measurement with reduced allocations
@@ -65,8 +65,8 @@ pub struct PerformanceTestState {
     pub orderbook_manager: Arc<OrderBookManager>,
 
     // Symbol mapping optimization
-    pub symbol_to_id: Arc<RwLock<AHashMap<String, u16>>>,
-    pub id_to_symbol: Arc<RwLock<AHashMap<u16, String>>>,
+    pub symbol_to_id: Arc<RwLock<FastStringMap<String, u16>>>,
+    pub id_to_symbol: Arc<RwLock<FastIntMap<u16, String>>>,
 
     // Performance optimizations
     pub measurement_counter: AtomicU64,
@@ -88,8 +88,8 @@ impl PerformanceTestState {
         );
 
         // Pre-build symbol mappings for ultra-fast lookup
-        let symbol_to_id = Arc::new(RwLock::new(AHashMap::with_capacity(2048)));
-        let id_to_symbol = Arc::new(RwLock::new(AHashMap::with_capacity(2048)));
+        let symbol_to_id = Arc::new(RwLock::new(FastStringMap::with_capacity(2048)));
+        let id_to_symbol = Arc::new(RwLock::new(FastIntMap::with_capacity(2048)));
 
         // Copy mappings from orderbook manager
         for entry in orderbook_manager.symbol_to_id.read().iter() {
@@ -502,8 +502,8 @@ pub fn run_performance_test(
     // Enable timing measurements for performance test
     client.enable_timing();
 
-    let detection_times: Arc<RwLock<AHashMap<u16, Duration>>> = Arc::new(
-        RwLock::new(AHashMap::with_capacity(2048))
+    let detection_times: Arc<RwLock<FastIntMap<u16, Duration>>> = Arc::new(
+        RwLock::new(FastIntMap::with_capacity(2048))
     ); // Use Symbol ID
 
     // ULTRA-OPTIMIZED: Callback now uses Symbol ID and reference instead of Arc cloning

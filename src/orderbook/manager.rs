@@ -4,14 +4,13 @@ use std::sync::Mutex;
 use tracing::{ debug, error, info, warn };
 use anyhow::{ Result, Context };
 use std::time::Duration;
-use ahash::AHashMap;
 use parking_lot::RwLock;
 use std::thread;
 
 use crate::models::level::Level;
 use crate::exchange::client::ExchangeClient;
 use crate::orderbook::orderbook::OrderBook;
-use crate::utils::string_interner::SymbolInterner;
+use crate::utils::types::FastStringMap;
 
 // Ultra-fast symbol ID mapping
 const MAX_SYMBOLS: usize = 2048;
@@ -23,11 +22,9 @@ pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &OrderBook) + Send + Syn
 pub struct OrderBookManager {
     pub books: Box<[Option<Arc<OrderBook>>; MAX_SYMBOLS]>,
 
-    pub symbol_to_id: RwLock<AHashMap<Arc<str>, SymbolId>>,
+    pub symbol_to_id: RwLock<FastStringMap<Arc<str>, SymbolId>>,
     id_to_symbol: Box<[Option<Arc<str>>; MAX_SYMBOLS]>,
     next_symbol_id: std::sync::atomic::AtomicU16,
-
-    symbol_interner: Arc<SymbolInterner>,
 
     default_depth: usize,
 
@@ -71,18 +68,15 @@ impl OrderBookManager {
             }
         };
 
-        let symbol_interner = Arc::new(SymbolInterner::new());
-
         let books = Box::new([const { None }; MAX_SYMBOLS]);
         let id_to_symbol = Box::new([const { None }; MAX_SYMBOLS]);
         let last_recovery = Box::new([const { std::sync::atomic::AtomicU64::new(0) }; MAX_SYMBOLS]);
 
         Self {
             books,
-            symbol_to_id: RwLock::new(AHashMap::with_capacity(MAX_SYMBOLS)),
+            symbol_to_id: RwLock::new(FastStringMap::with_capacity(MAX_SYMBOLS)),
             id_to_symbol,
             next_symbol_id: std::sync::atomic::AtomicU16::new(0),
-            symbol_interner,
             default_depth,
             exchange_client,
             recovery_mutex: Arc::new(Mutex::new(())),
@@ -94,20 +88,10 @@ impl OrderBookManager {
 
     /// Preload symbols into the interner and assign IDs - CRITICAL for performance
     pub fn preload_symbols(&self, symbols: &[String]) {
-        info!("Preloading {} symbols with ID assignment", symbols.len());
-
         for symbol in symbols {
-            let interned = self.symbol_interner.intern(symbol);
-            self.get_or_assign_symbol_id(&interned); // Pre-assign IDs
+            let arc_str: Arc<str> = symbol.as_str().into();
+            self.get_or_assign_symbol_id(&arc_str);
         }
-
-        let (hash_cache, string_cache) = self.symbol_interner.stats();
-        info!(
-            "Symbol preloading complete: {} hash entries, {} string entries, {} IDs assigned",
-            hash_cache,
-            string_cache,
-            self.next_symbol_id.load(std::sync::atomic::Ordering::Relaxed)
-        );
     }
 
     /// Get symbol mappings for SBE client preloading
@@ -136,16 +120,6 @@ impl OrderBookManager {
         }
 
         id
-    }
-
-    #[inline(always)]
-    pub fn get_symbol_id(&self, symbol_str: &str) -> Option<SymbolId> {
-        // Try direct lookup first (should hit after preloading)
-        let interned = self.symbol_interner.intern(symbol_str);
-        self.symbol_to_id
-            .read()
-            .get(&interned)
-            .map(|id| *id)
     }
 
     #[inline]
@@ -448,12 +422,10 @@ impl OrderBookManager {
     }
 
     pub fn get_optimization_stats(&self) -> OptimizationStats {
-        let (_, interner_strings) = self.symbol_interner.stats();
         let assigned_symbols = self.next_symbol_id.load(std::sync::atomic::Ordering::Relaxed);
 
         OptimizationStats {
             total_books: assigned_symbols as usize,
-            interner_string_entries: interner_strings,
             symbol_hash_cache_size: self.symbol_to_id.read().len(),
         }
     }
@@ -462,7 +434,6 @@ impl OrderBookManager {
 #[derive(Debug)]
 pub struct OptimizationStats {
     pub total_books: usize,
-    pub interner_string_entries: usize,
     pub symbol_hash_cache_size: usize,
 }
 
@@ -483,7 +454,6 @@ impl Clone for OrderBookManager {
             next_symbol_id: std::sync::atomic::AtomicU16::new(
                 self.next_symbol_id.load(std::sync::atomic::Ordering::Relaxed)
             ),
-            symbol_interner: self.symbol_interner.clone(),
             default_depth: self.default_depth,
             exchange_client: self.exchange_client.clone(),
             recovery_mutex: self.recovery_mutex.clone(),

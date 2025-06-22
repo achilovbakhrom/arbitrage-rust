@@ -10,7 +10,6 @@ use crate::orderbook::manager::OrderBookManager;
 use crate::orderbook::orderbook::OrderBook;
 use crate::executor::executor::ArbitrageExecutor;
 use crate::executor::fix_executor::{ FixArbitrageExecutor };
-use crate::utils::string_interner::SymbolInterner;
 
 // Ultra-compact opportunity for immediate execution
 #[repr(C, packed)]
@@ -108,9 +107,6 @@ pub struct ArbitrageDetectorState {
     // CRITICAL OPTIMIZATION: Store paths directly without Arc wrapper
     pub all_paths: Box<[TriangularPath]>, // Box<[T]> instead of Vec<Arc<T>>
 
-    // String interner for symbol deduplication
-    symbol_interner: Arc<SymbolInterner>,
-
     // Hot path data - pre-computed and cache-aligned
     path_data: Box<[PathData]>, // Heap allocated, cache-aligned array
     symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>,
@@ -145,27 +141,11 @@ impl ArbitrageDetectorState {
         fallback_executor: Arc<ArbitrageExecutor>,
         fix_executor: Option<Arc<FixArbitrageExecutor>>
     ) -> Arc<Self> {
-        let symbol_interner = Arc::new(SymbolInterner::new());
-
         // OPTIMIZATION: Convert Arc<TriangularPath> to TriangularPath (remove Arc wrapper)
         let unwrapped_paths: Vec<TriangularPath> = paths
             .iter()
             .map(|arc_path| (**arc_path).clone()) // Clone the content, not the Arc
             .collect();
-
-        // Preload all symbols from paths and get their IDs
-        let all_symbols: Vec<String> = unwrapped_paths
-            .iter()
-            .flat_map(|path| {
-                [
-                    path.first_symbol.to_string(),
-                    path.second_symbol.to_string(),
-                    path.third_symbol.to_string(),
-                ]
-            })
-            .collect();
-
-        symbol_interner.preload(&all_symbols);
 
         // Pre-compute all path data for zero-allocation hot path
         let mut path_data = Vec::with_capacity(unwrapped_paths.len());
@@ -183,12 +163,8 @@ impl ArbitrageDetectorState {
         );
 
         // Helper function to get symbol ID from orderbook manager
-        let get_symbol_id = |symbol_str: &str| -> Option<u16> {
-            let interned = symbol_interner.intern(symbol_str);
-            orderbook_manager.symbol_to_id
-                .read()
-                .get(&interned)
-                .map(|id| *id)
+        let get_symbol_id = |symbol_arc: &Arc<str>| -> Option<u16> {
+            orderbook_manager.symbol_to_id.read().get(symbol_arc).copied()
         };
 
         for (i, path) in unwrapped_paths.iter().enumerate() {
@@ -236,7 +212,6 @@ impl ArbitrageDetectorState {
         let detector_state = Arc::new(ArbitrageDetectorState {
             orderbook_manager: orderbook_manager.clone(),
             all_paths: unwrapped_paths.into_boxed_slice(), // ZERO Arc wrappers
-            symbol_interner,
             path_data: path_data.into_boxed_slice(),
             symbol_map,
             fallback_executor,
@@ -557,7 +532,6 @@ impl Clone for ArbitrageDetectorState {
         Self {
             orderbook_manager: self.orderbook_manager.clone(),
             all_paths: self.all_paths.clone(),
-            symbol_interner: self.symbol_interner.clone(),
             path_data: self.path_data.clone(),
             symbol_map: self.symbol_map.clone(),
             fallback_executor: self.fallback_executor.clone(),

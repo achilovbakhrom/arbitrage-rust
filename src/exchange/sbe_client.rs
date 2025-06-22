@@ -1,6 +1,6 @@
 // src/exchange/sbe_client.rs - Ultra-optimized version with zero cloning in hot path
 
-use ahash::AHashMap;
+use ahash::HashMapExt;
 use tungstenite::{
     http::Request,
     protocol::Message,
@@ -15,6 +15,8 @@ use std::{ net::TcpStream, sync::Arc, time::Instant };
 use std::cell::UnsafeCell;
 use parking_lot::RwLock;
 use std::sync::atomic::{ AtomicBool, Ordering };
+
+use crate::utils::types::FastIntMap;
 
 const DEPTH: usize = 5;
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
@@ -49,7 +51,7 @@ pub struct BinanceSbeClient<F>
     buffers: BufferCell,
 
     // CRITICAL OPTIMIZATION: Direct symbol_bytes -> symbol_id mapping (no string operations)
-    symbol_bytes_to_id: Arc<RwLock<AHashMap<Box<[u8]>, u16>>>,
+    symbol_bytes_to_id: Arc<RwLock<FastIntMap<Box<[u8]>, u16>>>,
 
     // Performance optimization: only measure timing when enabled
     timing_enabled: AtomicBool,
@@ -68,7 +70,7 @@ impl<F> BinanceSbeClient<F>
             endpoint: BINANCE_SBE_URL.into(),
             depth_callback: RwLock::new(None),
             buffers: BufferCell::new(),
-            symbol_bytes_to_id: Arc::new(RwLock::new(AHashMap::with_capacity(1000))),
+            symbol_bytes_to_id: Arc::new(RwLock::new(FastIntMap::with_capacity(1000))),
             timing_enabled: AtomicBool::new(false), // Disabled by default for production
         }
     }
