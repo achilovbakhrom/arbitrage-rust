@@ -1,5 +1,6 @@
 // src/exchange/sbe_client.rs - Ultra-optimized version with zero cloning in hot path
 
+use ahash::HashMapExt;
 use tungstenite::{
     http::Request,
     protocol::Message,
@@ -11,10 +12,11 @@ use tungstenite::{
 use anyhow::{ Result, Context };
 use tracing::{ debug, error, info };
 use std::{ net::TcpStream, sync::Arc, time::Instant };
-use dashmap::DashMap;
 use std::cell::UnsafeCell;
 use parking_lot::RwLock;
 use std::sync::atomic::{ AtomicBool, Ordering };
+
+use crate::utils::types::FastHashMap;
 
 const DEPTH: usize = 5;
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
@@ -49,7 +51,7 @@ pub struct BinanceSbeClient<F>
     buffers: BufferCell,
 
     // CRITICAL OPTIMIZATION: Direct symbol_bytes -> symbol_id mapping (no string operations)
-    symbol_bytes_to_id: Arc<DashMap<Box<[u8]>, u16>>,
+    symbol_bytes_to_id: Arc<RwLock<FastHashMap<Box<[u8]>, u16>>>,
 
     // Performance optimization: only measure timing when enabled
     timing_enabled: AtomicBool,
@@ -68,7 +70,7 @@ impl<F> BinanceSbeClient<F>
             endpoint: BINANCE_SBE_URL.into(),
             depth_callback: RwLock::new(None),
             buffers: BufferCell::new(),
-            symbol_bytes_to_id: Arc::new(DashMap::with_capacity(1000)),
+            symbol_bytes_to_id: Arc::new(RwLock::new(FastHashMap::with_capacity(1000))),
             timing_enabled: AtomicBool::new(false), // Disabled by default for production
         }
     }
@@ -77,7 +79,7 @@ impl<F> BinanceSbeClient<F>
     pub fn preload_symbol_mappings(&self, symbols: &[(String, u16)]) {
         for (symbol_str, symbol_id) in symbols {
             let symbol_bytes = symbol_str.as_bytes().to_vec().into_boxed_slice();
-            self.symbol_bytes_to_id.insert(symbol_bytes, *symbol_id);
+            self.symbol_bytes_to_id.write().insert(symbol_bytes, *symbol_id);
         }
         info!("Preloaded {} symbol ID mappings for zero-allocation lookup", symbols.len());
     }
@@ -388,6 +390,9 @@ impl<F> BinanceSbeClient<F>
         let trimmed = &symbol_bytes[..trimmed_end];
 
         // Direct bytes lookup - NO string creation, NO allocation
-        self.symbol_bytes_to_id.get(trimmed).map(|id| *id)
+        self.symbol_bytes_to_id
+            .read()
+            .get(trimmed)
+            .map(|id| *id)
     }
 }

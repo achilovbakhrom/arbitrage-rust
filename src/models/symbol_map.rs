@@ -1,12 +1,16 @@
 use std::{ collections::HashSet, sync::Arc };
 
+use crate::utils::types::FastHashMap;
+
 use super::{ symbol::Symbol, triangular_path::TriangularPath };
-use dashmap::DashMap;
-#[derive(Debug, Clone)]
+use ahash::HashMapExt;
+use parking_lot::RwLock;
+
+#[derive(Debug)]
 pub struct SymbolMap {
-    symbols: DashMap<Arc<str>, Symbol>,
-    by_base: DashMap<Arc<str>, Vec<Symbol>>,
-    by_quote: DashMap<Arc<str>, Vec<Symbol>>,
+    symbols: RwLock<FastHashMap<Arc<str>, Symbol>>,
+    by_base: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
+    by_quote: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
     /// Pre-computed triangular paths
     triangular_paths: Vec<TriangularPath>,
 }
@@ -15,9 +19,9 @@ impl SymbolMap {
     #[inline]
     pub fn new() -> Self {
         Self {
-            symbols: DashMap::with_capacity(1000), // Pre-allocate for typical exchange size
-            by_base: DashMap::with_capacity(200),
-            by_quote: DashMap::with_capacity(50),
+            symbols: RwLock::new(FastHashMap::with_capacity(1000)),
+            by_base: RwLock::new(FastHashMap::with_capacity(200)),
+            by_quote: RwLock::new(FastHashMap::with_capacity(50)),
             triangular_paths: Vec::with_capacity(5000), // Pre-allocate for paths
         }
     }
@@ -38,43 +42,34 @@ impl SymbolMap {
         let quote = symbol.quote_asset.clone();
         let symbol_str = symbol.symbol.clone();
 
-        // Add to base asset map
         self.by_base
+            .write()
             .entry(base)
             .or_insert_with(|| Vec::with_capacity(10))
             .push(symbol.clone());
 
-        // Add to quote asset map
         self.by_quote
+            .write()
             .entry(quote)
             .or_insert_with(|| Vec::with_capacity(10))
             .push(symbol.clone());
 
-        // Add to symbols map
-        self.symbols.insert(symbol_str, symbol);
+        self.symbols.write().insert(symbol_str, symbol);
     }
 
     #[inline]
     pub fn get(&self, symbol: &str) -> Option<Symbol> {
-        // DashMap get returns a reference, so we need to clone
-        self.symbols.get(symbol).map(|entry| entry.clone())
+        self.symbols.read().get(symbol).cloned()
     }
 
     #[inline]
     pub fn get_by_base(&self, base_asset: &str) -> Vec<Symbol> {
-        self.by_base
-            .get(base_asset)
-            .map(|entry| entry.clone())
-            .unwrap_or_else(Vec::new)
+        self.by_base.read().get(base_asset).cloned().unwrap_or_default()
     }
 
     #[inline]
     pub fn get_by_quote(&self, quote_asset: &str) -> Vec<Symbol> {
-        // DashMap get, converting to Vec since we can't return a reference to internal data
-        self.by_quote
-            .get(quote_asset)
-            .map(|entry| entry.clone())
-            .unwrap_or_else(Vec::new)
+        self.by_quote.read().get(quote_asset).cloned().unwrap_or_default()
     }
 
     /// Find triangular paths that start and end with a specific asset
@@ -100,9 +95,9 @@ impl SymbolMap {
 
         // Track all possible paths before filtering
         let mut all_paths = Vec::with_capacity(5000);
-
+        let by_quote_borrowed = self.by_quote.read();
         // Find all paths starting with base_asset (like USDT)
-        let base_symbols = match self.by_quote.get(base_asset) {
+        let base_symbols = match by_quote_borrowed.get(base_asset) {
             Some(symbols) => symbols,
             None => {
                 tracing::warn!("Base asset {} not found as quote in any symbol", base_asset);
@@ -254,8 +249,9 @@ impl SymbolMap {
     #[inline]
     pub fn get_all_symbols(&self) -> Vec<Symbol> {
         self.symbols
+            .read()
             .iter()
-            .map(|entry| entry.value().clone())
+            .map(|entry| entry.1.clone())
             .collect()
     }
 
