@@ -1,4 +1,401 @@
-// src/exchange/sbe_client.rs - Ultra-optimized version with zero cloning in hot path
+// // src/exchange/sbe_client.rs - Ultra-optimized version with zero cloning in hot path
+
+// use ahash::HashMapExt;
+// use tungstenite::{
+//     http::Request,
+//     protocol::Message,
+//     handshake::client::generate_key,
+//     connect,
+//     WebSocket,
+//     stream::MaybeTlsStream,
+// };
+// use anyhow::{ Result, Context };
+// use tracing::{ debug, error, info };
+// use std::{ net::TcpStream, sync::Arc, time::Instant };
+// use std::cell::UnsafeCell;
+// use parking_lot::RwLock;
+// use std::sync::atomic::{ AtomicBool, Ordering };
+
+// use crate::utils::types::FastHashMap;
+
+// const DEPTH: usize = 5;
+// const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
+
+// // Thread-safe buffer wrapper
+// struct BufferCell {
+//     bids: UnsafeCell<[(f64, f64); DEPTH]>,
+//     asks: UnsafeCell<[(f64, f64); DEPTH]>,
+// }
+
+// unsafe impl Sync for BufferCell {}
+// unsafe impl Send for BufferCell {}
+
+// impl BufferCell {
+//     fn new() -> Self {
+//         Self {
+//             bids: UnsafeCell::new([(0.0, 0.0); DEPTH]),
+//             asks: UnsafeCell::new([(0.0, 0.0); DEPTH]),
+//         }
+//     }
+// }
+
+// pub struct BinanceSbeClient<F>
+//     where
+//         F: Fn(u16, &[(f64, f64); DEPTH], &[(f64, f64); DEPTH], u64, u64, u64) +
+//             Send +
+//             Sync +
+//             'static {
+//     api_key: Arc<str>,
+//     endpoint: String,
+//     depth_callback: RwLock<Option<F>>,
+//     buffers: BufferCell,
+
+//     // CRITICAL OPTIMIZATION: Direct symbol_bytes -> symbol_id mapping (no string operations)
+//     symbol_bytes_to_id: Arc<RwLock<FastHashMap<Box<[u8]>, u16>>>,
+
+//     // Performance optimization: only measure timing when enabled
+//     timing_enabled: AtomicBool,
+// }
+
+// impl<F> BinanceSbeClient<F>
+//     where
+//         F: Fn(u16, &[(f64, f64); DEPTH], &[(f64, f64); DEPTH], u64, u64, u64) +
+//             Send +
+//             Sync +
+//             'static
+// {
+//     pub fn new(api_key: String) -> Self {
+//         Self {
+//             api_key: api_key.into(),
+//             endpoint: BINANCE_SBE_URL.into(),
+//             depth_callback: RwLock::new(None),
+//             buffers: BufferCell::new(),
+//             symbol_bytes_to_id: Arc::new(RwLock::new(FastHashMap::with_capacity(1000))),
+//             timing_enabled: AtomicBool::new(false), // Disabled by default for production
+//         }
+//     }
+
+//     /// CRITICAL: Preload symbol mappings for zero-allocation lookup
+//     pub fn preload_symbol_mappings(&self, symbols: &[(String, u16)]) {
+//         for (symbol_str, symbol_id) in symbols {
+//             let symbol_bytes = symbol_str.as_bytes().to_vec().into_boxed_slice();
+//             self.symbol_bytes_to_id.write().insert(symbol_bytes, *symbol_id);
+//         }
+//         info!("Preloaded {} symbol ID mappings for zero-allocation lookup", symbols.len());
+//     }
+
+//     /// Enable timing measurements (only for performance tests)
+//     pub fn enable_timing(&self) {
+//         self.timing_enabled.store(true, Ordering::Relaxed);
+//     }
+
+//     /// Disable timing measurements (default, for production)
+//     pub fn disable_timing(&self) {
+//         self.timing_enabled.store(false, Ordering::Relaxed);
+//     }
+
+//     pub fn connect(&self) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
+//         info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
+//         let request = Request::builder()
+//             .uri(self.endpoint.as_str())
+//             .header("X-MBX-APIKEY", self.api_key.as_ref())
+//             .header("Sec-WebSocket-Key", generate_key())
+//             .header("Sec-WebSocket-Version", "13")
+//             .header("Host", "stream-sbe.binance.com")
+//             .header("Connection", "Upgrade")
+//             .header("Upgrade", "websocket")
+//             .body(())
+//             .context("Failed to build request")?;
+
+//         let (ws_stream, response) = connect(request).context(
+//             "Failed to connect to Binance SBE WebSocket"
+//         )?;
+
+//         info!("Connected to Binance SBE WebSocket with response: {:?}", response);
+
+//         Ok(ws_stream)
+//     }
+
+//     pub fn subscribe(
+//         &self,
+//         ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+//         symbols: &[String],
+//         channels: &[String]
+//     ) -> Result<()> {
+//         let params = symbols
+//             .iter()
+//             .flat_map(|symbol| {
+//                 channels.iter().map(move |channel| format!("{}@{}", symbol.to_lowercase(), channel))
+//             })
+//             .collect::<Vec<String>>();
+
+//         let subscription =
+//             serde_json::json!({
+//             "method": "SUBSCRIBE",
+//             "params": params,
+//             "id": 1
+//         }).to_string();
+
+//         debug!("Subscription request: {}", &subscription);
+
+//         let message = Message::Text(subscription.into());
+//         ws_stream.send(message)?;
+
+//         Ok(())
+//     }
+
+//     // Optimized message processing with conditional timing
+//     pub fn process_messages_with_shutdown(
+//         &self,
+//         ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+//         shutdown: &std::sync::atomic::AtomicBool
+//     ) -> Result<()> {
+//         use std::sync::atomic::Ordering;
+
+//         // Check if timing is enabled once, outside the loop
+//         let timing_enabled = self.timing_enabled.load(Ordering::Relaxed);
+
+//         loop {
+//             // Check for shutdown signal
+//             if shutdown.load(Ordering::Relaxed) {
+//                 info!("Shutdown signal received, closing WebSocket");
+//                 let _ = ws_stream.close(None);
+//                 return Ok(());
+//             }
+
+//             // Conditional timing measurement - zero overhead when disabled
+//             let (message_result, receive_time_us) = if timing_enabled {
+//                 let start = Instant::now();
+//                 let result = ws_stream.read();
+//                 let elapsed = start.elapsed().as_micros() as u64;
+//                 (result, elapsed)
+//             } else {
+//                 // Fast path - no timing overhead
+//                 (ws_stream.read(), 0)
+//             };
+
+//             match message_result {
+//                 Ok(message) => {
+//                     match message {
+//                         Message::Binary(data) => {
+//                             if
+//                                 let Err(e) = self.handle_binary_message_optimized(
+//                                     &data,
+//                                     receive_time_us
+//                                 )
+//                             {
+//                                 debug!("Error handling binary message: {}", e);
+//                             }
+//                         }
+//                         Message::Text(text) => {
+//                             debug!("Received text message: {}", text);
+//                         }
+//                         Message::Ping(data) => {
+//                             debug!("Received ping, responding with pong");
+//                             if let Err(e) = ws_stream.send(Message::Pong(data)) {
+//                                 error!("Failed to send pong: {}", e);
+//                                 return Err(anyhow::anyhow!("WebSocket connection error: {}", e));
+//                             }
+//                         }
+//                         Message::Pong(data) => {
+//                             debug!("Received pong response: {:?}", data);
+//                         }
+//                         Message::Close(frame) => {
+//                             info!("WebSocket closed: {:?}", frame);
+//                             return Ok(());
+//                         }
+//                         Message::Frame(_) => {
+//                             debug!("Received raw frame");
+//                         }
+//                     }
+//                 }
+//                 Err(e) => {
+//                     error!("WebSocket message error: {}", e);
+//                     return Err(anyhow::anyhow!("WebSocket error: {}", e));
+//                 }
+//             }
+//         }
+//     }
+
+//     #[inline]
+//     pub fn set_depth_callback(&self, callback: F) {
+//         let mut cb = self.depth_callback.write();
+//         *cb = Some(callback);
+//     }
+
+//     #[inline(always)]
+//     fn handle_binary_message_optimized(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
+//         if data.len() < 32 {
+//             return Ok(());
+//         }
+
+//         let template_id = unsafe {
+//             u16::from_le_bytes([*data.get_unchecked(2), *data.get_unchecked(3)])
+//         };
+
+//         if template_id == 10003 {
+//             self.parse_depth_message_ultra_fast(data, receive_time_us)
+//         } else {
+//             Ok(())
+//         }
+//     }
+
+//     #[inline(always)]
+//     fn parse_depth_message_ultra_fast(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
+//         let mut offset = 8; // Skip header
+
+//         // Unsafe optimized read functions - no bounds checking for speed
+//         fn read_i64_fast(data: &[u8], offset: usize) -> i64 {
+//             unsafe {
+//                 let ptr = data.as_ptr().add(offset) as *const i64;
+//                 i64::from_le(ptr.read_unaligned())
+//             }
+//         }
+
+//         fn read_u16_fast(data: &[u8], offset: usize) -> u16 {
+//             unsafe {
+//                 let ptr = data.as_ptr().add(offset) as *const u16;
+//                 u16::from_le(ptr.read_unaligned())
+//             }
+//         }
+
+//         fn read_i8_fast(data: &[u8], offset: usize) -> i8 {
+//             unsafe { *data.get_unchecked(offset) as i8 }
+//         }
+
+//         // Read fixed fields with unsafe optimizations
+//         let _event_time = read_i64_fast(data, offset);
+//         offset += 8;
+//         let first_update_id = read_i64_fast(data, offset) as u64;
+//         offset += 8;
+//         let last_update_id = read_i64_fast(data, offset) as u64;
+//         offset += 8;
+
+//         let price_exp = read_i8_fast(data, offset);
+//         offset += 1;
+//         let qty_exp = read_i8_fast(data, offset);
+//         offset += 1;
+
+//         // Pre-calculate multipliers
+//         let price_mult = (10f64).powi(price_exp as i32);
+//         let qty_mult = (10f64).powi(qty_exp as i32);
+
+//         // Read bid count
+//         offset += 2; // Skip block length
+//         let bid_count = read_u16_fast(data, offset) as usize;
+//         offset += 2;
+
+//         // Get mutable access to buffers through UnsafeCell
+//         let (bid_buffer, ask_buffer) = unsafe {
+//             let bids = &mut *self.buffers.bids.get();
+//             let asks = &mut *self.buffers.asks.get();
+//             (bids, asks)
+//         };
+
+//         // Optimized buffer clearing - use ptr::write_bytes for bulk zero
+//         unsafe {
+//             std::ptr::write_bytes(bid_buffer.as_mut_ptr(), 0, DEPTH);
+//             std::ptr::write_bytes(ask_buffer.as_mut_ptr(), 0, DEPTH);
+//         }
+
+//         // Optimized bid parsing - unrolled for better performance
+//         let bid_limit = bid_count.min(DEPTH);
+//         for i in 0..bid_limit {
+//             let price_raw = read_i64_fast(data, offset) as f64;
+//             offset += 8;
+//             let qty_raw = read_i64_fast(data, offset) as f64;
+//             offset += 8;
+
+//             bid_buffer[i] = (price_raw * price_mult, qty_raw * qty_mult);
+//         }
+
+//         // Skip remaining bids if any
+//         if bid_count > DEPTH {
+//             offset += (bid_count - DEPTH) * 16;
+//         }
+
+//         // Read ask count
+//         offset += 2; // Skip block length
+//         let ask_count = read_u16_fast(data, offset) as usize;
+//         offset += 2;
+
+//         // Optimized ask parsing
+//         let ask_limit = ask_count.min(DEPTH);
+//         for i in 0..ask_limit {
+//             let price_raw = read_i64_fast(data, offset) as f64;
+//             offset += 8;
+//             let qty_raw = read_i64_fast(data, offset) as f64;
+//             offset += 8;
+
+//             ask_buffer[i] = (price_raw * price_mult, qty_raw * qty_mult);
+//         }
+
+//         // Skip remaining asks if any
+//         if ask_count > DEPTH {
+//             offset += (ask_count - DEPTH) * 16;
+//         }
+
+//         // Extract symbol length with bounds check
+//         if offset >= data.len() {
+//             return Err(anyhow::anyhow!("Invalid symbol offset"));
+//         }
+
+//         let symbol_len = data[offset] as usize;
+//         offset += 1;
+
+//         // Bounds check for symbol
+//         if offset + symbol_len > data.len() {
+//             return Err(anyhow::anyhow!("Invalid symbol length"));
+//         }
+
+//         // Get symbol slice
+//         let symbol_bytes = &data[offset..offset + symbol_len];
+
+//         // CRITICAL OPTIMIZATION: Direct symbol_id lookup without string operations
+//         let symbol_id = self.resolve_symbol_id_ultra_fast(symbol_bytes);
+
+//         if let Some(symbol_id) = symbol_id {
+//             // ULTRA-FAST callback execution with Symbol ID - ZERO string operations, ZERO cloning
+//             let cb_guard = self.depth_callback.read();
+//             if let Some(cb) = cb_guard.as_ref() {
+//                 // Pass slices by reference - NO cloning of arrays
+//                 cb(
+//                     symbol_id,
+//                     bid_buffer,
+//                     ask_buffer,
+//                     first_update_id,
+//                     last_update_id,
+//                     receive_time_us
+//                 );
+//             }
+//         }
+
+//         Ok(())
+//     }
+
+//     /// ULTRA-FAST: Resolve symbol ID without any string operations or allocations
+//     #[inline(always)]
+//     fn resolve_symbol_id_ultra_fast(&self, symbol_bytes: &[u8]) -> Option<u16> {
+//         // Fast path: remove trailing nulls without allocation
+//         let trimmed_end = symbol_bytes
+//             .iter()
+//             .rposition(|&b| b != 0)
+//             .map(|i| i + 1)
+//             .unwrap_or(0);
+
+//         if trimmed_end == 0 {
+//             return None;
+//         }
+
+//         let trimmed = &symbol_bytes[..trimmed_end];
+
+//         // Direct bytes lookup - NO string creation, NO allocation
+//         self.symbol_bytes_to_id
+//             .read()
+//             .get(trimmed)
+//             .map(|id| *id)
+//     }
+// }
 
 use ahash::HashMapExt;
 use tungstenite::{
@@ -16,12 +413,11 @@ use std::cell::UnsafeCell;
 use parking_lot::RwLock;
 use std::sync::atomic::{ AtomicBool, Ordering };
 
-use crate::utils::types::FastHashMap;
+use crate::utils::symbol_interner::{ global, SymbolId };
 
 const DEPTH: usize = 5;
 const BINANCE_SBE_URL: &str = "wss://stream-sbe.binance.com:9443/ws";
 
-// Thread-safe buffer wrapper
 struct BufferCell {
     bids: UnsafeCell<[(f64, f64); DEPTH]>,
     asks: UnsafeCell<[(f64, f64); DEPTH]>,
@@ -49,11 +445,6 @@ pub struct BinanceSbeClient<F>
     endpoint: String,
     depth_callback: RwLock<Option<F>>,
     buffers: BufferCell,
-
-    // CRITICAL OPTIMIZATION: Direct symbol_bytes -> symbol_id mapping (no string operations)
-    symbol_bytes_to_id: Arc<RwLock<FastHashMap<Box<[u8]>, u16>>>,
-
-    // Performance optimization: only measure timing when enabled
     timing_enabled: AtomicBool,
 }
 
@@ -70,26 +461,24 @@ impl<F> BinanceSbeClient<F>
             endpoint: BINANCE_SBE_URL.into(),
             depth_callback: RwLock::new(None),
             buffers: BufferCell::new(),
-            symbol_bytes_to_id: Arc::new(RwLock::new(FastHashMap::with_capacity(1000))),
-            timing_enabled: AtomicBool::new(false), // Disabled by default for production
+            timing_enabled: AtomicBool::new(false),
         }
     }
 
-    /// CRITICAL: Preload symbol mappings for zero-allocation lookup
     pub fn preload_symbol_mappings(&self, symbols: &[(String, u16)]) {
-        for (symbol_str, symbol_id) in symbols {
-            let symbol_bytes = symbol_str.as_bytes().to_vec().into_boxed_slice();
-            self.symbol_bytes_to_id.write().insert(symbol_bytes, *symbol_id);
-        }
-        info!("Preloaded {} symbol ID mappings for zero-allocation lookup", symbols.len());
+        global::intern_batch(
+            &symbols
+                .iter()
+                .map(|(s, _)| s.clone())
+                .collect::<Vec<_>>()
+        );
+        info!("Using global symbol interner for {} symbols", symbols.len());
     }
 
-    /// Enable timing measurements (only for performance tests)
     pub fn enable_timing(&self) {
         self.timing_enabled.store(true, Ordering::Relaxed);
     }
 
-    /// Disable timing measurements (default, for production)
     pub fn disable_timing(&self) {
         self.timing_enabled.store(false, Ordering::Relaxed);
     }
@@ -144,7 +533,6 @@ impl<F> BinanceSbeClient<F>
         Ok(())
     }
 
-    // Optimized message processing with conditional timing
     pub fn process_messages_with_shutdown(
         &self,
         ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
@@ -152,25 +540,21 @@ impl<F> BinanceSbeClient<F>
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
 
-        // Check if timing is enabled once, outside the loop
         let timing_enabled = self.timing_enabled.load(Ordering::Relaxed);
 
         loop {
-            // Check for shutdown signal
             if shutdown.load(Ordering::Relaxed) {
                 info!("Shutdown signal received, closing WebSocket");
                 let _ = ws_stream.close(None);
                 return Ok(());
             }
 
-            // Conditional timing measurement - zero overhead when disabled
             let (message_result, receive_time_us) = if timing_enabled {
                 let start = Instant::now();
                 let result = ws_stream.read();
                 let elapsed = start.elapsed().as_micros() as u64;
                 (result, elapsed)
             } else {
-                // Fast path - no timing overhead
                 (ws_stream.read(), 0)
             };
 
@@ -242,9 +626,8 @@ impl<F> BinanceSbeClient<F>
 
     #[inline(always)]
     fn parse_depth_message_ultra_fast(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
-        let mut offset = 8; // Skip header
+        let mut offset = 8;
 
-        // Unsafe optimized read functions - no bounds checking for speed
         fn read_i64_fast(data: &[u8], offset: usize) -> i64 {
             unsafe {
                 let ptr = data.as_ptr().add(offset) as *const i64;
@@ -263,7 +646,6 @@ impl<F> BinanceSbeClient<F>
             unsafe { *data.get_unchecked(offset) as i8 }
         }
 
-        // Read fixed fields with unsafe optimizations
         let _event_time = read_i64_fast(data, offset);
         offset += 8;
         let first_update_id = read_i64_fast(data, offset) as u64;
@@ -276,29 +658,24 @@ impl<F> BinanceSbeClient<F>
         let qty_exp = read_i8_fast(data, offset);
         offset += 1;
 
-        // Pre-calculate multipliers
         let price_mult = (10f64).powi(price_exp as i32);
         let qty_mult = (10f64).powi(qty_exp as i32);
 
-        // Read bid count
-        offset += 2; // Skip block length
+        offset += 2;
         let bid_count = read_u16_fast(data, offset) as usize;
         offset += 2;
 
-        // Get mutable access to buffers through UnsafeCell
         let (bid_buffer, ask_buffer) = unsafe {
             let bids = &mut *self.buffers.bids.get();
             let asks = &mut *self.buffers.asks.get();
             (bids, asks)
         };
 
-        // Optimized buffer clearing - use ptr::write_bytes for bulk zero
         unsafe {
             std::ptr::write_bytes(bid_buffer.as_mut_ptr(), 0, DEPTH);
             std::ptr::write_bytes(ask_buffer.as_mut_ptr(), 0, DEPTH);
         }
 
-        // Optimized bid parsing - unrolled for better performance
         let bid_limit = bid_count.min(DEPTH);
         for i in 0..bid_limit {
             let price_raw = read_i64_fast(data, offset) as f64;
@@ -309,17 +686,14 @@ impl<F> BinanceSbeClient<F>
             bid_buffer[i] = (price_raw * price_mult, qty_raw * qty_mult);
         }
 
-        // Skip remaining bids if any
         if bid_count > DEPTH {
             offset += (bid_count - DEPTH) * 16;
         }
 
-        // Read ask count
-        offset += 2; // Skip block length
+        offset += 2;
         let ask_count = read_u16_fast(data, offset) as usize;
         offset += 2;
 
-        // Optimized ask parsing
         let ask_limit = ask_count.min(DEPTH);
         for i in 0..ask_limit {
             let price_raw = read_i64_fast(data, offset) as f64;
@@ -330,12 +704,10 @@ impl<F> BinanceSbeClient<F>
             ask_buffer[i] = (price_raw * price_mult, qty_raw * qty_mult);
         }
 
-        // Skip remaining asks if any
         if ask_count > DEPTH {
             offset += (ask_count - DEPTH) * 16;
         }
 
-        // Extract symbol length with bounds check
         if offset >= data.len() {
             return Err(anyhow::anyhow!("Invalid symbol offset"));
         }
@@ -343,22 +715,16 @@ impl<F> BinanceSbeClient<F>
         let symbol_len = data[offset] as usize;
         offset += 1;
 
-        // Bounds check for symbol
         if offset + symbol_len > data.len() {
             return Err(anyhow::anyhow!("Invalid symbol length"));
         }
 
-        // Get symbol slice
         let symbol_bytes = &data[offset..offset + symbol_len];
-
-        // CRITICAL OPTIMIZATION: Direct symbol_id lookup without string operations
         let symbol_id = self.resolve_symbol_id_ultra_fast(symbol_bytes);
 
         if let Some(symbol_id) = symbol_id {
-            // ULTRA-FAST callback execution with Symbol ID - ZERO string operations, ZERO cloning
             let cb_guard = self.depth_callback.read();
             if let Some(cb) = cb_guard.as_ref() {
-                // Pass slices by reference - NO cloning of arrays
                 cb(
                     symbol_id,
                     bid_buffer,
@@ -373,26 +739,8 @@ impl<F> BinanceSbeClient<F>
         Ok(())
     }
 
-    /// ULTRA-FAST: Resolve symbol ID without any string operations or allocations
     #[inline(always)]
     fn resolve_symbol_id_ultra_fast(&self, symbol_bytes: &[u8]) -> Option<u16> {
-        // Fast path: remove trailing nulls without allocation
-        let trimmed_end = symbol_bytes
-            .iter()
-            .rposition(|&b| b != 0)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-
-        if trimmed_end == 0 {
-            return None;
-        }
-
-        let trimmed = &symbol_bytes[..trimmed_end];
-
-        // Direct bytes lookup - NO string creation, NO allocation
-        self.symbol_bytes_to_id
-            .read()
-            .get(trimmed)
-            .map(|id| *id)
+        global::get_id_from_bytes(symbol_bytes)
     }
 }

@@ -183,7 +183,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
                 _
             | {
                 // CRITICAL OPTIMIZATION: Use symbol_id directly, pass slice references
-                orderbook_manager_thread.apply_depth_update_by_id(
+                orderbook_manager_thread.apply_depth_update(
                     symbol_id,
                     bids, // Pass slice reference - ZERO cloning
                     asks, // Pass slice reference - ZERO cloning
