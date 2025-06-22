@@ -1,3 +1,4 @@
+// src/orderbook/manager.rs - Ultra-optimized with batched updates
 use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::{ debug, error, info, warn };
@@ -5,6 +6,8 @@ use anyhow::{ Result, Context };
 use std::time::Duration;
 use parking_lot::RwLock;
 use std::thread;
+use crossbeam_channel::Sender;
+use std::sync::atomic::{ AtomicU64, Ordering };
 
 use crate::models::level::Level;
 use crate::exchange::client::ExchangeClient;
@@ -12,8 +15,59 @@ use crate::orderbook::orderbook::OrderBook;
 use crate::utils::symbol_interner::{ global, SymbolId };
 
 const MAX_SYMBOLS: usize = 2048;
+const BATCH_SIZE: usize = 64; // Process updates in batches
 
 pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &OrderBook) + Send + Sync>;
+
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+pub struct UpdateBatch {
+    pub symbols: [SymbolId; BATCH_SIZE],
+    pub count: u8,
+    pub _padding: [u8; 63],
+}
+
+impl UpdateBatch {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self {
+            symbols: [0; BATCH_SIZE],
+            count: 0,
+            _padding: [0; 63],
+        }
+    }
+
+    #[inline(always)]
+    pub fn add(&mut self, symbol_id: SymbolId) -> bool {
+        if (self.count as usize) < BATCH_SIZE {
+            self.symbols[self.count as usize] = symbol_id;
+            self.count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_full(&self) -> bool {
+        (self.count as usize) >= BATCH_SIZE
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.count = 0;
+    }
+
+    #[inline(always)]
+    pub fn iter(&self) -> impl Iterator<Item = SymbolId> + '_ {
+        self.symbols[0..self.count as usize].iter().copied()
+    }
+}
 
 pub struct OrderBookManager {
     pub books: Box<[Option<Arc<OrderBook>>; MAX_SYMBOLS]>,
@@ -23,7 +77,13 @@ pub struct OrderBookManager {
     last_recovery: Box<[std::sync::atomic::AtomicU64; MAX_SYMBOLS]>,
     update_callbacks: Arc<RwLock<Vec<OrderbookUpdateCallback>>>,
     runtime_handle: tokio::runtime::Handle,
+    // Ultra-fast batched updates
+    arbitrage_sender: Option<Sender<UpdateBatch>>,
+    pending_batch: std::cell::UnsafeCell<UpdateBatch>,
+    batch_counter: AtomicU64,
 }
+
+unsafe impl Sync for OrderBookManager {}
 
 impl OrderBookManager {
     pub fn new(
@@ -65,7 +125,14 @@ impl OrderBookManager {
             last_recovery,
             update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))),
             runtime_handle,
+            arbitrage_sender: None,
+            pending_batch: std::cell::UnsafeCell::new(UpdateBatch::new()),
+            batch_counter: AtomicU64::new(0),
         }
+    }
+
+    pub fn set_arbitrage_sender(&mut self, sender: Sender<UpdateBatch>) {
+        self.arbitrage_sender = Some(sender);
     }
 
     pub fn preload_symbols(&self, symbols: &[String]) {
@@ -83,14 +150,36 @@ impl OrderBookManager {
     }
 
     #[inline(always)]
-    fn notify_update(&self, symbol_id: SymbolId, book: &OrderBook) {
-        let callbacks = self.update_callbacks.read();
-        if callbacks.is_empty() {
-            return;
+    fn notify_update(&self, symbol_id: SymbolId) {
+        // Ultra-fast batched arbitrage detection
+        if let Some(sender) = &self.arbitrage_sender {
+            unsafe {
+                let batch = &mut *self.pending_batch.get();
+
+                if !batch.add(symbol_id) || batch.is_full() {
+                    // Send full batch and start new one
+                    let _ = sender.try_send(*batch);
+                    batch.clear();
+                    batch.add(symbol_id);
+                }
+
+                // Force send every 16 updates for low latency
+                let count = self.batch_counter.fetch_add(1, Ordering::Relaxed);
+                if count % 16 == 0 && !batch.is_empty() {
+                    let _ = sender.try_send(*batch);
+                    batch.clear();
+                }
+            }
         }
 
-        for callback in callbacks.iter() {
-            callback(symbol_id, book);
+        // Keep other callbacks for compatibility (non-critical path)
+        let callbacks = self.update_callbacks.read();
+        if !callbacks.is_empty() {
+            if let Some(book) = self.get_book_by_id(symbol_id) {
+                for callback in callbacks.iter() {
+                    callback(symbol_id, &book);
+                }
+            }
         }
     }
 
@@ -107,6 +196,18 @@ impl OrderBookManager {
             let book = Arc::new(OrderBook::new(self.default_depth));
             *book_option = Some(book.clone());
             book
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_book_by_id(&self, symbol_id: SymbolId) -> Option<Arc<OrderBook>> {
+        if symbol_id >= (MAX_SYMBOLS as u16) {
+            return None;
+        }
+
+        unsafe {
+            let books_ptr = self.books.as_ptr();
+            (*books_ptr.add(symbol_id as usize)).clone()
         }
     }
 
@@ -135,7 +236,7 @@ impl OrderBookManager {
 
         match book.apply_depth_update_raw(bids, asks, first_update_id, last_update_id) {
             Ok(true) => {
-                // self.notify_update(symbol_id, book);
+                self.notify_update(symbol_id);
                 true
             }
             Ok(false) => {
@@ -226,7 +327,7 @@ impl OrderBookManager {
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
 
-        self.notify_update(symbol_id, &book);
+        self.notify_update(symbol_id);
 
         if let Some(symbol) = global::get_symbol(symbol_id) {
             debug!(
@@ -348,6 +449,19 @@ impl OrderBookManager {
             symbol_hash_cache_size: interner_len,
         }
     }
+
+    // Force flush any pending batch
+    pub fn flush_pending_batch(&self) {
+        if let Some(sender) = &self.arbitrage_sender {
+            unsafe {
+                let batch = &mut *self.pending_batch.get();
+                if !batch.is_empty() {
+                    let _ = sender.try_send(*batch);
+                    batch.clear();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -374,6 +488,9 @@ impl Clone for OrderBookManager {
             last_recovery: new_last_recovery,
             update_callbacks: self.update_callbacks.clone(),
             runtime_handle: self.runtime_handle.clone(),
+            arbitrage_sender: self.arbitrage_sender.clone(),
+            pending_batch: std::cell::UnsafeCell::new(UpdateBatch::new()),
+            batch_counter: AtomicU64::new(0),
         }
     }
 }
