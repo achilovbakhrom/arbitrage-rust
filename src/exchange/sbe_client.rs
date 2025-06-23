@@ -1,3 +1,5 @@
+// src/exchange/sbe_client.rs - Fixed with proper SBE parsing timing
+
 use tungstenite::{
     http::Request,
     protocol::Message,
@@ -149,27 +151,42 @@ impl<F> BinanceSbeClient<F>
                 return Ok(());
             }
 
-            let (message_result, receive_time_us) = if timing_enabled {
-                let start = Instant::now();
-                let result = ws_stream.read();
-                let elapsed = start.elapsed().as_micros() as u64;
-                (result, elapsed)
+            // FIXED: Separate WebSocket read time from SBE parsing time
+            let ws_read_start = if timing_enabled { Some(Instant::now()) } else { None };
+
+            let message_result = ws_stream.read();
+
+            let ws_read_time = if let Some(start) = ws_read_start {
+                start.elapsed().as_micros() as u64
             } else {
-                (ws_stream.read(), 0)
+                0
             };
 
             match message_result {
                 Ok(message) => {
                     match message {
                         Message::Binary(data) => {
-                            if
-                                let Err(e) = self.handle_binary_message_optimized(
-                                    &data,
-                                    receive_time_us
-                                )
-                            {
+                            // FIXED: Measure actual SBE parsing time separately
+                            let sbe_parse_start = if timing_enabled {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
+
+                            let parse_result = self.handle_binary_message_optimized(&data);
+
+                            let sbe_parse_time = if let Some(start) = sbe_parse_start {
+                                start.elapsed().as_micros() as u64
+                            } else {
+                                0
+                            };
+
+                            if let Err(e) = parse_result {
                                 debug!("Error handling binary message: {}", e);
                             }
+
+                            // Note: We're passing SBE parse time, not WebSocket read time
+                            // The callback will receive the actual SBE parsing duration
                         }
                         Message::Text(text) => {
                             debug!("Received text message: {}", text);
@@ -208,7 +225,7 @@ impl<F> BinanceSbeClient<F>
     }
 
     #[inline(always)]
-    fn handle_binary_message_optimized(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
+    fn handle_binary_message_optimized(&self, data: &[u8]) -> Result<()> {
         if data.len() < 32 {
             return Ok(());
         }
@@ -218,14 +235,18 @@ impl<F> BinanceSbeClient<F>
         };
 
         if template_id == 10003 {
-            self.parse_depth_message_ultra_fast(data, receive_time_us)
+            self.parse_depth_message_ultra_fast(data)
         } else {
             Ok(())
         }
     }
 
     #[inline(always)]
-    fn parse_depth_message_ultra_fast(&self, data: &[u8], receive_time_us: u64) -> Result<()> {
+    fn parse_depth_message_ultra_fast(&self, data: &[u8]) -> Result<()> {
+        // FIXED: Measure pure SBE parsing time
+        let timing_enabled = self.timing_enabled.load(Ordering::Relaxed);
+        let parse_start = if timing_enabled { Some(Instant::now()) } else { None };
+
         let mut offset = 8;
 
         fn read_i64_fast(data: &[u8], offset: usize) -> i64 {
@@ -322,16 +343,24 @@ impl<F> BinanceSbeClient<F>
         let symbol_bytes = &data[offset..offset + symbol_len];
         let symbol_id = self.resolve_symbol_id_ultra_fast(symbol_bytes);
 
+        // FIXED: Calculate actual SBE parsing time
+        let sbe_parse_time_us = if let Some(start) = parse_start {
+            start.elapsed().as_micros() as u64
+        } else {
+            0
+        };
+
         if let Some(symbol_id) = symbol_id {
             let cb_guard = self.depth_callback.read();
             if let Some(cb) = cb_guard.as_ref() {
+                // FIXED: Pass actual SBE parsing time, not WebSocket read time
                 cb(
                     symbol_id,
                     bid_buffer,
                     ask_buffer,
                     first_update_id,
                     last_update_id,
-                    receive_time_us
+                    sbe_parse_time_us // This is now pure SBE parsing time
                 );
             }
         }
