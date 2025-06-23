@@ -1,4 +1,5 @@
-// src/orderbook/manager.rs - Ultra-optimized with batched updates
+// src/orderbook/manager.rs - Fixed with separated pure update and arbitrage detection
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::{ debug, error, info, warn };
@@ -15,7 +16,7 @@ use crate::orderbook::orderbook::OrderBook;
 use crate::utils::symbol_interner::{ global, SymbolId };
 
 const MAX_SYMBOLS: usize = 2048;
-const BATCH_SIZE: usize = 64; // Process updates in batches
+const BATCH_SIZE: usize = 64;
 
 pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &OrderBook) + Send + Sync>;
 
@@ -149,6 +150,7 @@ impl OrderBookManager {
         callbacks.push(callback);
     }
 
+    // FIXED: Separated arbitrage detection triggering from pure orderbook update
     #[inline(always)]
     fn notify_update(&self, symbol_id: SymbolId) {
         // Ultra-fast batched arbitrage detection
@@ -171,6 +173,13 @@ impl OrderBookManager {
                 }
             }
         }
+    }
+
+    // FIXED: New method to trigger arbitrage detection separately
+    #[inline(always)]
+    pub fn trigger_arbitrage_detection(&self, symbol_id: SymbolId) {
+        // Notify batched arbitrage detection
+        self.notify_update(symbol_id);
 
         // Keep other callbacks for compatibility (non-critical path)
         let callbacks = self.update_callbacks.read();
@@ -211,8 +220,34 @@ impl OrderBookManager {
         }
     }
 
+    // FIXED: Original method that includes arbitrage detection (for backward compatibility)
     #[inline(always)]
     pub fn apply_depth_update(
+        &self,
+        symbol_id: SymbolId,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+        first_update_id: u64,
+        last_update_id: u64
+    ) -> bool {
+        let success = self.apply_depth_update_pure(
+            symbol_id,
+            bids,
+            asks,
+            first_update_id,
+            last_update_id
+        );
+
+        if success {
+            self.trigger_arbitrage_detection(symbol_id);
+        }
+
+        success
+    }
+
+    // FIXED: New pure orderbook update method without arbitrage detection
+    #[inline(always)]
+    pub fn apply_depth_update_pure(
         &self,
         symbol_id: SymbolId,
         bids: &[(f64, f64)],
@@ -236,7 +271,7 @@ impl OrderBookManager {
 
         match book.apply_depth_update_raw(bids, asks, first_update_id, last_update_id) {
             Ok(true) => {
-                self.notify_update(symbol_id);
+                // Pure orderbook update successful - no arbitrage detection here
                 true
             }
             Ok(false) => {
@@ -327,7 +362,7 @@ impl OrderBookManager {
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
 
-        self.notify_update(symbol_id);
+        self.trigger_arbitrage_detection(symbol_id);
 
         if let Some(symbol) = global::get_symbol(symbol_id) {
             debug!(

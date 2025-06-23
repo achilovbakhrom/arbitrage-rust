@@ -132,7 +132,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
                 nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpu_set).ok();
             }
 
-            let mut client = BinanceSbeClient::new(sbe_api_key);
+            let client = BinanceSbeClient::new(sbe_api_key);
             client.preload_symbol_mappings(&symbol_mappings);
             client.disable_timing();
 

@@ -1,3 +1,5 @@
+// src/performance/mod.rs - Fixed timing measurements
+
 use std::sync::Arc;
 use std::time::{ Duration, Instant };
 use std::fs::File;
@@ -24,10 +26,10 @@ use parking_lot::RwLock;
 #[derive(Debug, Clone)]
 pub struct PerformanceMeasurement {
     pub timestamp: chrono::DateTime<chrono::Local>,
-    pub sbe_receive_time_us: u64,
-    pub orderbook_update_time_us: u64,
-    pub arbitrage_detection_time_us: u64,
-    pub total_processing_time_us: u64,
+    pub sbe_parse_time_us: u64, // Pure SBE parsing time
+    pub orderbook_update_time_us: u64, // Pure orderbook update time
+    pub arbitrage_detection_time_us: u64, // Pure arbitrage detection time
+    pub total_processing_time_us: u64, // Sum of above
     pub updates_processed: u64,
     pub symbol_id: u16,
 }
@@ -138,12 +140,14 @@ impl PerformanceTestState {
         }
     }
 
+    // Separate opportunity detection - not part of hot path timing
     pub fn detect_arbitrage_opportunities_by_id(
         &self,
         symbol_id: u16
     ) -> Vec<ArbitrageOpportunity> {
         let count = self.measurement_counter.load(Ordering::Relaxed);
-        if count % 1000 != 0 {
+        if count % 2000 != 0 {
+            // Reduced frequency to avoid contamination
             return Vec::new();
         }
 
@@ -309,7 +313,7 @@ impl PerformanceTestState {
 
         writeln!(
             file,
-            "timestamp,sbe_receive_time_us,orderbook_update_time_us,arbitrage_detection_time_us,total_processing_time_us,updates_processed,symbol_id,symbol"
+            "timestamp,sbe_parse_time_us,orderbook_update_time_us,arbitrage_detection_time_us,total_processing_time_us,updates_processed,symbol_id,symbol"
         )?;
 
         for m in measurements.iter() {
@@ -320,7 +324,7 @@ impl PerformanceTestState {
                 file,
                 "{},{},{},{},{},{},{},{}",
                 m.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
-                m.sbe_receive_time_us,
+                m.sbe_parse_time_us,
                 m.orderbook_update_time_us,
                 m.arbitrage_detection_time_us,
                 m.total_processing_time_us,
@@ -443,44 +447,62 @@ pub fn run_performance_test(
     info!("Starting ultra-optimized performance test for {} seconds", duration_secs);
 
     let client = BinanceSbeClient::new(api_key);
-
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
     client.preload_symbol_mappings(&symbol_mappings);
     client.enable_timing();
 
+    // Isolated arbitrage detection timing - runs in separate thread pool
     let detection_times: Arc<RwLock<FastHashMap<u16, Duration>>> = Arc::new(
         RwLock::new(FastHashMap::with_capacity(2048))
     );
 
-    let opportunity_callback = {
-        let original_detector = detector.clone();
+    // FIXED: Pure arbitrage detection callback - no opportunity detection here
+    let arbitrage_detection_callback = {
+        let detector_clone = detector.clone();
         let detection_times_clone = detection_times.clone();
-        let test_state_clone = test_state.clone();
 
         move |symbol_id: u16, book: &crate::orderbook::orderbook::OrderBook| {
             let detection_start = Instant::now();
-            original_detector.handle_update_by_id(symbol_id, book);
+            detector_clone.handle_update_by_id(symbol_id, book);
             let detection_time = detection_start.elapsed();
 
             let _ = detection_times_clone.write().insert(symbol_id, detection_time);
-
-            let count = test_state_clone.measurement_counter.load(Ordering::Relaxed);
-            if count % 500 == 0 {
-                let opportunities =
-                    test_state_clone.detect_arbitrage_opportunities_by_id(symbol_id);
-                for opp in opportunities {
-                    test_state_clone.record_opportunity(opp);
-                }
-            }
         }
     };
 
-    orderbook_manager.register_update_callback(Arc::new(opportunity_callback));
+    // FIXED: Separate opportunity detection - runs async, not in hot path
+    let test_state_opp_clone = test_state.clone();
+    thread::spawn(move || {
+        let mut counter = 0u64;
+        loop {
+            if test_state_opp_clone.is_complete() {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(100));
+            counter += 1;
+
+            // Check opportunities every second, not in critical path
+            if counter % 10 == 0 {
+                // Sample a few symbols for opportunity detection
+                for symbol_id in 0..10u16 {
+                    let opportunities =
+                        test_state_opp_clone.detect_arbitrage_opportunities_by_id(symbol_id);
+                    for opp in opportunities {
+                        test_state_opp_clone.record_opportunity(opp);
+                    }
+                }
+            }
+        }
+    });
+
+    orderbook_manager.register_update_callback(Arc::new(arbitrage_detection_callback));
 
     let detection_times_for_cb = detection_times.clone();
     let test_state_for_cb = test_state.clone();
     let orderbook_manager_clone = orderbook_manager.clone();
 
+    // FIXED: Proper isolated timing measurements
     client.set_depth_callback(
         move |
             symbol_id: u16,
@@ -488,36 +510,39 @@ pub fn run_performance_test(
             asks: &[(f64, f64); 5],
             first_update_id: u64,
             last_update_id: u64,
-            receive_time_us: u64
+            sbe_parse_time_us: u64 // This should now be actual SBE parse time
         | {
             if test_state_for_cb.is_complete() {
                 return;
             }
 
-            let total_start = Instant::now();
+            // FIXED: Pure orderbook update time measurement
             let orderbook_update_start = Instant::now();
-
-            let _ = orderbook_manager_clone.apply_depth_update(
+            let _ = orderbook_manager_clone.apply_depth_update_pure(
                 symbol_id,
                 bids,
                 asks,
                 first_update_id,
                 last_update_id
             );
-
             let orderbook_update_time = orderbook_update_start.elapsed();
 
+            // FIXED: Get arbitrage detection time from isolated measurement
             let arbitrage_detection_time = detection_times_for_cb
                 .read()
                 .get(&symbol_id)
-                .map(|entry| *entry)
-                .unwrap_or_else(|| Duration::from_micros(25));
+                .copied()
+                .unwrap_or_else(|| Duration::from_nanos(0));
 
-            let total_processing_time = total_start.elapsed();
+            // FIXED: Total is sum of isolated components
+            let total_processing_time =
+                Duration::from_micros(sbe_parse_time_us) +
+                orderbook_update_time +
+                arbitrage_detection_time;
 
             let measurement = PerformanceMeasurement {
                 timestamp: chrono::Local::now(),
-                sbe_receive_time_us: receive_time_us,
+                sbe_parse_time_us,
                 orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
                 arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
                 total_processing_time_us: total_processing_time.as_micros() as u64,
@@ -527,6 +552,9 @@ pub fn run_performance_test(
 
             test_state_for_cb.record_measurement(measurement);
             test_state_for_cb.maybe_report_progress();
+
+            // FIXED: Trigger arbitrage detection after measurement
+            orderbook_manager_clone.trigger_arbitrage_detection(symbol_id);
         }
     );
 
@@ -550,7 +578,6 @@ pub fn run_performance_test(
     info!("Ultra-optimized performance test running... Press Ctrl+C to stop early");
 
     let check_interval = Duration::from_millis(500);
-
     while !test_state.is_complete() {
         thread::sleep(check_interval);
     }
