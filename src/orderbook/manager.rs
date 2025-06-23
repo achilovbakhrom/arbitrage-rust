@@ -1,5 +1,3 @@
-// src/orderbook/manager.rs - Fixed with separated pure update and arbitrage detection
-
 use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::{ debug, error, info, warn };
@@ -78,7 +76,6 @@ pub struct OrderBookManager {
     last_recovery: Box<[std::sync::atomic::AtomicU64; MAX_SYMBOLS]>,
     update_callbacks: Arc<RwLock<Vec<OrderbookUpdateCallback>>>,
     runtime_handle: tokio::runtime::Handle,
-    // Ultra-fast batched updates
     arbitrage_sender: Option<Sender<UpdateBatch>>,
     pending_batch: std::cell::UnsafeCell<UpdateBatch>,
     batch_counter: AtomicU64,
@@ -150,22 +147,18 @@ impl OrderBookManager {
         callbacks.push(callback);
     }
 
-    // FIXED: Separated arbitrage detection triggering from pure orderbook update
     #[inline(always)]
     fn notify_update(&self, symbol_id: SymbolId) {
-        // Ultra-fast batched arbitrage detection
         if let Some(sender) = &self.arbitrage_sender {
             unsafe {
                 let batch = &mut *self.pending_batch.get();
 
                 if !batch.add(symbol_id) || batch.is_full() {
-                    // Send full batch and start new one
                     let _ = sender.try_send(*batch);
                     batch.clear();
                     batch.add(symbol_id);
                 }
 
-                // Force send every 16 updates for low latency
                 let count = self.batch_counter.fetch_add(1, Ordering::Relaxed);
                 if count % 16 == 0 && !batch.is_empty() {
                     let _ = sender.try_send(*batch);
@@ -175,13 +168,10 @@ impl OrderBookManager {
         }
     }
 
-    // FIXED: New method to trigger arbitrage detection separately
     #[inline(always)]
     pub fn trigger_arbitrage_detection(&self, symbol_id: SymbolId) {
-        // Notify batched arbitrage detection
         self.notify_update(symbol_id);
 
-        // Keep other callbacks for compatibility (non-critical path)
         let callbacks = self.update_callbacks.read();
         if !callbacks.is_empty() {
             if let Some(book) = self.get_book_by_id(symbol_id) {
@@ -220,7 +210,6 @@ impl OrderBookManager {
         }
     }
 
-    // FIXED: Original method that includes arbitrage detection (for backward compatibility)
     #[inline(always)]
     pub fn apply_depth_update(
         &self,
@@ -245,7 +234,6 @@ impl OrderBookManager {
         success
     }
 
-    // FIXED: New pure orderbook update method without arbitrage detection
     #[inline(always)]
     pub fn apply_depth_update_pure(
         &self,
@@ -270,10 +258,7 @@ impl OrderBookManager {
         };
 
         match book.apply_depth_update_raw(bids, asks, first_update_id, last_update_id) {
-            Ok(true) => {
-                // Pure orderbook update successful - no arbitrage detection here
-                true
-            }
+            Ok(true) => { true }
             Ok(false) => {
                 self.trigger_recovery_by_id(symbol_id);
                 false
@@ -485,7 +470,6 @@ impl OrderBookManager {
         }
     }
 
-    // Force flush any pending batch
     pub fn flush_pending_batch(&self) {
         if let Some(sender) = &self.arbitrage_sender {
             unsafe {

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-/// A potential triangular arbitrage path
 #[derive(Debug, Clone)]
 pub struct TriangularPath {
     pub first_symbol: Arc<str>,

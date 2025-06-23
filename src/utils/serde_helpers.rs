@@ -3,7 +3,6 @@ use serde::de::{ self, Visitor };
 use std::fmt;
 use tracing::Level;
 
-/// Serialize `tracing::Level` to a string
 pub fn serialize_level<S>(level: &Level, serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer
 {
@@ -18,7 +17,6 @@ pub fn serialize_level<S>(level: &Level, serializer: S) -> Result<S::Ok, S::Erro
     serializer.serialize_str(level_str)
 }
 
-/// Deserialize `tracing::Level` from a string
 pub fn deserialize_level<'de, D>(deserializer: D) -> Result<Level, D::Error>
     where D: Deserializer<'de>
 {

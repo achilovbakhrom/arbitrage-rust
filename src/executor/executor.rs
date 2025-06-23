@@ -3,35 +3,27 @@ use std::sync::atomic::{ AtomicU64, Ordering };
 
 use crate::arbitrage::detector::ArbitrageOpportunity;
 
-/// Execution strategy options
 #[derive(Debug, Clone, Copy)]
 pub enum ExecutionStrategy {
-    /// Execute all trades in sequence as quickly as possible
     Sequential,
-    /// Execute with minimal delay between trades
     FastSequential,
-    /// Simulate execution (for testing/paper trading)
     Simulate,
 }
 
-/// Result of an arbitrage execution
 #[derive(Debug)]
 pub struct ExecutionResult {
     pub success: bool,
 }
 
-/// High-performance synchronous arbitrage executor
 pub struct ArbitrageExecutor {
     default_strategy: ExecutionStrategy,
 
-    // Performance tracking
     execution_counter: AtomicU64,
     total_execution_time_us: AtomicU64,
     successful_executions: AtomicU64,
 }
 
 impl ArbitrageExecutor {
-    /// Create a new high-performance arbitrage executor
     pub fn new(default_strategy: ExecutionStrategy) -> Self {
         Self {
             default_strategy,
@@ -41,10 +33,8 @@ impl ArbitrageExecutor {
         }
     }
 
-    /// Execute an arbitrage opportunity synchronously with maximum speed
     #[inline(always)]
     pub fn execute(&self, opportunity: &ArbitrageOpportunity) -> ExecutionResult {
-        // Fast execution without locks for maximum speed
         match self.default_strategy {
             ExecutionStrategy::FastSequential => self.execute_ultra_fast(opportunity),
             ExecutionStrategy::Sequential => self.execute_with_validation(opportunity),
@@ -52,23 +42,19 @@ impl ArbitrageExecutor {
         }
     }
 
-    /// Ultra-fast execution with minimal overhead
     #[inline(always)]
     fn execute_ultra_fast(&self, opportunity: &ArbitrageOpportunity) -> ExecutionResult {
         let start_time = Instant::now();
 
-        // Minimal slippage calculation
         let slippage = 0.001 + opportunity.profit_percentage() * 0.0001;
-        let slippage_clamped = slippage.min(0.005); // Max 0.5% slippage
+        let slippage_clamped = slippage.min(0.005);
 
-        // Direct calculation without loops or delays
         let actual_profit_ratio = opportunity.profit_ratio * (1.0 - slippage_clamped);
         let actual_end_amount = opportunity.start_amount * actual_profit_ratio;
         let actual_profit = actual_end_amount - opportunity.start_amount;
 
         let execution_time_us = start_time.elapsed().as_micros() as u64;
 
-        // Update counters without locks
         self.execution_counter.fetch_add(1, Ordering::Relaxed);
         self.total_execution_time_us.fetch_add(execution_time_us, Ordering::Relaxed);
 
@@ -81,21 +67,18 @@ impl ArbitrageExecutor {
         }
     }
 
-    /// Execute with basic validation
     #[inline]
     fn execute_with_validation(&self, opportunity: &ArbitrageOpportunity) -> ExecutionResult {
         let start_time = Instant::now();
 
-        // Quick validation
         if self.is_executing_disabled() {
             return ExecutionResult {
                 success: false,
             };
         }
 
-        // Execute with slightly more realistic slippage
         let slippage = 0.002 + opportunity.profit_percentage() * 0.0002;
-        let slippage_clamped = slippage.min(0.01); // Max 1% slippage
+        let slippage_clamped = slippage.min(0.01);
 
         let actual_profit_ratio = opportunity.profit_ratio * (1.0 - slippage_clamped);
         let actual_end_amount = opportunity.start_amount * actual_profit_ratio;
@@ -103,7 +86,6 @@ impl ArbitrageExecutor {
 
         let execution_time_us = start_time.elapsed().as_micros() as u64;
 
-        // Update counters
         self.execution_counter.fetch_add(1, Ordering::Relaxed);
         self.total_execution_time_us.fetch_add(execution_time_us, Ordering::Relaxed);
 
@@ -116,7 +98,6 @@ impl ArbitrageExecutor {
         }
     }
 
-    /// Simulate execution for testing
     #[inline]
     fn execute_simulation(&self, opportunity: &ArbitrageOpportunity) -> ExecutionResult {
         let start_time = Instant::now();
@@ -132,7 +113,6 @@ impl ArbitrageExecutor {
         }
     }
 
-    /// Check if execution is disabled (e.g., during maintenance)
     #[inline]
     fn is_executing_disabled(&self) -> bool {
         // Could check various conditions:

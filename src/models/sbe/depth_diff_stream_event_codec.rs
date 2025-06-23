@@ -62,82 +62,36 @@ pub mod encoder {
             header
         }
 
-        /// primitive field 'eventTime'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 0
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn event_time(&mut self, value: i64) {
             let offset = self.offset;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'firstBookUpdateId'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 8
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn first_book_update_id(&mut self, value: i64) {
             let offset = self.offset + 8;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'lastBookUpdateId'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 16
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn last_book_update_id(&mut self, value: i64) {
             let offset = self.offset + 16;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'priceExponent'
-        /// - min value: -127
-        /// - max value: 127
-        /// - null value: -128_i8
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 24
-        /// - encodedLength: 1
-        /// - version: 0
         #[inline]
         pub fn price_exponent(&mut self, value: i8) {
             let offset = self.offset + 24;
             self.get_buf_mut().put_i8_at(offset, value);
         }
 
-        /// primitive field 'qtyExponent'
-        /// - min value: -127
-        /// - max value: 127
-        /// - null value: -128_i8
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 25
-        /// - encodedLength: 1
-        /// - version: 0
         #[inline]
         pub fn qty_exponent(&mut self, value: i8) {
             let offset = self.offset + 25;
             self.get_buf_mut().put_i8_at(offset, value);
         }
 
-        /// GROUP ENCODER (id=100)
         #[inline]
         pub fn bids_encoder(
             self,
@@ -147,7 +101,6 @@ pub mod encoder {
             bids_encoder.wrap(self, count)
         }
 
-        /// GROUP ENCODER (id=101)
         #[inline]
         pub fn asks_encoder(
             self,
@@ -157,7 +110,6 @@ pub mod encoder {
             asks_encoder.wrap(self, count)
         }
 
-        /// VAR_DATA ENCODER - character encoding: 'UTF-8'
         #[inline]
         pub fn symbol(&mut self, value: &str) {
             let limit = self.get_limit();
@@ -225,7 +177,6 @@ pub mod encoder {
             self.parent.take().ok_or(SbeErr::ParentNotSet)
         }
 
-        /// will return Some(current index) when successful otherwise None
         #[inline]
         pub fn advance(&mut self) -> SbeResult<Option<usize>> {
             let index = self.index.wrapping_add(1);
@@ -242,30 +193,12 @@ pub mod encoder {
             }
         }
 
-        /// primitive field 'price'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 0
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn price(&mut self, value: i64) {
             let offset = self.offset;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'qty'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 8
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn qty(&mut self, value: i64) {
             let offset = self.offset + 8;
@@ -330,7 +263,6 @@ pub mod encoder {
             self.parent.take().ok_or(SbeErr::ParentNotSet)
         }
 
-        /// will return Some(current index) when successful otherwise None
         #[inline]
         pub fn advance(&mut self) -> SbeResult<Option<usize>> {
             let index = self.index.wrapping_add(1);
@@ -347,37 +279,19 @@ pub mod encoder {
             }
         }
 
-        /// primitive field 'price'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 0
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn price(&mut self, value: i64) {
             let offset = self.offset;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'qty'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 8
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn qty(&mut self, value: i64) {
             let offset = self.offset + 8;
             self.get_buf_mut().put_i64_at(offset, value);
         }
     }
-} // end encoder
+}
 
 pub mod decoder {
     use super::*;
@@ -455,49 +369,41 @@ pub mod decoder {
             )
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn event_time(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn first_book_update_id(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 8)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn last_book_update_id(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 16)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn price_exponent(&self) -> i8 {
             self.get_buf().get_i8_at(self.offset + 24)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn qty_exponent(&self) -> i8 {
             self.get_buf().get_i8_at(self.offset + 25)
         }
 
-        /// GROUP DECODER (id=100)
         #[inline]
         pub fn bids_decoder(self) -> BidsDecoder<Self> {
             BidsDecoder::default().wrap(self)
         }
 
-        /// GROUP DECODER (id=101)
         #[inline]
         pub fn asks_decoder(self) -> AsksDecoder<Self> {
             AsksDecoder::default().wrap(self)
         }
 
-        /// VAR_DATA DECODER - character encoding: 'UTF-8'
         #[inline]
         pub fn symbol_decoder(&mut self) -> (usize, usize) {
             let offset = self.get_limit();
@@ -562,7 +468,6 @@ pub mod decoder {
             self
         }
 
-        /// group token - Token{signal=BEGIN_GROUP, name='bids', referencedName='null', description='null', packageName='null', id=100, version=0, deprecated=0, encodedLength=16, offset=26, componentTokenCount=12, encoding=Encoding{presence=REQUIRED, primitiveType=null, byteOrder=LITTLE_ENDIAN, minValue=null, maxValue=null, nullValue=null, constValue=null, characterEncoding='null', epoch='null', timeUnit=null, semanticType='null'}}
         #[inline]
         pub fn parent(&mut self) -> SbeResult<P> {
             self.parent.take().ok_or(SbeErr::ParentNotSet)
@@ -578,7 +483,6 @@ pub mod decoder {
             self.count
         }
 
-        /// will return Some(current index) when successful otherwise None
         pub fn advance(&mut self) -> SbeResult<Option<usize>> {
             let index = self.index.wrapping_add(1);
             if index >= (self.count as usize) {
@@ -594,13 +498,11 @@ pub mod decoder {
             }
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn price(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn qty(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 8)
@@ -656,7 +558,6 @@ pub mod decoder {
             self
         }
 
-        /// group token - Token{signal=BEGIN_GROUP, name='asks', referencedName='null', description='null', packageName='null', id=101, version=0, deprecated=0, encodedLength=16, offset=-1, componentTokenCount=12, encoding=Encoding{presence=REQUIRED, primitiveType=null, byteOrder=LITTLE_ENDIAN, minValue=null, maxValue=null, nullValue=null, constValue=null, characterEncoding='null', epoch='null', timeUnit=null, semanticType='null'}}
         #[inline]
         pub fn parent(&mut self) -> SbeResult<P> {
             self.parent.take().ok_or(SbeErr::ParentNotSet)
@@ -672,7 +573,6 @@ pub mod decoder {
             self.count
         }
 
-        /// will return Some(current index) when successful otherwise None
         pub fn advance(&mut self) -> SbeResult<Option<usize>> {
             let index = self.index.wrapping_add(1);
             if index >= (self.count as usize) {
@@ -688,16 +588,14 @@ pub mod decoder {
             }
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn price(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn qty(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 8)
         }
     }
-} // end decoder
+}

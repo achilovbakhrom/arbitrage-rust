@@ -1,4 +1,3 @@
-// src/app/normal_mode.rs - Ultra-optimized with thread affinity and batching
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 use crossbeam_channel::{ bounded, Receiver };
 
@@ -52,7 +51,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
     let unique_symbols = symbol_map.get_unique_symbols();
 
-    // Create ultra-fast batched channel
     let (arbitrage_sender, arbitrage_receiver) = bounded::<UpdateBatch>(ARBITRAGE_CHANNEL_CAPACITY);
 
     let mut orderbook_manager = OrderBookManager::new(config.depth, client.clone());
@@ -94,7 +92,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         detector_mode
     );
 
-    // Start ultra-fast arbitrage detection thread with CPU affinity
     let arbitrage_thread = start_ultra_fast_arbitrage_thread(
         arbitrage_receiver,
         detector.clone(),
@@ -124,7 +121,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         ::new()
         .name("websocket-thread".to_string())
         .spawn(move || {
-            // Try to set thread affinity to CPU core 0
             #[cfg(target_os = "linux")]
             {
                 let mut cpu_set = nix::sched::CpuSet::new();
@@ -172,7 +168,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
                 }
             }
 
-            // Ultra-fast callback with zero overhead
             client.set_depth_callback(
                 move |
                     symbol_id: u16,
@@ -211,12 +206,11 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         info!("🟡 ULTRA-OPTIMIZED+BATCHED simulation mode");
     }
 
-    // Flush pending batches periodically
     let flush_manager = orderbook_manager.clone();
     let flush_shutdown = shutdown.clone();
     let flush_handle = thread::spawn(move || {
         while !flush_shutdown.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_micros(100)); // 100μs flush interval
+            thread::sleep(Duration::from_micros(100));
             flush_manager.flush_pending_batch();
         }
     });
@@ -260,7 +254,6 @@ fn start_ultra_fast_arbitrage_thread(
         ::new()
         .name("ultra-arbitrage".to_string())
         .spawn(move || {
-            // Try to set thread affinity to CPU core 1
             #[cfg(target_os = "linux")]
             {
                 let mut cpu_set = nix::sched::CpuSet::new();
@@ -273,7 +266,6 @@ fn start_ultra_fast_arbitrage_thread(
             let mut processed_count = 0u64;
 
             while let Ok(batch) = receiver.recv() {
-                // Process entire batch in tight loop
                 for symbol_id in batch.iter() {
                     if let Some(book) = orderbook_manager.get_book_by_id(symbol_id) {
                         detector.handle_update_by_id(symbol_id, &book);
@@ -281,7 +273,6 @@ fn start_ultra_fast_arbitrage_thread(
                     }
                 }
 
-                // Yield occasionally to prevent starvation
                 if processed_count % 1024 == 0 {
                     thread::yield_now();
                 }
