@@ -88,11 +88,10 @@ pub struct MarketOrder {
     pub side: OrderSide,
     pub quantity: f64,
     pub quote_quantity: Option<f64>,
-    pub qty_precision: Option<u8>, // Add precision field
-    pub price_precision: Option<u8>, // Add price precision if needed
+    pub qty_precision: Option<u8>,
+    pub price_precision: Option<u8>,
 }
 
-// Add a precision cache to avoid repeated lookups
 #[derive(Debug, Clone)]
 pub struct SymbolPrecision {
     pub qty_precision: u8,
@@ -104,7 +103,6 @@ struct OrderExecution {
     start_time: Instant,
 }
 
-// Internal message types for communication between threads
 #[derive(Debug)]
 enum InternalMessage {
     SendMessage(String),
@@ -119,30 +117,24 @@ pub struct FixClient {
     signing_key: SigningKey,
     is_connected: AtomicBool,
 
-    // Communication channels
     message_sender: Option<Sender<InternalMessage>>,
     shutdown: Arc<AtomicBool>,
 
-    // Thread handles
     connection_handle: Option<thread::JoinHandle<()>>,
     heartbeat_handle: Option<thread::JoinHandle<()>>,
 
-    // Add precision cache
     symbol_precisions: Arc<RwLock<HashMap<String, SymbolPrecision>>>,
 }
 
 impl FixClient {
     pub fn new(config: FixConfig) -> Result<Self> {
-        // Decode the base64 private key
         let key_bytes = general_purpose::STANDARD
             .decode(&config.private_key_base64)
             .map_err(|e| FixError::Parse(format!("Failed to decode private key: {}", e)))?;
 
-        // Parse Ed25519 private key from PKCS#8 format
         let signing_key = if key_bytes.len() == 32 {
             SigningKey::from_bytes(&key_bytes.try_into().unwrap())
         } else if key_bytes.len() > 32 {
-            // Extract from PKCS#8 format - the last 32 bytes should be the key
             let key_start = key_bytes.len().saturating_sub(32);
             let key_slice: [u8; 32] = key_bytes[key_start..]
                 .try_into()
@@ -166,7 +158,6 @@ impl FixClient {
         })
     }
 
-    // Add method to update symbol precision cache
     pub fn update_symbol_precision(&self, symbol: &str, qty_precision: u8, price_precision: u8) {
         let mut cache = self.symbol_precisions.write();
         cache.insert(symbol.to_string(), SymbolPrecision {
@@ -175,26 +166,22 @@ impl FixClient {
         });
     }
 
-    // Helper function to format quantity with correct precision
     fn format_quantity(&self, quantity: f64, precision: Option<u8>) -> String {
         match precision {
             Some(p) => format!("{:.prec$}", quantity, prec = p as usize),
-            None => format!("{:.8}", quantity), // Default to 8 if not specified
+            None => format!("{:.8}", quantity),
         }
     }
 
     pub fn connect(&mut self) -> Result<()> {
         eprintln!("Connecting to FIX endpoint: {}", self.config.endpoint);
 
-        // Create communication channel
         let (message_tx, message_rx) = unbounded();
         self.message_sender = Some(message_tx);
 
-        // Create TLS connection
         let connector = TlsConnector::new()?;
         let tcp_stream = TcpStream::connect(&self.config.endpoint)?;
 
-        // Set socket options for low latency
         tcp_stream.set_nodelay(true)?;
         tcp_stream.set_nonblocking(true)?; // Make it non-blocking
         tcp_stream.set_read_timeout(Some(Duration::from_secs(1)))?;
@@ -203,12 +190,10 @@ impl FixClient {
         let domain = self.config.endpoint.split(':').next().unwrap();
         let mut tls_stream = connector.connect(domain, tcp_stream).unwrap();
 
-        // Send logon message immediately
         let logon_message = self.build_logon_message()?;
         tls_stream.write_all(logon_message.as_bytes())?;
         tls_stream.flush()?;
 
-        // Start connection handler thread
         let pending_orders = Arc::clone(&self.pending_orders);
         let shutdown = Arc::clone(&self.shutdown);
 
@@ -218,7 +203,6 @@ impl FixClient {
 
         self.connection_handle = Some(handle);
 
-        // Start heartbeat thread
         self.start_heartbeat()?;
 
         self.is_connected.store(true, Ordering::Release);
@@ -231,31 +215,27 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        // Create signature with correct format (SOH-separated)
         let signature = self.sign_logon_payload(&seq_num.to_string(), &sending_time);
 
-        // Build logon message with correct field ordering
         let mut body = String::new();
 
-        // Required fields in ascending numerical order
-        body.push_str(&format!("34={}\x01", seq_num)); // MsgSeqNum
-        body.push_str("35=A\x01"); // MsgType
-        body.push_str(&format!("49={}\x01", self.config.sender_comp_id)); // SenderCompID
-        body.push_str(&format!("52={}\x01", sending_time)); // SendingTime
-        body.push_str(&format!("56={}\x01", self.config.target_comp_id)); // TargetCompID
-        body.push_str(&format!("95={}\x01", signature.len())); // RawDataLength
-        body.push_str(&format!("96={}\x01", signature)); // RawData (signature)
-        body.push_str("98=0\x01"); // EncryptMethod
-        body.push_str(&format!("108={}\x01", self.config.heartbeat_interval)); // HeartBtInt
-        body.push_str("141=Y\x01"); // ResetSeqNumFlag
-        body.push_str(&format!("553={}\x01", self.config.api_key)); // Username
-        body.push_str("25035=1\x01"); // MessageHandling (UNORDERED for better performance)
+        body.push_str(&format!("34={}\x01", seq_num));
+        body.push_str("35=A\x01");
+        body.push_str(&format!("49={}\x01", self.config.sender_comp_id));
+        body.push_str(&format!("52={}\x01", sending_time));
+        body.push_str(&format!("56={}\x01", self.config.target_comp_id));
+        body.push_str(&format!("95={}\x01", signature.len()));
+        body.push_str(&format!("96={}\x01", signature));
+        body.push_str("98=0\x01");
+        body.push_str(&format!("108={}\x01", self.config.heartbeat_interval));
+        body.push_str("141=Y\x01");
+        body.push_str(&format!("553={}\x01", self.config.api_key));
+        body.push_str("25035=1\x01");
 
         Ok(self.build_fix_message(&body))
     }
 
     fn sign_logon_payload(&self, seq_num: &str, sending_time: &str) -> String {
-        // Correct signature payload format with SOH separators
         let payload = format!(
             "A\x01{}\x01{}\x01{}\x01{}",
             self.config.sender_comp_id,
@@ -269,7 +249,6 @@ impl FixClient {
     }
 
     fn build_fix_message(&self, body: &str) -> String {
-        // Correct FIX message format with proper header
         let header = format!("8=FIX.4.4\x019={}\x01", body.len());
         let message = format!("{}{}", header, body);
         let checksum = self.calculate_checksum(&message);
@@ -286,19 +265,14 @@ impl FixClient {
         pending_orders: Arc<RwLock<HashMap<String, OrderExecution>>>,
         shutdown: Arc<AtomicBool>
     ) {
-        // Since we can't clone TLS streams easily, we'll use a different approach
-        // We'll handle both reading and writing in the same thread
-
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
 
         loop {
-            // Check for shutdown
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
 
-            // Handle outgoing messages (non-blocking)
             while let Ok(msg) = message_rx.try_recv() {
                 match msg {
                     InternalMessage::SendMessage(fix_msg) => {
@@ -328,7 +302,6 @@ impl FixClient {
                 }
             }
 
-            // Try to read incoming data (non-blocking)
             match stream.read(&mut temp_buf) {
                 Ok(0) => {
                     eprintln!("Connection closed by server");
@@ -337,7 +310,6 @@ impl FixClient {
                 Ok(n) => {
                     buffer.extend_from_slice(&temp_buf[0..n]);
 
-                    // Process complete FIX messages (ending with \x01)
                     while let Some(pos) = buffer.iter().position(|&b| b == 0x01) {
                         let msg_bytes: Vec<u8> = buffer.drain(0..=pos).collect();
                         if let Ok(msg_str) = String::from_utf8(msg_bytes) {
@@ -365,7 +337,6 @@ impl FixClient {
                 }
             }
 
-            // Small sleep to prevent busy waiting
             thread::sleep(Duration::from_millis(1));
         }
 
@@ -423,7 +394,6 @@ impl FixClient {
                 eprintln!("Received Logon response");
             }
             Some("8") => {
-                // Execution Report
                 if let Some(exec_result) = Self::parse_execution_report(&fields)? {
                     let client_order_id = exec_result.client_order_id.clone();
 
@@ -439,7 +409,6 @@ impl FixClient {
                 }
             }
             Some("1") => {
-                // Test Request - should send heartbeat response
                 if let Some(test_req_id) = fields.get("112") {
                     eprintln!("Received Test Request: {}", test_req_id);
                 }
@@ -479,7 +448,6 @@ impl FixClient {
             return Ok(None);
         }
 
-        // Parse execution report fields
         let client_order_id = fields.get("11").unwrap_or(&String::new()).clone();
         let order_id = fields.get("37").unwrap_or(&String::new()).clone();
         let symbol = fields.get("55").unwrap_or(&String::new()).clone();
@@ -526,7 +494,7 @@ impl FixClient {
                 exec_type,
                 last_px,
                 last_qty,
-                execution_time: Duration::ZERO, // Will be set by caller
+                execution_time: Duration::ZERO,
             })
         )
     }
@@ -539,7 +507,6 @@ impl FixClient {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         );
 
-        // If precision not provided in order, try to get from cache
         if order.qty_precision.is_none() {
             let cache = self.symbol_precisions.read();
             if let Some(precision_info) = cache.get(&order.symbol) {
@@ -560,40 +527,34 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        // Build order message with correct field ordering
         let mut body = String::new();
-        body.push_str(&format!("11={}\x01", client_order_id)); // ClOrdID
-        body.push_str(&format!("34={}\x01", seq_num)); // MsgSeqNum
-        body.push_str("35=D\x01"); // MsgType (NewOrderSingle)
+        body.push_str(&format!("11={}\x01", client_order_id));
+        body.push_str(&format!("34={}\x01", seq_num));
+        body.push_str("35=D\x01");
 
-        // Format quantity with correct precision
         if let Some(quote_qty) = order.quote_quantity {
-            // For quote quantity orders, format with appropriate precision
             let formatted_qty = self.format_quantity(quote_qty, order.qty_precision);
-            body.push_str(&format!("38={}\x01", formatted_qty)); // OrderQty
+            body.push_str(&format!("38={}\x01", formatted_qty));
         } else {
-            // For base quantity orders, format with appropriate precision
             let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
-            body.push_str(&format!("38={}\x01", formatted_qty)); // OrderQty
+            body.push_str(&format!("38={}\x01", formatted_qty));
         }
 
         body.push_str("40=1\x01"); // OrdType (Market)
-        body.push_str(&format!("49={}\x01", self.config.sender_comp_id)); // SenderCompID
-        body.push_str(&format!("52={}\x01", sending_time)); // SendingTime
-        body.push_str(&format!("54={}\x01", order.side.to_fix_side())); // Side
-        body.push_str(&format!("55={}\x01", order.symbol.to_uppercase())); // Symbol
-        body.push_str(&format!("56={}\x01", self.config.target_comp_id)); // TargetCompID
-        body.push_str("59=4\x01"); // TimeInForce (Immediate or Cancel)
+        body.push_str(&format!("49={}\x01", self.config.sender_comp_id));
+        body.push_str(&format!("52={}\x01", sending_time));
+        body.push_str(&format!("54={}\x01", order.side.to_fix_side()));
+        body.push_str(&format!("55={}\x01", order.symbol.to_uppercase()));
+        body.push_str(&format!("56={}\x01", self.config.target_comp_id));
+        body.push_str("59=4\x01");
 
         if let Some(quote_qty) = order.quote_quantity {
-            // Format CashOrderQty with appropriate precision
             let formatted_cash_qty = self.format_quantity(quote_qty, order.qty_precision);
-            body.push_str(&format!("152={}\x01", formatted_cash_qty)); // CashOrderQty
+            body.push_str(&format!("152={}\x01", formatted_cash_qty));
         }
 
         let full_message = self.build_fix_message(&body);
 
-        // Send order through the message channel
         if let Some(sender) = &self.message_sender {
             sender
                 .send(InternalMessage::SendMessage(full_message))
@@ -623,11 +584,9 @@ impl FixClient {
             order.qty_precision
         );
 
-        // Wait for execution result with timeout
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(result) => Ok(result),
             Err(_) => {
-                // Clean up pending order
                 self.pending_orders.write().remove(&client_order_id);
                 Err(FixError::Timeout)
             }
@@ -638,7 +597,6 @@ impl FixClient {
         self.shutdown.store(true, Ordering::Release);
         self.is_connected.store(false, Ordering::Release);
 
-        // Send logout message before disconnecting
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
@@ -656,13 +614,11 @@ impl FixClient {
 
         let logout_message = self.build_fix_message(&body);
 
-        // Send logout through the message channel
         if let Some(sender) = &self.message_sender {
             let _ = sender.send(InternalMessage::SendMessage(logout_message));
             let _ = sender.send(InternalMessage::Shutdown);
         }
 
-        // Wait for threads to finish
         if let Some(handle) = self.heartbeat_handle.take() {
             let _ = handle.join();
         }

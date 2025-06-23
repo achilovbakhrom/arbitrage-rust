@@ -11,11 +11,10 @@ use crate::models::level::Level;
 use crate::models::symbol::Symbol;
 use crate::exchange::client::{ DepthResponse, ExchangeClient };
 
-// Shared singleton client for connection pooling
 lazy_static::lazy_static! {
     static ref HTTP_CLIENT: HttpClient = HttpClient::builder()
         .timeout(Duration::from_secs(10))
-        .tcp_nodelay(true) // Disable Nagle's algorithm for low latency
+        .tcp_nodelay(true)
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .pool_idle_timeout(Some(Duration::from_secs(30)))
         .pool_max_idle_per_host(10)
@@ -32,22 +31,16 @@ struct BinanceDepthResponse {
 }
 
 pub struct BinanceClient {
-    /// Base URL for API requests
     base_url: Url,
 
-    /// API key for authenticated requests
     api_key: Arc<str>,
 
-    /// Whether to use the testnet
     testnet: bool,
 
-    /// Cache for symbols to avoid repeated API calls
     symbols_cache: RwLock<Option<Vec<Symbol>>>,
 
-    /// Cache expiration time
     symbols_cache_updated_at: RwLock<Instant>,
 
-    /// Cache expiration duration (5 minutes)
     symbols_cache_ttl: Duration,
 }
 
@@ -87,9 +80,7 @@ enum BinanceSymbolFilter {
 }
 
 impl BinanceClient {
-    /// Create a new Binance client
     pub fn new(api_key: String, testnet: bool) -> Result<Self> {
-        // Set the base URL based on whether testnet is enabled
         let base_url = if testnet {
             // Url::parse("https://testnet.binance.vision/api/").context("Invalid testnet URL")?
             Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
@@ -103,17 +94,15 @@ impl BinanceClient {
             testnet,
             symbols_cache: RwLock::new(None),
             symbols_cache_updated_at: RwLock::new(Instant::now()),
-            symbols_cache_ttl: Duration::from_secs(300), // 5 minutes
+            symbols_cache_ttl: Duration::from_secs(300),
         })
     }
 
-    /// Calculate precision from step size - optimized version
     #[inline]
     fn calculate_precision(step_size: &str) -> u8 {
         if let Some(decimal_idx) = step_size.find('.') {
             let decimal_part = &step_size[decimal_idx + 1..];
 
-            // Fast path for common cases
             if decimal_part == "1" || decimal_part == "01" {
                 return decimal_part.len() as u8;
             }
@@ -128,12 +117,10 @@ impl BinanceClient {
         }
     }
 
-    /// Convert BinanceSymbol to our Symbol model
     fn convert_symbol(binance_symbol: BinanceSymbol) -> Symbol {
-        let mut price_precision = 8; // Default values
+        let mut price_precision = 8;
         let mut qty_precision = 8;
 
-        // Extract filter information
         for filter in &binance_symbol.filters {
             match filter {
                 BinanceSymbolFilter::LotSize { min_qty: _minq, max_qty: _maxq, step_size: ss } => {
@@ -157,7 +144,6 @@ impl BinanceClient {
         }
     }
 
-    /// Check if the symbols cache is valid
     #[inline]
     async fn is_cache_valid(&self) -> bool {
         let cache_time = *self.symbols_cache_updated_at.read().await;
@@ -178,7 +164,6 @@ impl ExchangeClient for BinanceClient {
     }
 
     async fn get_all_symbols(&self) -> Result<Vec<Symbol>> {
-        // Fast path: return cached symbols if available and not expired
         if self.is_cache_valid().await {
             if let Some(symbols) = self.symbols_cache.read().await.as_ref() {
                 debug!("Returning {} symbols from cache", symbols.len());
@@ -186,20 +171,16 @@ impl ExchangeClient for BinanceClient {
             }
         }
 
-        // Cache miss: fetch from API
         let start = Instant::now();
         debug!("Fetching all symbols from Binance");
 
-        // Build the URL for the exchange info endpoint
         let url = self.base_url.join("v3/exchangeInfo").context("Failed to build URL")?;
 
-        // Make the request
         let response = HTTP_CLIENT.get(url)
             .header("X-MBX-APIKEY", self.api_key.as_ref())
             .send().await
             .context("Failed to send request to Binance")?;
 
-        // Check if the request was successful
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
@@ -207,12 +188,10 @@ impl ExchangeClient for BinanceClient {
             anyhow::bail!("Binance API error: {} - {}", status, text);
         }
 
-        // Parse the response with minimal allocations
         let exchange_info: BinanceExchangeInfo = response
             .json().await
             .context("Failed to parse Binance response")?;
 
-        // Convert and optimize with pre-allocated capacity
         let symbols_count = exchange_info.symbols.len();
         let mut symbols = Vec::with_capacity(symbols_count);
 
@@ -223,7 +202,6 @@ impl ExchangeClient for BinanceClient {
         let elapsed = start.elapsed();
         info!("Fetched {} symbols from Binance in {:.2?}", symbols.len(), elapsed);
 
-        // Update cache
         *self.symbols_cache.write().await = Some(symbols.clone());
         *self.symbols_cache_updated_at.write().await = Instant::now();
 
@@ -233,24 +211,20 @@ impl ExchangeClient for BinanceClient {
     async fn get_active_spot_symbols(&self) -> Result<Vec<Symbol>> {
         let all_symbols = self.get_all_symbols().await.unwrap();
 
-        // Pre-allocate for efficiency
         let mut spot_symbols = Vec::with_capacity(all_symbols.len() / 2);
 
-        // Filter symbols to include only active spot trading symbols
         for symbol in all_symbols {
             if symbol.is_trading && symbol.is_spot_trading_allowed {
                 spot_symbols.push(symbol);
             }
         }
 
-        // Shrink to fit to conserve memory
         spot_symbols.shrink_to_fit();
 
         Ok(spot_symbols)
     }
 
     async fn get_symbol(&self, symbol: &str) -> Result<Symbol> {
-        // Try to find in cache first for better performance
         if self.is_cache_valid().await {
             if let Some(symbols) = self.symbols_cache.read().await.as_ref() {
                 if let Some(found) = symbols.iter().find(|s| s.symbol.as_ref() == symbol) {
@@ -259,7 +233,6 @@ impl ExchangeClient for BinanceClient {
             }
         }
 
-        // Fall back to fetching all symbols if not in cache
         let all_symbols = self.get_all_symbols().await?;
 
         all_symbols
@@ -269,15 +242,10 @@ impl ExchangeClient for BinanceClient {
     }
 
     async fn is_operational(&self) -> Result<bool> {
-        // Use cached client for connection reuse
         let url = self.base_url.join("v3/ping").context("Failed to build URL")?;
 
-        // Make the request with minimal overhead
-        let response = HTTP_CLIENT.get(url)
-            .timeout(Duration::from_secs(2)) // Short timeout for ping
-            .send().await;
+        let response = HTTP_CLIENT.get(url).timeout(Duration::from_secs(2)).send().await;
 
-        // Check if the request was successful
         match response {
             Ok(res) => Ok(res.status().is_success()),
             Err(_) => Ok(false),
@@ -285,8 +253,6 @@ impl ExchangeClient for BinanceClient {
     }
 
     async fn fetch_depth(&self, symbol: &str, limit: usize) -> Result<DepthResponse> {
-        // Build the URL for the depth endpoint
-
         if symbol.trim().is_empty() {
             return Err(anyhow::anyhow!("Symbol parameter cannot be empty"));
         }
@@ -302,17 +268,14 @@ impl ExchangeClient for BinanceClient {
             "Fetching orderbook depth"
         );
 
-        // Start timing the request
         let start = Instant::now();
 
-        // Make the request with connection pooling and proper timeouts
         let response = HTTP_CLIENT.get(url.clone())
             .header("X-MBX-APIKEY", self.api_key.as_ref())
             .timeout(Duration::from_secs(5))
             .send().await
             .context(format!("Failed to fetch depth from Binance for symbol {}", symbol))?;
 
-        // Check if the request was successful
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
@@ -325,12 +288,10 @@ impl ExchangeClient for BinanceClient {
             anyhow::bail!("Binance depth API error for {}: {} - {}", symbol, status, text);
         }
 
-        // Parse the response
         let depth: BinanceDepthResponse = response
             .json().await
             .context(format!("Failed to parse Binance depth response for {}", symbol))?;
 
-        // Convert string arrays to Level structs
         let bids = depth.bids
             .iter()
             .filter_map(|bid| {
@@ -369,7 +330,6 @@ impl ExchangeClient for BinanceClient {
 
         let elapsed = start.elapsed();
 
-        // Log the response details
         debug!(
             symbol = %symbol,
             last_update_id = depth.last_update_id,

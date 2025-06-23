@@ -38,67 +38,31 @@ pub mod encoder {
             self.parent.take().ok_or(SbeErr::ParentNotSet)
         }
 
-        /// primitive field 'blockLength'
-        /// - min value: 0
-        /// - max value: 65534
-        /// - null value: 0xffff_u16
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 0
-        /// - encodedLength: 2
-        /// - version: 0
         #[inline]
         pub fn block_length(&mut self, value: u16) {
             let offset = self.offset;
             self.get_buf_mut().put_u16_at(offset, value);
         }
 
-        /// primitive field 'templateId'
-        /// - min value: 0
-        /// - max value: 65534
-        /// - null value: 0xffff_u16
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 2
-        /// - encodedLength: 2
-        /// - version: 0
         #[inline]
         pub fn template_id(&mut self, value: u16) {
             let offset = self.offset + 2;
             self.get_buf_mut().put_u16_at(offset, value);
         }
 
-        /// primitive field 'schemaId'
-        /// - min value: 0
-        /// - max value: 65534
-        /// - null value: 0xffff_u16
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 4
-        /// - encodedLength: 2
-        /// - version: 0
         #[inline]
         pub fn schema_id(&mut self, value: u16) {
             let offset = self.offset + 4;
             self.get_buf_mut().put_u16_at(offset, value);
         }
 
-        /// primitive field 'version'
-        /// - min value: 0
-        /// - max value: 65534
-        /// - null value: 0xffff_u16
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 6
-        /// - encodedLength: 2
-        /// - version: 0
         #[inline]
         pub fn version(&mut self, value: u16) {
             let offset = self.offset + 6;
             self.get_buf_mut().put_u16_at(offset, value);
         }
     }
-} // end encoder mod
+}
 
 pub mod decoder {
     use super::*;
@@ -138,28 +102,24 @@ pub mod decoder {
             self.parent.take().ok_or(SbeErr::ParentNotSet)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn block_length(&self) -> u16 {
             self.get_buf().get_u16_at(self.offset)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn template_id(&self) -> u16 {
             self.get_buf().get_u16_at(self.offset + 2)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn schema_id(&self) -> u16 {
             self.get_buf().get_u16_at(self.offset + 4)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn version(&self) -> u16 {
             self.get_buf().get_u16_at(self.offset + 6)
         }
     }
-} // end decoder mod
+}

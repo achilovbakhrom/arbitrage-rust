@@ -1,4 +1,3 @@
-// src/config/mod.rs - Updated with FIX API configuration
 use anyhow::{ Context, Result };
 use dotenv::dotenv;
 use serde::{ Deserialize, Serialize };
@@ -28,10 +27,8 @@ pub struct Config {
 
     pub min_volume_multiplier: f64,
 
-    // FIX API Configuration
     pub fix_config: FixApiConfig,
 
-    // Trading configuration
     pub enable_trading: bool,
     pub max_slippage_percentage: f64,
     pub min_execution_profit_threshold: f64,
@@ -75,7 +72,6 @@ pub enum LogRotation {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        // Load environment variables from .env file
         match dotenv() {
             Ok(path) => {
                 println!("✅ Loaded .env file from: {}", path.display());
@@ -86,74 +82,62 @@ impl Config {
             }
         }
 
-        // Debug: Print current working directory
         if let Ok(cwd) = env::current_dir() {
             println!("📁 Current working directory: {}", cwd.display());
         }
 
-        // Debug: Check if .env file exists
         if std::path::Path::new(".env").exists() {
             println!("✅ .env file found in current directory");
         } else {
             println!("❌ .env file NOT found in current directory");
         }
 
-        // Parse DEBUG
         let debug = env
             ::var("TAA_DEBUG")
             .unwrap_or_else(|_| "false".to_string())
             .parse::<bool>()
             .context("Failed to parse TAA_DEBUG environment variable")?;
 
-        // Parse SBE_API_KEY
         let sbe_api_key = env
             ::var("TAA_SBE_API_KEY")
             .context("SBE_API_KEY environment variable not set")?;
 
-        // Parse FIX_API
         let fix_api = env::var("TAA_FIX_API").context("TAA_FIX_API environment variable not set")?;
 
-        // Parse FIX_SECRET
         let fix_secret = env
             ::var("TAA_FIX_SECRET")
             .context("TAA_FIX_SECRET environment variable not set")?;
 
-        // Parse THRESHOLD
         let threshold = env
             ::var("TAA_THRESHOLD")
             .unwrap_or_else(|_| "0.5".to_string())
             .parse::<f64>()
             .context("Failed to parse TAA_THRESHOLD environment variable")?;
 
-        // Parse DEPTH
         let depth = env
             ::var("TAA_DEPTH")
             .unwrap_or_else(|_| "20".to_string())
             .parse::<usize>()
             .context("Failed to parse TAA_DEPTH environment variable")?;
 
-        // Parse PAIRS_COUNT
         let max_triangles: usize = env
             ::var("TAA_MAX_TRIANGLES")
             .unwrap_or_else(|_| "15".to_string())
             .parse::<usize>()
             .context("Failed to parse TAA_MAX_TRIANGLES environment variable")?;
 
-        // Parse TRADE_AMOUNT
         let trade_amount: f64 = env
             ::var("TAA_TRADE_AMOUNT")
             .unwrap_or_else(|_| "100.0".to_string())
             .parse::<f64>()
             .context("Failed to parse TAA_TRADE_AMOUNT environment variable")?;
 
-        // Parse TRADE_AMOUNT
         let fee: f64 = env
             ::var("TAA_FEE")
             .unwrap_or_else(|_| "0.001".to_string())
             .parse::<f64>()
             .context("Failed to parse TAA_FEE environment variable")?;
 
-        // Parse LOG_LEVEL
         let log_level_str = env::var("TAA_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
 
         let log_level = match log_level_str.to_lowercase().as_str() {
@@ -165,7 +149,6 @@ impl Config {
             _ => Level::INFO,
         };
 
-        // Set up logging configuration
         let log_dir = env::var("TAA_LOG_DIRECTORY").unwrap_or_else(|_| "logs".to_string());
 
         let log_prefix = env
@@ -207,7 +190,6 @@ impl Config {
             .unwrap_or_else(|_| "2.0".to_string())
             .parse::<f64>()?;
 
-        // Parse FIX API configuration
         let fix_private_key = env
             ::var("TAA_FIX_PRIVATE_KEY_BASE64")
             .unwrap_or_else(|_| String::new());
@@ -238,7 +220,6 @@ impl Config {
             endpoint: fix_endpoint,
         };
 
-        // Parse trading configuration
         let enable_trading = env
             ::var("TAA_ENABLE_TRADING")
             .unwrap_or_else(|_| "false".to_string())
@@ -279,7 +260,6 @@ impl Config {
         })
     }
 
-    /// Get FIX configuration for the FIX client
     pub fn get_fix_client_config(&self) -> crate::exchange::fix_api::FixConfig {
         crate::exchange::fix_api::FixConfig {
             api_key: self.fix_api.clone(),
@@ -291,12 +271,10 @@ impl Config {
         }
     }
 
-    /// Determine if trading should be enabled (requires both config flag and non-debug mode for real trading)
     pub fn should_enable_real_trading(&self) -> bool {
         self.enable_trading && !self.debug
     }
 
-    /// Determine if mock trading should be used
     pub fn should_enable_mock_trading(&self) -> bool {
         self.enable_trading && self.debug
     }

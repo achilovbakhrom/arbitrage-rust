@@ -1,4 +1,3 @@
-// src/app/perf_mode.rs - Updated for separate arbitrage detection thread
 use std::sync::Arc;
 use crossbeam_channel::{ bounded, Receiver };
 use std::thread;
@@ -20,7 +19,6 @@ use crate::{
             is_operational,
             prepare_symbol_mappings,
         },
-        symbol_interner::SymbolId,
     },
 };
 use anyhow::{ anyhow, Context, Result };
@@ -69,7 +67,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
     let unique_symbols = symbol_map.get_unique_symbols();
 
-    // Create high-performance channel for arbitrage detection
     let (arbitrage_sender, arbitrage_receiver) = bounded::<UpdateBatch>(ARBITRAGE_CHANNEL_CAPACITY);
 
     let mut orderbook_manager = OrderBookManager::new(config.depth, client.clone());
@@ -112,7 +109,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         detector_mode
     );
 
-    // Start arbitrage detection thread
     let _arbitrage_thread = start_arbitrage_detection_thread(
         arbitrage_receiver,
         detector.clone(),
@@ -199,7 +195,6 @@ fn start_arbitrage_detection_thread(
         ::new()
         .name("arbitrage-detection-perf".to_string())
         .spawn(move || {
-            // Try to set thread affinity to CPU core 1
             #[cfg(target_os = "linux")]
             {
                 let mut cpu_set = nix::sched::CpuSet::new();
@@ -212,7 +207,6 @@ fn start_arbitrage_detection_thread(
             let mut processed_count = 0u64;
 
             while let Ok(batch) = receiver.recv() {
-                // Process entire batch in tight loop
                 for symbol_id in batch.iter() {
                     if let Some(book) = orderbook_manager.get_book_by_id(symbol_id) {
                         detector.handle_update_by_id(symbol_id, &book);
@@ -220,7 +214,6 @@ fn start_arbitrage_detection_thread(
                     }
                 }
 
-                // Yield occasionally to prevent starvation
                 if processed_count % 1024 == 0 {
                     thread::yield_now();
                 }

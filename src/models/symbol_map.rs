@@ -11,7 +11,7 @@ pub struct SymbolMap {
     symbols: RwLock<FastHashMap<Arc<str>, Symbol>>,
     by_base: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
     by_quote: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
-    /// Pre-computed triangular paths
+
     triangular_paths: Vec<TriangularPath>,
 }
 
@@ -22,11 +22,10 @@ impl SymbolMap {
             symbols: RwLock::new(FastHashMap::with_capacity(1000)),
             by_base: RwLock::new(FastHashMap::with_capacity(200)),
             by_quote: RwLock::new(FastHashMap::with_capacity(50)),
-            triangular_paths: Vec::with_capacity(5000), // Pre-allocate for paths
+            triangular_paths: Vec::with_capacity(5000),
         }
     }
 
-    /// Build from symbols with capacity optimization
     #[inline]
     pub fn from_symbols(symbols: Vec<Symbol>) -> Self {
         let mut map = Self::new();
@@ -72,7 +71,6 @@ impl SymbolMap {
         self.by_quote.read().get(quote_asset).cloned().unwrap_or_default()
     }
 
-    /// Find triangular paths that start and end with a specific asset
     pub fn find_targeted_triangular_paths(
         &mut self,
         base_asset: &str,
@@ -82,21 +80,18 @@ impl SymbolMap {
         let start = std::time::Instant::now();
         self.triangular_paths.clear();
 
-        // Create a HashSet for faster lookups of excluded fiats
         let excluded_fiats: HashSet<String> = excluded_fiats
             .iter()
             .map(|s| s.to_string())
             .collect();
 
-        // Don't exclude the base asset, even if it's a fiat
         let should_exclude = |asset: &str| -> bool {
             asset != base_asset && excluded_fiats.contains(asset)
         };
 
-        // Track all possible paths before filtering
         let mut all_paths = Vec::with_capacity(5000);
         let by_quote_borrowed = self.by_quote.read();
-        // Find all paths starting with base_asset (like USDT)
+
         let base_symbols = match by_quote_borrowed.get(base_asset) {
             Some(symbols) => symbols,
             None => {
@@ -107,26 +102,21 @@ impl SymbolMap {
 
         tracing::info!("Found {} symbols with {} as quote", base_symbols.len(), base_asset);
 
-        // For each starting pair (USDT → X)
         for first_symbol in base_symbols.as_slice() {
             let second_asset = &first_symbol.base_asset;
 
-            // Skip if second asset is a fiat currency
             if should_exclude(second_asset.as_ref()) {
                 continue;
             }
 
-            // Find second leg paths (X → Y)
             let second_base_symbols = self.get_by_base(second_asset);
             for second_symbol in second_base_symbols {
                 let third_asset = &second_symbol.quote_asset;
 
-                // Skip if third asset is a fiat currency
                 if should_exclude(third_asset.as_ref()) {
                     continue;
                 }
 
-                // Find paths back to base asset (Y → USDT)
                 let third_base_symbols = self.get_by_base(third_asset);
                 for third_symbol in third_base_symbols {
                     if third_symbol.quote_asset.as_ref() == base_asset {
@@ -134,16 +124,15 @@ impl SymbolMap {
                             first_symbol: first_symbol.symbol.clone(),
                             second_symbol: second_symbol.symbol.clone(),
                             third_symbol: third_symbol.symbol.clone(),
-                            first_is_base_to_quote: false, // USDT → X
-                            second_is_base_to_quote: true, // X → Y
-                            third_is_base_to_quote: true, // Y → USDT
+                            first_is_base_to_quote: false,
+                            second_is_base_to_quote: true,
+                            third_is_base_to_quote: true,
                             start_asset: base_asset.into(),
                             end_asset: base_asset.into(),
                         });
                     }
                 }
 
-                // Check other path type (X → Y → USDT)
                 let third_quote_symbols = self.get_by_quote(third_asset);
                 for third_symbol in third_quote_symbols {
                     if third_symbol.base_asset.as_ref() == base_asset {
@@ -151,9 +140,9 @@ impl SymbolMap {
                             first_symbol: first_symbol.symbol.clone(),
                             second_symbol: second_symbol.symbol.clone(),
                             third_symbol: third_symbol.symbol.clone(),
-                            first_is_base_to_quote: false, // USDT → X
-                            second_is_base_to_quote: true, // X → Y
-                            third_is_base_to_quote: false, // Y → USDT
+                            first_is_base_to_quote: false,
+                            second_is_base_to_quote: true,
+                            third_is_base_to_quote: false,
                             start_asset: base_asset.into(),
                             end_asset: base_asset.into(),
                         });
@@ -161,17 +150,14 @@ impl SymbolMap {
                 }
             }
 
-            // Check paths where second leg is quote → base
             let second_quote_symbols = self.get_by_quote(second_asset);
             for second_symbol in second_quote_symbols {
                 let third_asset = &second_symbol.base_asset;
 
-                // Skip if third asset is a fiat currency
                 if should_exclude(third_asset.as_ref()) {
                     continue;
                 }
 
-                // Find paths back to base asset
                 let third_base_symbols = self.get_by_base(third_asset);
                 for third_symbol in third_base_symbols {
                     if third_symbol.quote_asset.as_ref() == base_asset {
@@ -179,16 +165,15 @@ impl SymbolMap {
                             first_symbol: first_symbol.symbol.clone(),
                             second_symbol: second_symbol.symbol.clone(),
                             third_symbol: third_symbol.symbol.clone(),
-                            first_is_base_to_quote: false, // USDT → X
-                            second_is_base_to_quote: false, // X → Y
-                            third_is_base_to_quote: true, // Y → USDT
+                            first_is_base_to_quote: false,
+                            second_is_base_to_quote: false,
+                            third_is_base_to_quote: true,
                             start_asset: base_asset.into(),
                             end_asset: base_asset.into(),
                         });
                     }
                 }
 
-                // Check other path type
                 let third_quote_symbols = self.get_by_quote(third_asset);
                 for third_symbol in third_quote_symbols {
                     if third_symbol.base_asset.as_ref() == base_asset {
@@ -196,9 +181,9 @@ impl SymbolMap {
                             first_symbol: first_symbol.symbol.clone(),
                             second_symbol: second_symbol.symbol.clone(),
                             third_symbol: third_symbol.symbol.clone(),
-                            first_is_base_to_quote: false, // USDT → X
-                            second_is_base_to_quote: false, // X → Y
-                            third_is_base_to_quote: false, // Y → USDT
+                            first_is_base_to_quote: false,
+                            second_is_base_to_quote: false,
+                            third_is_base_to_quote: false,
                             start_asset: base_asset.into(),
                             end_asset: base_asset.into(),
                         });
@@ -213,9 +198,7 @@ impl SymbolMap {
             base_asset
         );
 
-        // If we have more paths than needed, randomly select subset
         if all_paths.len() > max_paths {
-            // Randomly select paths
             use rand::seq::SliceRandom;
             let mut rng = rand::rng();
 
@@ -232,7 +215,6 @@ impl SymbolMap {
         tracing::info!("Processed triangular paths in {:?}", start.elapsed());
     }
 
-    /// Fast access to precomputed paths
     #[inline]
     pub fn get_triangular_paths(&self) -> &[TriangularPath] {
         &self.triangular_paths

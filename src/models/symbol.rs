@@ -1,10 +1,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-/// Lightweight trading symbol representation
 #[derive(Debug, Clone)]
 pub struct Symbol {
-    pub symbol: Arc<str>, // Using Arc<str> to reduce clone costs
+    pub symbol: Arc<str>,
     pub base_asset: Arc<str>,
     pub quote_asset: Arc<str>,
     pub price_precision: u8,

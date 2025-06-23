@@ -1,4 +1,3 @@
-// src/executor/fix_executor.rs - Complete implementation with precision support
 use std::sync::{ Arc, Mutex };
 use std::time::Instant;
 use std::sync::atomic::{ AtomicU64, Ordering };
@@ -11,31 +10,24 @@ use crate::exchange::mock_fix_api::MockFixClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::models::symbol_map::SymbolMap;
 
-/// Execution result for triangular arbitrage
 #[derive(Debug)]
 pub struct TriangularExecutionResult {
     pub success: bool,
     pub actual_profit: f64,
-    pub trades_executed: u8, // Number of successful trades (0-3)
+    pub trades_executed: u8,
     pub error: Option<String>,
 }
 
-/// Enhanced arbitrage executor that uses FIX API for real trading
 pub struct FixArbitrageExecutor {
-    // FIX clients (only one will be used based on debug mode)
     real_fix_client: Option<Arc<Mutex<FixClient>>>,
     mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
 
-    // Symbol map for precision lookup
     symbol_map: Arc<SymbolMap>,
 
-    // Debug mode flag
     is_debug_mode: bool,
 
-    // Dependencies
     orderbook_manager: Arc<OrderBookManager>,
 
-    // Performance tracking
     execution_counter: AtomicU64,
     successful_executions: AtomicU64,
     total_execution_time_us: AtomicU64,
@@ -44,7 +36,6 @@ pub struct FixArbitrageExecutor {
 }
 
 impl FixArbitrageExecutor {
-    /// Create a new FIX arbitrage executor with symbol map for precision
     pub fn new(
         orderbook_manager: Arc<OrderBookManager>,
         is_debug_mode: bool,
@@ -53,15 +44,12 @@ impl FixArbitrageExecutor {
         symbol_map: Arc<SymbolMap>
     ) -> Result<Self> {
         let (real_fix_client, mock_fix_client) = if is_debug_mode {
-            // Debug mode: use mock client
             let mock_client = MockFixClient::new();
             (None, Some(Arc::new(Mutex::new(mock_client))))
         } else {
-            // Production mode: use real FIX client
             if let Some(config) = fix_config {
                 let real_client = FixClient::new(config).context("Failed to create FIX client")?;
 
-                // Pre-populate precision cache from symbol map
                 for symbol in symbol_map.get_all_symbols() {
                     real_client.update_symbol_precision(
                         &symbol.symbol,
@@ -89,7 +77,6 @@ impl FixArbitrageExecutor {
         })
     }
 
-    /// Connect to the FIX API (real or mock)
     pub fn connect(&self) -> Result<()> {
         if self.is_debug_mode {
             if let Some(mock_client) = &self.mock_fix_client {
@@ -107,7 +94,6 @@ impl FixArbitrageExecutor {
         Ok(())
     }
 
-    /// Disconnect from the FIX API
     pub fn disconnect(&self) -> Result<()> {
         if self.is_debug_mode {
             if let Some(mock_client) = &self.mock_fix_client {
@@ -123,18 +109,15 @@ impl FixArbitrageExecutor {
         Ok(())
     }
 
-    /// Get precision for a symbol
     fn get_symbol_precision(&self, symbol: &str) -> Option<(u8, u8)> {
         self.symbol_map.get(symbol).map(|s| (s.qty_precision, s.price_precision))
     }
 
-    /// Apply precision to a quantity value
     fn apply_precision(value: f64, precision: u8) -> f64 {
         let factor = (10f64).powi(precision as i32);
         (value * factor).floor() / factor
     }
 
-    /// Execute a triangular arbitrage opportunity
     pub fn execute_triangular_arbitrage(
         &self,
         opportunity: &ArbitrageOpportunity
@@ -149,7 +132,6 @@ impl FixArbitrageExecutor {
             "Starting triangular arbitrage execution"
         );
 
-        // Validate opportunity is still profitable
         if !self.validate_opportunity(opportunity) {
             return TriangularExecutionResult {
                 success: false,
@@ -159,13 +141,11 @@ impl FixArbitrageExecutor {
             };
         }
 
-        // Execute the three trades in sequence
         let trade_results = self.execute_triangular_trades(opportunity);
 
         let execution_time_us = start_time.elapsed().as_micros() as u64;
         self.total_execution_time_us.fetch_add(execution_time_us, Ordering::Relaxed);
 
-        // Calculate actual profit/loss
         let (success, actual_profit, trades_executed) = self.calculate_execution_result(
             &trade_results,
             opportunity
@@ -199,9 +179,7 @@ impl FixArbitrageExecutor {
         }
     }
 
-    /// Validate that the opportunity is still profitable with current prices
     fn validate_opportunity(&self, opportunity: &ArbitrageOpportunity) -> bool {
-        // Get current top of book for all three symbols
         let first_book = self.orderbook_manager.get_top_of_book_internal(
             &opportunity.path.first_symbol
         );
@@ -219,7 +197,6 @@ impl FixArbitrageExecutor {
                 Some((third_bid, third_ask)),
             ) = (first_book, second_book, third_book)
         {
-            // Calculate current profit with latest prices
             let current_profit = self.calculate_current_profit(
                 opportunity,
                 &first_bid,
@@ -232,11 +209,10 @@ impl FixArbitrageExecutor {
 
             current_profit > self.min_profit_threshold
         } else {
-            false // Missing price data
+            false
         }
     }
 
-    /// Calculate current profit percentage with latest orderbook data
     fn calculate_current_profit(
         &self,
         opportunity: &ArbitrageOpportunity,
@@ -294,7 +270,6 @@ impl FixArbitrageExecutor {
         ((amount - start_amount) / start_amount) * 100.0
     }
 
-    /// Execute the three trades that make up the triangular arbitrage
     fn execute_triangular_trades(
         &self,
         opportunity: &ArbitrageOpportunity
@@ -325,13 +300,12 @@ impl FixArbitrageExecutor {
                 results.push(result);
             } else {
                 results.push(result);
-                return results; // Stop if first trade fails
+                return results;
             }
         } else {
-            return results; // Stop if first trade fails
+            return results;
         }
 
-        // Trade 2: Intermediate asset 1 -> Intermediate asset 2
         if
             let Some(result) = self.execute_single_trade(
                 &path.second_symbol,
@@ -353,13 +327,12 @@ impl FixArbitrageExecutor {
                 results.push(result);
             } else {
                 results.push(result);
-                return results; // Stop if second trade fails
+                return results;
             }
         } else {
-            return results; // Stop if second trade fails
+            return results;
         }
 
-        // Trade 3: Intermediate asset 2 -> End asset (should be same as start)
         if
             let Some(result) = self.execute_single_trade(
                 &path.third_symbol,
@@ -378,7 +351,6 @@ impl FixArbitrageExecutor {
         results
     }
 
-    /// Execute a single market order with precision
     fn execute_single_trade(
         &self,
         symbol: &str,
@@ -386,10 +358,8 @@ impl FixArbitrageExecutor {
         amount: f64,
         is_base_to_quote: bool
     ) -> Option<ExecutionResult> {
-        // Get precision for this symbol
         let (qty_precision, price_precision) = self.get_symbol_precision(symbol).unwrap_or((8, 8)); // Default to 8 decimals if not found
 
-        // Apply precision to the amount
         let precise_amount = Self::apply_precision(amount, qty_precision);
 
         let order = MarketOrder {
@@ -448,7 +418,6 @@ impl FixArbitrageExecutor {
         }
     }
 
-    /// Calculate the final execution result
     fn calculate_execution_result(
         &self,
         trade_results: &[ExecutionResult],
@@ -456,7 +425,6 @@ impl FixArbitrageExecutor {
     ) -> (bool, f64, u8) {
         let trades_executed = trade_results.len() as u8;
 
-        // Check if all trades were successful
         let all_successful =
             trade_results.len() == 3 && trade_results.iter().all(|r| r.order_status == "FILLED");
 
@@ -464,13 +432,9 @@ impl FixArbitrageExecutor {
             return (false, 0.0, trades_executed);
         }
 
-        // Calculate actual profit from trade results
         let start_amount = opportunity.start_amount;
 
-        // For triangular arbitrage, the final amount should be in the same asset as start
-        // This is a simplified calculation - in reality you'd need to track the exact asset flow
         let final_amount = if let Some(last_trade) = trade_results.last() {
-            // This depends on the direction of the last trade
             if opportunity.path.third_is_base_to_quote {
                 last_trade.cum_quote_qty
             } else {
@@ -484,7 +448,6 @@ impl FixArbitrageExecutor {
         (true, actual_profit, trades_executed)
     }
 
-    /// Get execution statistics
     pub fn get_execution_stats(&self) -> ExecutionStats {
         let total_executions = self.execution_counter.load(Ordering::Relaxed);
         let successful_executions = self.successful_executions.load(Ordering::Relaxed);
@@ -512,7 +475,6 @@ impl FixArbitrageExecutor {
     }
 }
 
-/// Execution statistics
 #[derive(Debug)]
 pub struct ExecutionStats {
     pub total_executions: u64,

@@ -1,4 +1,3 @@
-// src/orderbook/orderbook.rs - Ultra-optimized for sub-3μs update performance with proper UnsafeCell
 use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use std::cell::UnsafeCell;
 use crate::models::level::Level;
@@ -6,7 +5,6 @@ use parking_lot::{ Mutex, RwLock };
 use tracing::{ debug, warn };
 use std::fmt;
 
-/// Current state of the orderbook
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderBookState {
     Uninitialized = 0,
@@ -17,22 +15,17 @@ pub enum OrderBookState {
 const MAX_DEPTH: usize = 5;
 const PRICE_EPSILON: f64 = 1e-8;
 
-// Ultra-optimized hot data with proper interior mutability
-#[repr(C, align(128))] // Full cache line alignment
+#[repr(C, align(128))]
 struct HotData {
-    // Atomic state for thread safety
     state: AtomicU8,
     last_update_id: AtomicU64,
 
-    // Mutable fields with interior mutability
-    counts: UnsafeCell<(u8, u8)>, // (bid_count, ask_count)
-    best_prices: UnsafeCell<(f64, f64, f64, f64, f64)>, // (bid_price, bid_qty, ask_price, ask_qty, mid_price)
+    counts: UnsafeCell<(u8, u8)>,
+    best_prices: UnsafeCell<(f64, f64, f64, f64, f64)>,
 
-    // Padding to cache line boundary
     _padding: [u8; 80],
 }
 
-// Separate cache line for level data to avoid false sharing
 #[repr(C, align(64))]
 struct Levels {
     bids: UnsafeCell<[(f64, f64); MAX_DEPTH]>,
@@ -40,19 +33,15 @@ struct Levels {
 }
 
 pub struct OrderBook {
-    // Hot data in dedicated cache line
     hot: HotData,
 
-    // Level data in separate cache line
     levels: Box<Levels>,
 
-    // Cold data
     max_depth: u8,
     update_mutex: Mutex<()>,
     event_buffer: RwLock<Vec<(u64, u64, Vec<(f64, f64)>, Vec<(f64, f64)>)>>,
 }
 
-// Safety: OrderBook can be safely shared between threads due to interior mutability design
 unsafe impl Sync for OrderBook {}
 unsafe impl Send for OrderBook {}
 
@@ -100,7 +89,6 @@ impl OrderBook {
         self.hot.state.store(state as u8, Ordering::Relaxed);
     }
 
-    /// ULTRA-OPTIMIZED: Main update function targeting 1-3μs
     #[inline(always)]
     pub fn apply_depth_update_raw(
         &self,
@@ -109,13 +97,11 @@ impl OrderBook {
         first_update_id: u64,
         last_update_id: u64
     ) -> Result<bool, ()> {
-        // OPTIMIZATION 1: Single atomic load for state check
         let current_state = self.hot.state.load(Ordering::Relaxed);
         if current_state != (OrderBookState::Synced as u8) {
             return Ok(false);
         }
 
-        // OPTIMIZATION 2: Single atomic load for sequence check
         let current_id = self.hot.last_update_id.load(Ordering::Relaxed);
         if last_update_id <= current_id {
             return Ok(true);
@@ -125,24 +111,20 @@ impl OrderBook {
             return Ok(false);
         }
 
-        // OPTIMIZATION 3: Early exit for empty updates
         if bids.is_empty() && asks.is_empty() {
             self.hot.last_update_id.store(last_update_id, Ordering::Relaxed);
             return Ok(true);
         }
 
-        // OPTIMIZATION 4: Ultra-fast single-pass update using UnsafeCell
         unsafe {
             self.fast_update(bids, asks);
         }
 
-        // OPTIMIZATION 5: Single atomic store at the end
         self.hot.last_update_id.store(last_update_id, Ordering::Relaxed);
 
         Ok(true)
     }
 
-    /// ULTRA-FAST: Single-pass update with proper interior mutability
     #[inline(always)]
     unsafe fn fast_update(&self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
         let counts_ptr = self.hot.counts.get();
@@ -151,7 +133,6 @@ impl OrderBook {
         let bids_ptr = self.levels.bids.get();
         let asks_ptr = self.levels.asks.get();
 
-        // OPTIMIZATION 6: Process updates in single pass
         if !bids.is_empty() {
             bid_count = self.fast_update_side(bids, &mut *bids_ptr, bid_count, true);
         }
@@ -160,14 +141,11 @@ impl OrderBook {
             ask_count = self.fast_update_side(asks, &mut *asks_ptr, ask_count, false);
         }
 
-        // Update counts
         *counts_ptr = (bid_count, ask_count);
 
-        // OPTIMIZATION 7: Ultra-fast best price update
         self.update_best_prices();
     }
 
-    /// ULTRA-OPTIMIZED: Side update with minimal branching and optimal algorithms
     #[inline(always)]
     unsafe fn fast_update_side(
         &self,
@@ -178,13 +156,10 @@ impl OrderBook {
     ) -> u8 {
         let max_count = self.max_depth;
 
-        // OPTIMIZATION 8: Process all updates in one efficient loop
         for &(price, quantity) in updates {
             if quantity == 0.0 {
-                // ULTRA-FAST remove using optimized algorithm
                 current_count = self.fast_remove(levels, current_count, price);
             } else {
-                // ULTRA-FAST insert using optimized algorithm
                 current_count = self.fast_insert(
                     levels,
                     current_count,
@@ -199,7 +174,6 @@ impl OrderBook {
         current_count
     }
 
-    /// ULTRA-OPTIMIZED: Remove with minimal memory operations
     #[inline(always)]
     unsafe fn fast_remove(
         &self,
@@ -209,13 +183,10 @@ impl OrderBook {
     ) -> u8 {
         let count_usize = count as usize;
 
-        // OPTIMIZATION 9: Optimized search with branch prediction
         for i in 0..count_usize {
             let level_price = levels.get_unchecked(i).0;
 
-            // Use bit manipulation for faster floating point comparison
             if (level_price - price).abs() < PRICE_EPSILON {
-                // OPTIMIZATION 10: Efficient memory move
                 if i + 1 < count_usize {
                     let src = levels.as_ptr().add(i + 1);
                     let dst = levels.as_mut_ptr().add(i);
@@ -227,7 +198,6 @@ impl OrderBook {
         count
     }
 
-    /// ULTRA-OPTIMIZED: Insert with minimal branching and optimal placement
     #[inline(always)]
     unsafe fn fast_insert(
         &self,
@@ -241,10 +211,8 @@ impl OrderBook {
         let count_usize = count as usize;
         let max_count_usize = max_count as usize;
 
-        // OPTIMIZATION 11: Fast binary search for insertion point
         let insert_pos = self.fast_find_insert_pos(levels, count_usize, price, is_bids);
 
-        // OPTIMIZATION 12: Check for update in place first (most common case)
         if insert_pos < count_usize {
             let existing_price = levels.get_unchecked(insert_pos).0;
             if (existing_price - price).abs() < PRICE_EPSILON {
@@ -253,11 +221,9 @@ impl OrderBook {
             }
         }
 
-        // OPTIMIZATION 13: Efficient insertion with minimal memory operations
         if insert_pos < max_count_usize {
             let new_count = if count_usize < max_count_usize {
                 if insert_pos < count_usize {
-                    // Shift elements efficiently
                     let src = levels.as_ptr().add(insert_pos);
                     let dst = levels.as_mut_ptr().add(insert_pos + 1);
                     std::ptr::copy_nonoverlapping(src, dst, count_usize - insert_pos);
@@ -279,7 +245,6 @@ impl OrderBook {
         count
     }
 
-    /// ULTRA-FAST: Optimized binary search for insertion position
     #[inline(always)]
     unsafe fn fast_find_insert_pos(
         &self,
@@ -292,7 +257,6 @@ impl OrderBook {
             return 0;
         }
 
-        // OPTIMIZATION 14: Unrolled binary search for small arrays
         match count {
             1 => {
                 let level_price = levels.get_unchecked(0).0;
@@ -323,7 +287,6 @@ impl OrderBook {
                 }
             }
             _ => {
-                // OPTIMIZATION 15: Optimized linear search for small arrays (faster than binary for n<=5)
                 for i in 0..count {
                     let level_price = levels.get_unchecked(i).0;
                     let should_insert_here = if is_bids {
@@ -340,7 +303,6 @@ impl OrderBook {
         }
     }
 
-    /// ULTRA-FAST: Best price update with minimal operations
     #[inline(always)]
     unsafe fn update_best_prices(&self) {
         let (bid_count, ask_count) = *self.hot.counts.get();
@@ -348,7 +310,6 @@ impl OrderBook {
         let asks_ptr = self.levels.asks.get();
         let best_prices_ptr = self.hot.best_prices.get();
 
-        // OPTIMIZATION 16: Direct assignment with minimal branching
         let (bid_price, bid_qty) = if bid_count > 0 {
             *(*bids_ptr).get_unchecked(0)
         } else {
@@ -361,7 +322,6 @@ impl OrderBook {
             (0.0, 0.0)
         };
 
-        // OPTIMIZATION 17: Fast mid-price calculation
         let mid_price = if bid_price > 0.0 && ask_price > 0.0 {
             (bid_price + ask_price) * 0.5
         } else {
@@ -457,14 +417,12 @@ impl OrderBook {
         }
     }
 
-    /// ULTRA-FAST: Snapshot with minimal atomic operations
     #[inline(always)]
     pub fn snapshot(&self) -> (Option<Level>, Option<Level>) {
         if self.hot.state.load(Ordering::Relaxed) != (OrderBookState::Synced as u8) {
             return (None, None);
         }
 
-        // OPTIMIZATION 18: Direct field access using UnsafeCell
         let (bid_price, bid_qty, ask_price, ask_qty, _) = unsafe { *self.hot.best_prices.get() };
 
         let bid_level = if bid_price > 0.0 && bid_qty > 0.0 {
@@ -482,10 +440,8 @@ impl OrderBook {
         (bid_level, ask_level)
     }
 
-    /// ULTRA-FAST: Cached top of book with zero atomic operations
     #[inline(always)]
     pub fn get_cached_top_of_book(&self) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
-        // OPTIMIZATION 19: Pure field reads via UnsafeCell - no atomic operations
         let (bid_price, bid_qty, ask_price, ask_qty, _) = unsafe { *self.hot.best_prices.get() };
 
         let bid = if bid_price > 0.0 && bid_qty > 0.0 { Some((bid_price, bid_qty)) } else { None };

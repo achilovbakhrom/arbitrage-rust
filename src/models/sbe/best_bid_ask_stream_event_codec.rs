@@ -62,127 +62,54 @@ pub mod encoder {
             header
         }
 
-        /// primitive field 'eventTime'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 0
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn event_time(&mut self, value: i64) {
             let offset = self.offset;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'bookUpdateId'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 8
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn book_update_id(&mut self, value: i64) {
             let offset = self.offset + 8;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'priceExponent'
-        /// - min value: -127
-        /// - max value: 127
-        /// - null value: -128_i8
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 16
-        /// - encodedLength: 1
-        /// - version: 0
         #[inline]
         pub fn price_exponent(&mut self, value: i8) {
             let offset = self.offset + 16;
             self.get_buf_mut().put_i8_at(offset, value);
         }
 
-        /// primitive field 'qtyExponent'
-        /// - min value: -127
-        /// - max value: 127
-        /// - null value: -128_i8
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 17
-        /// - encodedLength: 1
-        /// - version: 0
         #[inline]
         pub fn qty_exponent(&mut self, value: i8) {
             let offset = self.offset + 17;
             self.get_buf_mut().put_i8_at(offset, value);
         }
 
-        /// primitive field 'bidPrice'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 18
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn bid_price(&mut self, value: i64) {
             let offset = self.offset + 18;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'bidQty'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 26
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn bid_qty(&mut self, value: i64) {
             let offset = self.offset + 26;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'askPrice'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 34
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn ask_price(&mut self, value: i64) {
             let offset = self.offset + 34;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// primitive field 'askQty'
-        /// - min value: -9223372036854775807
-        /// - max value: 9223372036854775807
-        /// - null value: -9223372036854775808_i64
-        /// - characterEncoding: null
-        /// - semanticType: null
-        /// - encodedOffset: 42
-        /// - encodedLength: 8
-        /// - version: 0
         #[inline]
         pub fn ask_qty(&mut self, value: i64) {
             let offset = self.offset + 42;
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
-        /// VAR_DATA ENCODER - character encoding: 'UTF-8'
         #[inline]
         pub fn symbol(&mut self, value: &str) {
             let limit = self.get_limit();
@@ -192,7 +119,7 @@ pub mod encoder {
             self.get_buf_mut().put_slice_at(limit + 1, value.as_bytes());
         }
     }
-} // end encoder
+}
 
 pub mod decoder {
     use super::*;
@@ -270,55 +197,46 @@ pub mod decoder {
             )
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn event_time(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn book_update_id(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 8)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn price_exponent(&self) -> i8 {
             self.get_buf().get_i8_at(self.offset + 16)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn qty_exponent(&self) -> i8 {
             self.get_buf().get_i8_at(self.offset + 17)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn bid_price(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 18)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn bid_qty(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 26)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn ask_price(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 34)
         }
 
-        /// primitive field - 'REQUIRED'
         #[inline]
         pub fn ask_qty(&self) -> i64 {
             self.get_buf().get_i64_at(self.offset + 42)
         }
 
-        /// VAR_DATA DECODER - character encoding: 'UTF-8'
         #[inline]
         pub fn symbol_decoder(&mut self) -> (usize, usize) {
             let offset = self.get_limit();
@@ -333,4 +251,4 @@ pub mod decoder {
             self.get_buf().get_slice_at(coordinates.0, coordinates.1)
         }
     }
-} // end decoder
+}
