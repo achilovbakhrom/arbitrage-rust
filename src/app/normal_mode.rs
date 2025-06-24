@@ -98,13 +98,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         ::new()
         .name("websocket-thread".to_string())
         .spawn(move || {
-            #[cfg(target_os = "linux")]
-            {
-                let mut cpu_set = nix::sched::CpuSet::new();
-                cpu_set.set(0).ok();
-                nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpu_set).ok();
-            }
-
             let client = BinanceSbeClient::new(sbe_api_key);
             client.preload_symbol_mappings(&symbol_mappings);
             client.disable_timing();
