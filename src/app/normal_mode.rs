@@ -4,16 +4,15 @@ use crate::{
     arbitrage::{ self },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
-    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
     orderbook::manager::OrderBookManager,
     utils::{
         console::{ print_app_started, print_app_starting, print_config },
         helpers::{
-            build_execultor,
             build_symbol_map,
             build_tokio_async_runtime,
             get_all_symbols,
             is_operational,
+            create_detector_and_executor,
         },
     },
     WEBSOCKET_BUFFER_SIZE,
@@ -51,42 +50,32 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
     orderbook_manager.preload_symbols(&unique_symbols);
 
-    let executor_cb = Arc::new(ArbitrageExecutor::new(ExecutionStrategy::FastSequential));
-    let fix_executor = build_execultor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
-
-    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
-
-    let detector = arbitrage::detector::create_detector(
+    let (detector, fix_executor) = create_detector_and_executor(
         orderbook_manager.clone(),
-        config.fee,
-        config.threshold,
-        triangular_paths,
-        config.trade_amount,
-        executor_cb.clone(),
-        fix_executor.clone(),
-        config.min_volume_multiplier,
+        symbol_map.clone(),
+        &config,
         false
-    );
+    )?;
 
     let detector_mode = if fix_executor.is_some() {
         if config.debug {
-            "FIX Mock Trading (Ultra-Optimized)"
+            "FIX Mock Trading (Callback-Optimized)"
         } else {
-            "FIX Real Trading (Ultra-Optimized)"
+            "FIX Real Trading (Callback-Optimized)"
         }
     } else {
-        "Simulation Only (Ultra-Optimized)"
+        "Simulation Only (Callback-Optimized)"
     };
 
     info!(
-        "Created ULTRA-OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
+        "Created CALLBACK-OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
         config.threshold * 100.0,
         detector_mode
     );
 
     let detection_handle = arbitrage::detector::start_detection_thread(detector.clone());
 
-    info!("Starting ULTRA-OPTIMIZED WebSocket connection...");
+    info!("Starting CALLBACK-OPTIMIZED WebSocket connection...");
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
@@ -136,7 +125,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
                 }
             };
 
-            info!("Connected to Binance SBE WebSocket (ULTRA-OPTIMIZED)");
+            info!("Connected to Binance SBE WebSocket (CALLBACK-OPTIMIZED)");
 
             let channels = vec!["depth".to_string()];
 
@@ -185,14 +174,22 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     if fix_executor.is_some() {
         if config.debug {
-            info!("🔵 ULTRA-OPTIMIZED mock trading mode enabled");
+            info!("🔵 CALLBACK-OPTIMIZED FIX mock trading mode enabled");
         } else {
-            info!("🔴 ULTRA-OPTIMIZED REAL TRADING MODE ENABLED");
+            info!("🔴 CALLBACK-OPTIMIZED FIX REAL TRADING MODE ENABLED");
             info!("⚠️  Make sure you understand the risks!");
         }
     } else {
-        info!("🟡 ULTRA-OPTIMIZED simulation mode");
+        info!("🟡 CALLBACK-OPTIMIZED simulation mode");
     }
+
+    info!("CALLBACK-BASED OPTIMIZATIONS APPLIED:");
+    info!("  ✓ Direct callback execution eliminates channel overhead");
+    info!("  ✓ Zero-copy opportunity passing");
+    info!("  ✓ Independent FIX executor threads with symbol conflict detection");
+    info!("  ✓ Lock-free opportunity detection");
+    info!("  ✓ CPU affinity optimization for hot paths");
+    info!("  ✓ Minimal memory allocations in critical path");
 
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
@@ -216,6 +213,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     thread::sleep(Duration::from_millis(200));
 
-    info!("ULTRA-OPTIMIZED triangular arbitrage system stopped");
+    info!("CALLBACK-OPTIMIZED triangular arbitrage system stopped");
     Ok(())
 }

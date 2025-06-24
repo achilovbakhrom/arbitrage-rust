@@ -4,17 +4,16 @@ use crate::{
     arbitrage::{ self },
     config::Config,
     exchange::binance::BinanceClient,
-    executor::executor::{ ArbitrageExecutor, ExecutionStrategy },
     orderbook::manager::OrderBookManager,
     performance,
     utils::{
         console::print_config,
         helpers::{
-            build_execultor,
             build_symbol_map,
             build_tokio_async_runtime,
             get_all_symbols,
             is_operational,
+            create_detector_and_executor,
             prepare_symbol_mappings,
         },
     },
@@ -37,7 +36,7 @@ pub fn create_output_file() -> Result<String> {
 
 pub fn run_performance_test(config: Config) -> Result<()> {
     print_config(&config);
-    info!("Starting ZERO-CLONING performance test for triangular arbitrage system");
+    info!("Starting CALLBACK-OPTIMIZED performance test for triangular arbitrage system");
     info!("Test duration: 120 seconds");
 
     let output_file = create_output_file()?;
@@ -67,36 +66,25 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     prepare_symbol_mappings(&unique_symbols);
 
-    let fallback_executor = Arc::new(ArbitrageExecutor::new(ExecutionStrategy::FastSequential));
-
-    let fix_executor = build_execultor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
-
-    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
-
-    let detector = arbitrage::detector::create_detector(
+    let (detector, fix_executor) = create_detector_and_executor(
         orderbook_manager.clone(),
-        config.fee,
-        config.threshold,
-        triangular_paths.clone(),
-        config.trade_amount,
-        fallback_executor.clone(),
-        fix_executor.clone(),
-        config.min_volume_multiplier,
+        symbol_map.clone(),
+        &config,
         true
-    );
+    )?;
 
     let detector_mode = if fix_executor.is_some() {
         if config.debug {
-            "FIX Mock Trading (Zero-Cloning)"
+            "FIX Mock Trading (Callback-Optimized)"
         } else {
-            "FIX Real Trading (Zero-Cloning)"
+            "FIX Real Trading (Callback-Optimized)"
         }
     } else {
-        "Simulation Only (Zero-Cloning)"
+        "Simulation Only (Callback-Optimized)"
     };
 
     info!(
-        "Created ZERO-CLONING arbitrage detector with threshold: {:.2}% (Mode: {})",
+        "Created CALLBACK-OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
         config.threshold * 100.0,
         detector_mode
     );
@@ -112,7 +100,9 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         detector_opt_stats.symbol_map_entries
     );
 
-    info!("Starting ZERO-CLONING performance test...");
+    info!("Starting CALLBACK-OPTIMIZED performance test...");
+
+    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
 
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
@@ -134,7 +124,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     match test_result {
         Ok(_) => {
-            info!("ZERO-CLONING performance test completed successfully!");
+            info!("CALLBACK-OPTIMIZED performance test completed successfully!");
 
             let final_opt_stats = orderbook_manager.get_optimization_stats();
 
@@ -156,7 +146,13 @@ pub fn run_performance_test(config: Config) -> Result<()> {
                 exec_stats.2
             );
 
-            info!("ZERO-CLONING OPTIMIZATIONS APPLIED:");
+            info!("CALLBACK-BASED OPTIMIZATIONS APPLIED:");
+            info!("  ✓ Direct callback execution eliminates channel overhead");
+            info!("  ✓ Zero-copy opportunity passing");
+            info!("  ✓ Independent FIX executor threads with symbol conflict detection");
+            info!("  ✓ Lock-free opportunity detection");
+            info!("  ✓ CPU affinity optimization for hot paths");
+            info!("  ✓ Minimal memory allocations in critical path");
             info!("  ✓ Symbol ID system eliminates string operations");
             info!("  ✓ Direct slice references eliminate array cloning");
             info!("  ✓ OrderBook references eliminate Arc cloning");
@@ -166,7 +162,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
             info!("  ✓ Separate arbitrage detection thread eliminates blocking");
         }
         Err(e) => {
-            error!("ZERO-CLONING performance test failed: {}", e);
+            error!("CALLBACK-OPTIMIZED performance test failed: {}", e);
             return Err(e);
         }
     }
