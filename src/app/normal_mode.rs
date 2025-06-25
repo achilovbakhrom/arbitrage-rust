@@ -9,7 +9,6 @@ use crate::{
     utils::{
         console::{ print_app_started, print_app_starting, print_config },
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
-        symbol_interner::global,
     },
     WEBSOCKET_BUFFER_SIZE,
 };
