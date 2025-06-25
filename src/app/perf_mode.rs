@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     arbitrage::{ self },
     config::Config,
-    exchange::binance::BinanceClient,
+    exchange::{ binance::BinanceClient, client::ExchangeClient },
     orderbook::manager::OrderBookManager,
     performance,
     utils::{
@@ -11,10 +11,9 @@ use crate::{
         helpers::{
             build_symbol_map,
             build_tokio_async_runtime,
-            get_all_symbols,
-            is_operational,
             create_detector_and_executor,
             prepare_symbol_mappings,
+            run_api_with_timeout,
         },
     },
 };
@@ -49,14 +48,14 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     let rt = build_tokio_async_runtime()?;
 
-    if is_operational(&rt, client.clone()) {
+    if run_api_with_timeout(&rt, client.is_operational())? {
         info!("✓ Exchange is operational");
     } else {
         error!("❌ Exchange is not operational or timed out");
         return Err(anyhow!("Exchange is not operational"));
     }
 
-    let symbols = get_all_symbols(&rt, client.clone())?;
+    let symbols = run_api_with_timeout(&rt, client.get_active_spot_symbols())?;
     info!("✓ Fetched {} symbols from exchange", symbols.len());
 
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
@@ -145,21 +144,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
                 exec_stats.1,
                 exec_stats.2
             );
-
-            info!("CALLBACK-BASED OPTIMIZATIONS APPLIED:");
-            info!("  ✓ Direct callback execution eliminates channel overhead");
-            info!("  ✓ Zero-copy opportunity passing");
-            info!("  ✓ Independent FIX executor threads with symbol conflict detection");
-            info!("  ✓ Lock-free opportunity detection");
-            info!("  ✓ CPU affinity optimization for hot paths");
-            info!("  ✓ Minimal memory allocations in critical path");
-            info!("  ✓ Symbol ID system eliminates string operations");
-            info!("  ✓ Direct slice references eliminate array cloning");
-            info!("  ✓ OrderBook references eliminate Arc cloning");
-            info!("  ✓ Precomputed path data eliminates runtime allocations");
-            info!("  ✓ Fixed-size arrays eliminate Vec reallocations");
-            info!("  ✓ Cache-aligned structures optimize memory access");
-            info!("  ✓ Separate arbitrage detection thread eliminates blocking");
         }
         Err(e) => {
             error!("CALLBACK-OPTIMIZED performance test failed: {}", e);

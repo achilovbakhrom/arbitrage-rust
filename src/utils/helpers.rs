@@ -6,7 +6,6 @@ use tracing::{ error, info, warn };
 
 use crate::{
     config::Config,
-    exchange::{ binance::BinanceClient, client::ExchangeClient },
     executor::fix_executor::FixArbitrageExecutor,
     models::{ command::Command, symbol::Symbol, symbol_map::SymbolMap },
     orderbook::manager::OrderBookManager,
@@ -31,24 +30,10 @@ pub fn build_tokio_async_runtime() -> Result<Runtime, anyhow::Error> {
         .context("Failed to create Tokio runtime")
 }
 
-pub fn is_operational(runtime: &Runtime, client: Arc<BinanceClient>) -> bool {
-    let is_operational = runtime.block_on(async {
-        tokio::time::timeout(API_TIMEOUT, client.is_operational()).await
-    });
-
-    match is_operational {
-        Ok(Ok(true)) => true,
-        _ => false,
-    }
-}
-
-pub fn get_all_symbols(
-    runtime: &Runtime,
-    client: Arc<BinanceClient>
-) -> Result<Vec<Symbol>, anyhow::Error> {
-    let symbols = runtime.block_on(async {
-        tokio::time::timeout(API_TIMEOUT, client.get_active_spot_symbols()).await
-    });
+pub fn run_api_with_timeout<T, F>(runtime: &Runtime, handler: F) -> Result<T, anyhow::Error>
+    where F: Future<Output = Result<T, anyhow::Error>>
+{
+    let symbols = runtime.block_on(async { tokio::time::timeout(API_TIMEOUT, handler).await });
 
     match symbols {
         Ok(symbols) => symbols,

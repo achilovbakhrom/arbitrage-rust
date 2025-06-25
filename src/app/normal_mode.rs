@@ -10,9 +10,8 @@ use crate::{
         helpers::{
             build_symbol_map,
             build_tokio_async_runtime,
-            get_all_symbols,
-            is_operational,
             create_detector_and_executor,
+            run_api_with_timeout,
         },
     },
     WEBSOCKET_BUFFER_SIZE,
@@ -34,14 +33,14 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     let rt = build_tokio_async_runtime()?;
 
-    if is_operational(&rt, client.clone()) {
+    if run_api_with_timeout(&rt, client.is_operational())? {
         info!("✓ Exchange is operational");
     } else {
         error!("❌ Exchange is not operational or timed out");
         return Err(anyhow!("Exchange is not operational"));
     }
 
-    let symbols = get_all_symbols(&rt, client.clone())?;
+    let symbols = run_api_with_timeout(&rt, client.get_active_spot_symbols())?;
     info!("✓ Fetched {} symbols from exchange", symbols.len());
 
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
@@ -175,14 +174,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     } else {
         info!("🟡 CALLBACK-OPTIMIZED simulation mode");
     }
-
-    info!("CALLBACK-BASED OPTIMIZATIONS APPLIED:");
-    info!("  ✓ Direct callback execution eliminates channel overhead");
-    info!("  ✓ Zero-copy opportunity passing");
-    info!("  ✓ Independent FIX executor threads with symbol conflict detection");
-    info!("  ✓ Lock-free opportunity detection");
-    info!("  ✓ CPU affinity optimization for hot paths");
-    info!("  ✓ Minimal memory allocations in critical path");
 
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
