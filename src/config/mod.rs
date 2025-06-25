@@ -17,18 +17,13 @@ pub struct Config {
     pub max_triangles: usize,
     pub trade_amount: f64,
     pub fee: f64,
-
     #[serde(serialize_with = "serialize_level", deserialize_with = "deserialize_level")]
     pub log_level: Level,
     pub log_config: LogConfig,
-
     pub base_asset: String,
     pub excluded_coins: Vec<String>,
-
     pub min_volume_multiplier: f64,
-
     pub fix_config: FixApiConfig,
-
     pub enable_trading: bool,
     pub max_slippage_percentage: f64,
     pub min_execution_profit_threshold: f64,
@@ -72,31 +67,13 @@ pub enum LogRotation {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        match dotenv() {
-            Ok(path) => {
-                println!("✅ Loaded .env file from: {}", path.display());
-            }
-            Err(e) => {
-                println!("⚠️  Warning: Could not load .env file: {}", e);
-                println!("   Make sure .env file exists in the current directory");
-            }
-        }
-
-        if let Ok(cwd) = env::current_dir() {
-            println!("📁 Current working directory: {}", cwd.display());
-        }
-
-        if std::path::Path::new(".env").exists() {
-            println!("✅ .env file found in current directory");
-        } else {
-            println!("❌ .env file NOT found in current directory");
-        }
+        let _ = dotenv();
 
         let debug = env
             ::var("TAA_DEBUG")
             .unwrap_or_else(|_| "false".to_string())
             .parse::<bool>()
-            .context("Failed to parse TAA_DEBUG environment variable")?;
+            .context("Failed to parse TAA_DEBUG")?;
 
         let sbe_api_key = env
             ::var("TAA_SBE_API_KEY")
@@ -112,31 +89,31 @@ impl Config {
             ::var("TAA_THRESHOLD")
             .unwrap_or_else(|_| "0.5".to_string())
             .parse::<f64>()
-            .context("Failed to parse TAA_THRESHOLD environment variable")?;
+            .context("Failed to parse TAA_THRESHOLD")?;
 
         let depth = env
             ::var("TAA_DEPTH")
             .unwrap_or_else(|_| "20".to_string())
             .parse::<usize>()
-            .context("Failed to parse TAA_DEPTH environment variable")?;
+            .context("Failed to parse TAA_DEPTH")?;
 
-        let max_triangles: usize = env
+        let max_triangles = env
             ::var("TAA_MAX_TRIANGLES")
             .unwrap_or_else(|_| "15".to_string())
             .parse::<usize>()
-            .context("Failed to parse TAA_MAX_TRIANGLES environment variable")?;
+            .context("Failed to parse TAA_MAX_TRIANGLES")?;
 
-        let trade_amount: f64 = env
+        let trade_amount = env
             ::var("TAA_TRADE_AMOUNT")
             .unwrap_or_else(|_| "100.0".to_string())
             .parse::<f64>()
-            .context("Failed to parse TAA_TRADE_AMOUNT environment variable")?;
+            .context("Failed to parse TAA_TRADE_AMOUNT")?;
 
-        let fee: f64 = env
+        let fee = env
             ::var("TAA_FEE")
             .unwrap_or_else(|_| "0.001".to_string())
             .parse::<f64>()
-            .context("Failed to parse TAA_FEE environment variable")?;
+            .context("Failed to parse TAA_FEE")?;
 
         let log_level_str = env::var("TAA_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
 
@@ -150,11 +127,9 @@ impl Config {
         };
 
         let log_dir = env::var("TAA_LOG_DIRECTORY").unwrap_or_else(|_| "logs".to_string());
-
         let log_prefix = env
             ::var("TAA_LOG_FILENAME_PREFIX")
             .unwrap_or_else(|_| "triangular_arbitrage".to_string());
-
         let log_rotation_str = env::var("TAA_LOG_ROTATION").unwrap_or_else(|_| "daily".to_string());
 
         let log_rotation = match log_rotation_str.to_lowercase().as_str() {
@@ -260,6 +235,7 @@ impl Config {
         })
     }
 
+    #[inline]
     pub fn get_fix_client_config(&self) -> crate::exchange::fix_api::FixConfig {
         crate::exchange::fix_api::FixConfig {
             api_key: self.fix_api.clone(),
@@ -271,10 +247,12 @@ impl Config {
         }
     }
 
+    #[inline]
     pub fn should_enable_real_trading(&self) -> bool {
         self.enable_trading && !self.debug
     }
 
+    #[inline]
     pub fn should_enable_mock_trading(&self) -> bool {
         self.enable_trading && self.debug
     }

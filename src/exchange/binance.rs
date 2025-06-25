@@ -6,7 +6,6 @@ use tokio::sync::RwLock;
 use tracing::{ debug, error, info, warn };
 use std::time::{ Duration, Instant };
 use std::sync::Arc;
-
 use crate::models::level::Level;
 use crate::models::symbol::Symbol;
 use crate::exchange::client::{ DepthResponse, ExchangeClient };
@@ -32,15 +31,10 @@ struct BinanceDepthResponse {
 
 pub struct BinanceClient {
     base_url: Url,
-
     api_key: Arc<str>,
-
     testnet: bool,
-
     symbols_cache: RwLock<Option<Vec<Symbol>>>,
-
     symbols_cache_updated_at: RwLock<Instant>,
-
     symbols_cache_ttl: Duration,
 }
 
@@ -55,7 +49,6 @@ struct BinanceExchangeInfo {
 struct BinanceSymbol {
     symbol: String,
     status: String,
-
     base_asset: String,
     quote_asset: String,
     is_spot_trading_allowed: bool,
@@ -82,7 +75,6 @@ enum BinanceSymbolFilter {
 impl BinanceClient {
     pub fn new(api_key: String, testnet: bool) -> Result<Self> {
         let base_url = if testnet {
-            // Url::parse("https://testnet.binance.vision/api/").context("Invalid testnet URL")?
             Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
         } else {
             Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
@@ -123,7 +115,7 @@ impl BinanceClient {
 
         for filter in &binance_symbol.filters {
             match filter {
-                BinanceSymbolFilter::LotSize { min_qty: _minq, max_qty: _maxq, step_size: ss } => {
+                BinanceSymbolFilter::LotSize { step_size: ss, .. } => {
                     qty_precision = Self::calculate_precision(ss);
                 }
                 BinanceSymbolFilter::PriceFilter { tick_size: t, .. } => {
@@ -220,7 +212,6 @@ impl ExchangeClient for BinanceClient {
         }
 
         spot_symbols.shrink_to_fit();
-
         Ok(spot_symbols)
     }
 
@@ -261,12 +252,7 @@ impl ExchangeClient for BinanceClient {
             .join(&format!("v3/depth?symbol={}&limit={}", symbol, limit))
             .context("Failed to build depth API URL")?;
 
-        debug!(
-            symbol = %symbol, 
-            limit = limit,
-            url = %url.as_str(),
-            "Fetching orderbook depth"
-        );
+        debug!(symbol = %symbol, limit = limit, url = %url.as_str(), "Fetching orderbook depth");
 
         let start = Instant::now();
 
@@ -279,12 +265,7 @@ impl ExchangeClient for BinanceClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            error!(
-                symbol = %symbol, 
-                status = %status, 
-                response = %text,
-                "Binance depth API error"
-            );
+            error!(symbol = %symbol, status = %status, response = %text, "Binance depth API error");
             anyhow::bail!("Binance depth API error for {}: {} - {}", symbol, status, text);
         }
 
@@ -298,12 +279,7 @@ impl ExchangeClient for BinanceClient {
                 match (bid[0].parse::<f64>(), bid[1].parse::<f64>()) {
                     (Ok(price), Ok(qty)) => Some(Level { price, quantity: qty }),
                     _ => {
-                        warn!(
-                            symbol = %symbol, 
-                            price = %bid[0], 
-                            qty = %bid[1],
-                            "Failed to parse bid price/quantity"
-                        );
+                        warn!(symbol = %symbol, price = %bid[0], qty = %bid[1], "Failed to parse bid");
                         None
                     }
                 }
@@ -316,12 +292,7 @@ impl ExchangeClient for BinanceClient {
                 match (ask[0].parse::<f64>(), ask[1].parse::<f64>()) {
                     (Ok(price), Ok(qty)) => Some(Level { price, quantity: qty }),
                     _ => {
-                        warn!(
-                            symbol = %symbol, 
-                            price = %ask[0], 
-                            qty = %ask[1],
-                            "Failed to parse ask price/quantity"
-                        );
+                        warn!(symbol = %symbol, price = %ask[0], qty = %ask[1], "Failed to parse ask");
                         None
                     }
                 }

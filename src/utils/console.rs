@@ -5,7 +5,6 @@ use figlet_rs::FIGfont;
 
 pub fn print_config(config: &Config) {
     let json = serde_json::to_string_pretty(config).unwrap_or_default();
-
     info!("\n{}: \n{}", String::from("[CONFIG]").blue().underline(), json.magenta());
 }
 

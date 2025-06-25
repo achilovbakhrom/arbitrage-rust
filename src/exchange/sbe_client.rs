@@ -7,12 +7,11 @@ use tungstenite::{
     stream::MaybeTlsStream,
 };
 use anyhow::{ Result, Context };
-use tracing::{ debug, error, info };
+use tracing::{ debug, error };
 use std::{ net::TcpStream, sync::Arc, time::Instant };
 use std::cell::UnsafeCell;
 use parking_lot::RwLock;
 use std::sync::atomic::{ AtomicBool, Ordering };
-
 use crate::utils::symbol_interner::global;
 
 const DEPTH: usize = 5;
@@ -72,19 +71,19 @@ impl<F> BinanceSbeClient<F>
                 .map(|(s, _)| s.clone())
                 .collect::<Vec<_>>()
         );
-        info!("Using global symbol interner for {} symbols", symbols.len());
     }
 
+    #[inline]
     pub fn enable_timing(&self) {
         self.timing_enabled.store(true, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn disable_timing(&self) {
         self.timing_enabled.store(false, Ordering::Relaxed);
     }
 
     pub fn connect(&self) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
-        info!("Connecting to Binance SBE WebSocket: {}", self.endpoint);
         let request = Request::builder()
             .uri(self.endpoint.as_str())
             .header("X-MBX-APIKEY", self.api_key.as_ref())
@@ -96,12 +95,9 @@ impl<F> BinanceSbeClient<F>
             .body(())
             .context("Failed to build request")?;
 
-        let (ws_stream, response) = connect(request).context(
+        let (ws_stream, _) = connect(request).context(
             "Failed to connect to Binance SBE WebSocket"
         )?;
-
-        info!("Connected to Binance SBE WebSocket with response: {:?}", response);
-
         Ok(ws_stream)
     }
 
@@ -125,11 +121,8 @@ impl<F> BinanceSbeClient<F>
             "id": 1
         }).to_string();
 
-        debug!("Subscription request: {}", &subscription);
-
         let message = Message::Text(subscription.into());
         ws_stream.send(message)?;
-
         Ok(())
     }
 
@@ -138,24 +131,17 @@ impl<F> BinanceSbeClient<F>
         ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
         shutdown: &std::sync::atomic::AtomicBool
     ) -> Result<()> {
-        use std::sync::atomic::Ordering;
-
         loop {
             if shutdown.load(Ordering::Relaxed) {
-                info!("Shutdown signal received, closing WebSocket");
                 let _ = ws_stream.close(None);
                 return Ok(());
             }
 
-            let message_result = ws_stream.read();
-
-            match message_result {
+            match ws_stream.read() {
                 Ok(message) => {
                     match message {
                         Message::Binary(data) => {
-                            let parse_result = self.handle_binary_message_optimized(&data);
-
-                            if let Err(e) = parse_result {
+                            if let Err(e) = self.handle_binary_message_optimized(&data) {
                                 debug!("Error handling binary message: {}", e);
                             }
                         }
@@ -163,22 +149,16 @@ impl<F> BinanceSbeClient<F>
                             debug!("Received text message: {}", text);
                         }
                         Message::Ping(data) => {
-                            debug!("Received ping, responding with pong");
                             if let Err(e) = ws_stream.send(Message::Pong(data)) {
                                 error!("Failed to send pong: {}", e);
                                 return Err(anyhow::anyhow!("WebSocket connection error: {}", e));
                             }
                         }
-                        Message::Pong(data) => {
-                            debug!("Received pong response: {:?}", data);
-                        }
-                        Message::Close(frame) => {
-                            info!("WebSocket closed: {:?}", frame);
+                        Message::Pong(_) => {}
+                        Message::Close(_) => {
                             return Ok(());
                         }
-                        Message::Frame(_) => {
-                            debug!("Received raw frame");
-                        }
+                        Message::Frame(_) => {}
                     }
                 }
                 Err(e) => {
@@ -191,8 +171,7 @@ impl<F> BinanceSbeClient<F>
 
     #[inline]
     pub fn set_depth_callback(&self, callback: F) {
-        let mut cb = self.depth_callback.write();
-        *cb = Some(callback);
+        *self.depth_callback.write() = Some(callback);
     }
 
     #[inline(always)]
@@ -219,6 +198,7 @@ impl<F> BinanceSbeClient<F>
 
         let mut offset = 8;
 
+        #[inline(always)]
         fn read_i64_fast(data: &[u8], offset: usize) -> i64 {
             unsafe {
                 let ptr = data.as_ptr().add(offset) as *const i64;
@@ -226,6 +206,7 @@ impl<F> BinanceSbeClient<F>
             }
         }
 
+        #[inline(always)]
         fn read_u16_fast(data: &[u8], offset: usize) -> u16 {
             unsafe {
                 let ptr = data.as_ptr().add(offset) as *const u16;
@@ -233,6 +214,7 @@ impl<F> BinanceSbeClient<F>
             }
         }
 
+        #[inline(always)]
         fn read_i8_fast(data: &[u8], offset: usize) -> i8 {
             unsafe { *data.get_unchecked(offset) as i8 }
         }

@@ -1,9 +1,7 @@
 use std::sync::atomic::{ AtomicU64, AtomicU8, Ordering };
 use std::cell::UnsafeCell;
 use crate::models::level::Level;
-use parking_lot::{ Mutex, RwLock };
-use tracing::{ debug, warn };
-use std::fmt;
+use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderBookState {
@@ -19,10 +17,8 @@ const PRICE_EPSILON: f64 = 1e-8;
 struct HotData {
     state: AtomicU8,
     last_update_id: AtomicU64,
-
     counts: UnsafeCell<(u8, u8)>,
     best_prices: UnsafeCell<(f64, f64, f64, f64, f64)>,
-
     _padding: [u8; 80],
 }
 
@@ -34,28 +30,13 @@ struct Levels {
 
 pub struct OrderBook {
     hot: HotData,
-
     levels: Box<Levels>,
-
     max_depth: u8,
     update_mutex: Mutex<()>,
-    event_buffer: RwLock<Vec<(u64, u64, Vec<(f64, f64)>, Vec<(f64, f64)>)>>,
 }
 
 unsafe impl Sync for OrderBook {}
 unsafe impl Send for OrderBook {}
-
-impl fmt::Debug for OrderBook {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (bid_count, ask_count) = unsafe { *self.hot.counts.get() };
-        f.debug_struct("OrderBook")
-            .field("bid_count", &bid_count)
-            .field("ask_count", &ask_count)
-            .field("last_update_id", &self.hot.last_update_id)
-            .field("state", &self.hot.state)
-            .finish()
-    }
-}
 
 impl OrderBook {
     pub fn new(max_depth: usize) -> Self {
@@ -75,7 +56,6 @@ impl OrderBook {
             }),
             max_depth,
             update_mutex: Mutex::new(()),
-            event_buffer: RwLock::new(Vec::with_capacity(16)),
         }
     }
 
@@ -121,7 +101,6 @@ impl OrderBook {
         }
 
         self.hot.last_update_id.store(last_update_id, Ordering::Relaxed);
-
         Ok(true)
     }
 
@@ -142,7 +121,6 @@ impl OrderBook {
         }
 
         *counts_ptr = (bid_count, ask_count);
-
         self.update_best_prices();
     }
 
@@ -341,8 +319,6 @@ impl OrderBook {
             return;
         }
 
-        debug!("Applying snapshot: {}", snapshot_last_update_id);
-
         unsafe {
             let counts_ptr = self.hot.counts.get();
             *counts_ptr = (0, 0);
@@ -370,50 +346,7 @@ impl OrderBook {
             self.hot.last_update_id.store(snapshot_last_update_id, Ordering::Relaxed);
 
             self.update_best_prices();
-            self.process_buffered_events(snapshot_last_update_id);
             self.set_state(OrderBookState::Synced);
-        }
-    }
-
-    fn process_buffered_events(&self, snapshot_last_update_id: u64) {
-        let events = {
-            let buffer = self.event_buffer.read();
-            if buffer.is_empty() {
-                return;
-            }
-            buffer.clone()
-        };
-
-        let mut last_processed_id = snapshot_last_update_id;
-        let mut processed_any = false;
-
-        for (first_id, last_id, bids, asks) in events {
-            if last_id <= snapshot_last_update_id {
-                continue;
-            }
-
-            if !processed_any {
-                if first_id <= snapshot_last_update_id && last_id > snapshot_last_update_id {
-                    unsafe {
-                        self.fast_update(&bids, &asks);
-                    }
-                    last_processed_id = last_id;
-                    processed_any = true;
-                }
-            } else if first_id == last_processed_id + 1 {
-                unsafe {
-                    self.fast_update(&bids, &asks);
-                }
-                last_processed_id = last_id;
-            } else {
-                warn!("Gap in update sequence");
-                return;
-            }
-        }
-
-        if processed_any {
-            self.hot.last_update_id.store(last_processed_id, Ordering::Relaxed);
-            self.event_buffer.write().clear();
         }
     }
 
@@ -445,7 +378,6 @@ impl OrderBook {
         let (bid_price, bid_qty, ask_price, ask_qty, _) = unsafe { *self.hot.best_prices.get() };
 
         let bid = if bid_price > 0.0 && bid_qty > 0.0 { Some((bid_price, bid_qty)) } else { None };
-
         let ask = if ask_price > 0.0 && ask_qty > 0.0 { Some((ask_price, ask_qty)) } else { None };
 
         (bid, ask)

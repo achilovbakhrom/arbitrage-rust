@@ -2,7 +2,6 @@ use std::time::{ Duration, Instant };
 use anyhow::Result;
 use tracing::{ info, warn };
 use std::collections::HashMap;
-
 use super::fix_api::{ ExecutionResult, MarketOrder, OrderSide };
 
 pub struct MockFixClient {

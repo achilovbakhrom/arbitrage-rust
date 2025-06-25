@@ -9,7 +9,6 @@ pub enum ExecutionStrategy {
 
 pub struct ArbitrageExecutor {
     default_strategy: ExecutionStrategy,
-
     execution_counter: AtomicU64,
     total_execution_time_us: AtomicU64,
     successful_executions: AtomicU64,
