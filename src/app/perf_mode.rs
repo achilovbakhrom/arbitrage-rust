@@ -1,20 +1,16 @@
-use std::sync::Arc;
+use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 
 use crate::{
-    arbitrage::{ self },
+    arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
+    executor::{ fix_executor::FixArbitrageExecutor },
     orderbook::manager::OrderBookManager,
     performance,
     utils::{
         console::print_config,
-        helpers::{
-            build_symbol_map,
-            build_tokio_async_runtime,
-            create_detector_and_executor,
-            prepare_symbol_mappings,
-            run_api_with_timeout,
-        },
+        helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
+        symbol_interner::global,
     },
 };
 use anyhow::{ anyhow, Context, Result };
@@ -35,7 +31,7 @@ pub fn create_output_file() -> Result<String> {
 
 pub fn run_performance_test(config: Config) -> Result<()> {
     print_config(&config);
-    info!("Starting CALLBACK-OPTIMIZED performance test for triangular arbitrage system");
+    info!("Starting performance test for triangular arbitrage system");
     info!("Test duration: 120 seconds");
 
     let output_file = create_output_file()?;
@@ -62,33 +58,48 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let unique_symbols = symbol_map.get_unique_symbols();
 
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
-
     prepare_symbol_mappings(&unique_symbols);
 
-    let (detector, fix_executor) = create_detector_and_executor(
+    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
+
+    let detector = arbitrage::detector::create_detector(
         orderbook_manager.clone(),
-        symbol_map.clone(),
-        &config,
-        true
-    )?;
+        config.fee,
+        config.threshold,
+        triangular_paths.clone(),
+        config.trade_amount,
+        config.min_volume_multiplier
+    );
+
+    let fix_executor = create_fix_executor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
+
+    if let Some(ref executor) = fix_executor {
+        let execution_callback = create_execution_callback(executor.clone());
+        detector.register_execution_callback(execution_callback);
+    }
 
     let detector_mode = if fix_executor.is_some() {
         if config.debug {
-            "FIX Mock Trading (Callback-Optimized)"
+            "FIX Mock Trading (Performance Test)"
         } else {
-            "FIX Real Trading (Callback-Optimized)"
+            "FIX Real Trading (Performance Test)"
         }
     } else {
-        "Simulation Only (Callback-Optimized)"
+        "Simulation Only (Performance Test)"
     };
 
     info!(
-        "Created CALLBACK-OPTIMIZED arbitrage detector with threshold: {:.2}% (Mode: {})",
+        "Created arbitrage detector with threshold: {:.2}% (Mode: {})",
         config.threshold * 100.0,
         detector_mode
     );
 
-    let _detection_handle = arbitrage::detector::start_detection_thread(detector.clone());
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let detection_handle = start_detection_thread(
+        detector.clone(),
+        orderbook_manager.clone(),
+        shutdown.clone()
+    );
 
     let opt_stats = orderbook_manager.get_optimization_stats();
     let detector_opt_stats = detector.get_optimization_stats();
@@ -99,9 +110,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         detector_opt_stats.symbol_map_entries
     );
 
-    info!("Starting CALLBACK-OPTIMIZED performance test...");
-
-    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
+    info!("Starting performance test...");
 
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
@@ -113,6 +122,9 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         triangular_paths
     );
 
+    shutdown.store(true, Ordering::Relaxed);
+    detector.shutdown();
+
     if let Some(fix_exec) = fix_executor {
         if let Err(e) = fix_exec.disconnect() {
             error!("Error disconnecting FIX executor: {}", e);
@@ -121,12 +133,15 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         }
     }
 
+    if let Err(e) = detection_handle.join() {
+        error!("Error joining detection thread: {:?}", e);
+    }
+
     match test_result {
         Ok(_) => {
-            info!("CALLBACK-OPTIMIZED performance test completed successfully!");
+            info!("Performance test completed successfully!");
 
             let final_opt_stats = orderbook_manager.get_optimization_stats();
-
             info!(
                 "Final optimization stats: {} books, {} hash cache",
                 final_opt_stats.total_books,
@@ -146,10 +161,114 @@ pub fn run_performance_test(config: Config) -> Result<()> {
             );
         }
         Err(e) => {
-            error!("CALLBACK-OPTIMIZED performance test failed: {}", e);
+            error!("Performance test failed: {}", e);
             return Err(e);
         }
     }
 
     Ok(())
+}
+
+fn create_fix_executor(
+    orderbook_manager: Arc<OrderBookManager>,
+    symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
+    config: &Config
+) -> Result<Option<Arc<FixArbitrageExecutor>>> {
+    if config.should_enable_real_trading() || config.should_enable_mock_trading() {
+        info!("Creating FIX executor ({}) for performance test", if config.debug {
+            "Mock"
+        } else {
+            "Real"
+        });
+
+        let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
+
+        match
+            FixArbitrageExecutor::new(
+                orderbook_manager,
+                config.debug,
+                fix_config,
+                config.min_execution_profit_threshold,
+                symbol_map.clone()
+            )
+        {
+            Ok(mut executor) => {
+                if let Err(e) = executor.connect() {
+                    error!("Failed to connect FIX executor: {}", e);
+                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
+                }
+
+                executor.enable_callback_execution(3);
+                let executor_arc = Arc::new(executor);
+
+                info!("✓ FIX executor connected successfully for performance test");
+                Ok(Some(executor_arc))
+            }
+            Err(e) => {
+                error!("Failed to create FIX executor: {}", e);
+                Err(anyhow!("Failed to create FIX executor: {}", e))
+            }
+        }
+    } else {
+        info!("Trading disabled, using simulation mode only");
+        Ok(None)
+    }
+}
+
+fn create_execution_callback(
+    fix_executor: Arc<FixArbitrageExecutor>
+) -> arbitrage::detector::ExecutionCallback {
+    Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+        info!(
+            "Performance test opportunity: {} with {:.4}% profit",
+            opportunity.display(),
+            opportunity.profit_percentage()
+        );
+    })
+}
+
+fn start_detection_thread(
+    detector: Arc<ArbitrageDetector>,
+    orderbook_manager: Arc<OrderBookManager>,
+    shutdown: Arc<AtomicBool>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("perf-arbitrage-detector".to_string())
+        .spawn(move || {
+            info!("Performance arbitrage detection thread started");
+
+            let update_callback = {
+                let detector = detector.clone();
+                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
+                    detector.process_symbol_update(symbol_id);
+                })
+            };
+
+            orderbook_manager.register_update_callback(update_callback);
+
+            let stats_start = std::time::Instant::now();
+
+            while !shutdown.load(Ordering::Relaxed) && !detector.is_shutdown() {
+                thread::sleep(Duration::from_millis(100));
+
+                if stats_start.elapsed() > Duration::from_secs(30) {
+                    let stats = detector.get_performance_stats();
+                    info!(
+                        "Performance stats: {} symbols processed, {} paths checked, {} opportunities found",
+                        stats.symbols_processed,
+                        stats.paths_checked,
+                        stats.opportunities_found
+                    );
+                }
+            }
+
+            info!("Performance arbitrage detection thread stopped");
+        })
+        .expect("Failed to spawn performance arbitrage detection thread")
+}
+
+fn prepare_symbol_mappings(symbols: &[String]) -> Vec<(String, u16)> {
+    global::intern_batch(symbols);
+    global::get_all_mappings()
 }

@@ -1,23 +1,9 @@
 use std::sync::Arc;
-use std::time::Instant;
 use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
-use std::thread;
 
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
-use crate::orderbook::orderbook::OrderBook;
-use crate::executor::executor::ArbitrageExecutor;
-use crate::executor::fix_executor::FixArbitrageExecutor;
 use crate::utils::symbol_interner::global;
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct Opportunity {
-    pub path_index: u16,
-    pub profit_ratio: f32,
-    pub execution_time_ns: u32,
-    pub liquidity_score: u8,
-}
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
@@ -30,7 +16,6 @@ pub struct ArbitrageOpportunity {
 }
 
 impl ArbitrageOpportunity {
-    #[inline(always)]
     pub fn profit_percentage(&self) -> f64 {
         (self.profit_ratio - 1.0) * 100.0
     }
@@ -45,21 +30,6 @@ impl ArbitrageOpportunity {
             self.execution_time_ns
         )
     }
-}
-
-#[derive(Debug)]
-pub struct ExecutionRequest {
-    pub opportunity: ArbitrageOpportunity,
-    pub timestamp: Instant,
-    pub priority: u8,
-}
-
-#[derive(Debug)]
-pub struct ExecutionResult {
-    pub success: bool,
-    pub profit_amount: f64,
-    pub execution_time: std::time::Duration,
-    pub error: Option<String>,
 }
 
 pub type ExecutionCallback = Arc<dyn Fn(ArbitrageOpportunity) + Send + Sync + 'static>;
@@ -78,17 +48,14 @@ struct PathData {
 }
 
 impl PathData {
-    #[inline(always)]
     fn first_is_base_to_quote(&self) -> bool {
         (self.directions & 0b001) != 0
     }
 
-    #[inline(always)]
     fn second_is_base_to_quote(&self) -> bool {
         (self.directions & 0b010) != 0
     }
 
-    #[inline(always)]
     fn third_is_base_to_quote(&self) -> bool {
         (self.directions & 0b100) != 0
     }
@@ -105,27 +72,24 @@ struct SymbolPaths {
     _padding: [u8; 15],
 }
 
-pub struct ArbitrageDetectorState {
-    pub orderbook_manager: Arc<OrderBookManager>,
-    pub all_paths: Box<[TriangularPath]>,
+pub struct ArbitrageDetector {
+    orderbook_manager: Arc<OrderBookManager>,
+    all_paths: Box<[TriangularPath]>,
     path_data: Box<[PathData]>,
     symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>,
-
     execution_callbacks: parking_lot::RwLock<Vec<ExecutionCallback>>,
 
     start_amount: f32,
     min_volume_multiplier: f32,
     min_profit_for_execution: f32,
-    use_fix_execution: bool,
 
-    pub stats_counter: Arc<AtomicUsize>,
-    pub profit_counter: Arc<AtomicUsize>,
-    pub execution_counter: Arc<AtomicU64>,
-    pub opportunities_found_counter: Arc<AtomicU64>,
-    pub opportunities_sent_counter: Arc<AtomicU64>,
-    pub opportunities_executed_counter: Arc<AtomicU64>,
-    pub opportunities_rejected_counter: Arc<AtomicU64>,
-
+    stats_counter: Arc<AtomicUsize>,
+    profit_counter: Arc<AtomicUsize>,
+    execution_counter: Arc<AtomicU64>,
+    opportunities_found_counter: Arc<AtomicU64>,
+    opportunities_sent_counter: Arc<AtomicU64>,
+    opportunities_executed_counter: Arc<AtomicU64>,
+    opportunities_rejected_counter: Arc<AtomicU64>,
     paths_checked_counter: Arc<AtomicU64>,
     symbols_processed_counter: Arc<AtomicU64>,
     last_execution_ns: Arc<AtomicU64>,
@@ -133,16 +97,14 @@ pub struct ArbitrageDetectorState {
     shutdown: Arc<AtomicBool>,
 }
 
-impl ArbitrageDetectorState {
+impl ArbitrageDetector {
     pub fn new(
         orderbook_manager: Arc<OrderBookManager>,
         paths: Vec<Arc<TriangularPath>>,
         fee_rate: f64,
         min_profit_threshold: f64,
         start_amount: f64,
-        min_volume_multiplier: f64,
-        fallback_executor: Arc<ArbitrageExecutor>,
-        fix_executor: Option<Arc<FixArbitrageExecutor>>
+        min_volume_multiplier: f64
     ) -> Arc<Self> {
         let unwrapped_paths: Vec<TriangularPath> = paths
             .iter()
@@ -198,15 +160,12 @@ impl ArbitrageDetectorState {
             });
 
             let path_idx = i as u16;
-
             Self::add_path_to_symbol(&mut symbol_map, first_symbol_id, path_idx);
             Self::add_path_to_symbol(&mut symbol_map, second_symbol_id, path_idx);
             Self::add_path_to_symbol(&mut symbol_map, third_symbol_id, path_idx);
         }
 
-        let use_fix_execution = fix_executor.is_some();
-
-        Arc::new(ArbitrageDetectorState {
+        Arc::new(ArbitrageDetector {
             orderbook_manager: orderbook_manager.clone(),
             all_paths: unwrapped_paths.into_boxed_slice(),
             path_data: path_data.into_boxed_slice(),
@@ -215,7 +174,6 @@ impl ArbitrageDetectorState {
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
             min_profit_for_execution: (1.0 + min_profit_threshold) as f32,
-            use_fix_execution,
             stats_counter: Arc::new(AtomicUsize::new(0)),
             profit_counter: Arc::new(AtomicUsize::new(0)),
             execution_counter: Arc::new(AtomicU64::new(0)),
@@ -230,14 +188,12 @@ impl ArbitrageDetectorState {
         })
     }
 
-    #[inline]
     pub fn register_execution_callback(&self, callback: ExecutionCallback) {
         let mut callbacks = self.execution_callbacks.write();
         callbacks.push(callback);
         tracing::info!("Registered execution callback (total: {})", callbacks.len());
     }
 
-    #[inline(always)]
     fn add_path_to_symbol(
         symbol_map: &mut Box<[SymbolPaths; MAX_SYMBOLS]>,
         symbol_id: u16,
@@ -252,8 +208,7 @@ impl ArbitrageDetectorState {
         }
     }
 
-    #[inline(always)]
-    fn check_path_zero_alloc(&self, path_idx: u16) -> Option<Opportunity> {
+    fn check_path(&self, path_idx: u16) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
@@ -314,7 +269,6 @@ impl ArbitrageDetectorState {
             };
 
             amount *= path_data.fee_multiplier_cubed;
-
             let profit_ratio = amount / self.start_amount;
 
             if profit_ratio <= path_data.min_threshold {
@@ -331,36 +285,23 @@ impl ArbitrageDetectorState {
                 return None;
             }
 
-            let avg_qty = ((first_qty + second_qty + third_qty) as f32) / 3.0;
-            let liquidity_score = ((avg_qty / min_vol).min(2.0) * 127.5) as u8;
+            let path = &self.all_paths[path_idx as usize];
+            let first_symbol_id = global::get_id(&path.first_symbol).unwrap_or(0);
+            let second_symbol_id = global::get_id(&path.second_symbol).unwrap_or(0);
+            let third_symbol_id = global::get_id(&path.third_symbol).unwrap_or(0);
 
-            Some(Opportunity {
-                path_index: path_idx,
-                profit_ratio,
+            Some(ArbitrageOpportunity {
+                path: Arc::new(path.clone()),
+                profit_ratio: profit_ratio as f64,
+                start_amount: self.start_amount as f64,
+                end_amount: (self.start_amount as f64) * (profit_ratio as f64),
                 execution_time_ns: 0,
-                liquidity_score,
+                symbols_involved: [first_symbol_id, second_symbol_id, third_symbol_id],
             })
         }
     }
 
-    #[inline(always)]
-    fn trigger_execution_callbacks(&self, opportunity: ArbitrageOpportunity) -> bool {
-        let callbacks = self.execution_callbacks.read();
-        if callbacks.is_empty() {
-            return false;
-        }
-
-        self.opportunities_sent_counter.fetch_add(1, Ordering::Relaxed);
-
-        for callback in callbacks.iter() {
-            callback(opportunity.clone());
-        }
-
-        true
-    }
-
-    #[inline(always)]
-    pub fn handle_update_by_id(&self, symbol_id: u16, _book: &OrderBook) {
+    pub fn process_symbol_update(&self, symbol_id: u16) {
         self.symbols_processed_counter.fetch_add(1, Ordering::Relaxed);
 
         if (symbol_id as usize) < MAX_SYMBOLS {
@@ -375,43 +316,26 @@ impl ArbitrageDetectorState {
 
             for i in 0..max_paths_to_check {
                 let path_idx = unsafe { *symbol_paths.indices.get_unchecked(i) };
-
                 self.paths_checked_counter.fetch_add(1, Ordering::Relaxed);
 
-                if let Some(opportunity) = self.check_path_zero_alloc(path_idx) {
-                    if opportunity.profit_ratio >= self.min_profit_for_execution {
+                if let Some(opportunity) = self.check_path(path_idx) {
+                    if opportunity.profit_ratio >= (self.min_profit_for_execution as f64) {
                         self.opportunities_found_counter.fetch_add(1, Ordering::Relaxed);
-
-                        let path = &self.all_paths[opportunity.path_index as usize];
-
-                        let first_symbol_id = global::get_id(&path.first_symbol).unwrap_or(0);
-                        let second_symbol_id = global::get_id(&path.second_symbol).unwrap_or(0);
-                        let third_symbol_id = global::get_id(&path.third_symbol).unwrap_or(0);
-
-                        let arb_opportunity = ArbitrageOpportunity {
-                            path: Arc::new(path.clone()),
-                            profit_ratio: opportunity.profit_ratio as f64,
-                            start_amount: self.start_amount as f64,
-                            end_amount: (self.start_amount as f64) *
-                            (opportunity.profit_ratio as f64),
-                            execution_time_ns: 0,
-                            symbols_involved: [first_symbol_id, second_symbol_id, third_symbol_id],
-                        };
-
-                        if self.trigger_execution_callbacks(arb_opportunity) {
-                            self.stats_counter.fetch_add(1, Ordering::Relaxed);
-                        }
+                        self.trigger_execution_callbacks(opportunity);
+                        self.stats_counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
         }
     }
 
-    pub fn get_paths_for_symbol(&self, symbol_id: u16) -> usize {
-        if (symbol_id as usize) < MAX_SYMBOLS {
-            self.symbol_map[symbol_id as usize].count as usize
-        } else {
-            0
+    fn trigger_execution_callbacks(&self, opportunity: ArbitrageOpportunity) {
+        let callbacks = self.execution_callbacks.read();
+        if !callbacks.is_empty() {
+            self.opportunities_sent_counter.fetch_add(1, Ordering::Relaxed);
+            for callback in callbacks.iter() {
+                callback(opportunity.clone());
+            }
         }
     }
 
@@ -452,57 +376,8 @@ impl ArbitrageDetectorState {
         tracing::info!("Detector shutdown initiated");
     }
 
-    pub fn run_stats_task(&self) {
-        let stats_counter = self.stats_counter.clone();
-        let profit_counter = self.profit_counter.clone();
-        let execution_counter = self.execution_counter.clone();
-        let paths_checked_counter = self.paths_checked_counter.clone();
-        let symbols_processed_counter = self.symbols_processed_counter.clone();
-        let opportunities_found_counter = self.opportunities_found_counter.clone();
-        let opportunities_sent_counter = self.opportunities_sent_counter.clone();
-        let opportunities_executed_counter = self.opportunities_executed_counter.clone();
-        let opportunities_rejected_counter = self.opportunities_rejected_counter.clone();
-
-        thread::Builder
-            ::new()
-            .name("arb-stats".to_string())
-            .spawn(move || {
-                loop {
-                    thread::sleep(std::time::Duration::from_secs(30));
-
-                    let scans = stats_counter.swap(0, Ordering::Relaxed);
-                    let profits = profit_counter.load(Ordering::Relaxed);
-                    let executions = execution_counter.load(Ordering::Relaxed);
-                    let paths_checked = paths_checked_counter.swap(0, Ordering::Relaxed);
-                    let symbols_processed = symbols_processed_counter.swap(0, Ordering::Relaxed);
-                    let found = opportunities_found_counter.swap(0, Ordering::Relaxed);
-                    let sent = opportunities_sent_counter.swap(0, Ordering::Relaxed);
-                    let executed = opportunities_executed_counter.swap(0, Ordering::Relaxed);
-                    let rejected = opportunities_rejected_counter.swap(0, Ordering::Relaxed);
-
-                    if scans > 0 || symbols_processed > 0 {
-                        eprintln!(
-                            "Detection: {} symbols, {} paths checked, {} opportunities found",
-                            symbols_processed,
-                            paths_checked,
-                            found
-                        );
-                        eprintln!(
-                            "Execution: {} sent, {} executed, {} rejected, {} profitable ({}%)",
-                            sent,
-                            executed,
-                            rejected,
-                            profits,
-                            if executed > 0 {
-                                (profits * 100) / (executed as usize)
-                            } else {
-                                0
-                            }
-                        );
-                    }
-                }
-            })
-            .expect("Failed to spawn stats thread");
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Relaxed)
     }
 }
 
@@ -524,56 +399,20 @@ pub struct DetectorPerformanceStats {
     pub profitable_executions: u64,
 }
 
-impl Clone for ArbitrageDetectorState {
-    fn clone(&self) -> Self {
-        panic!("ArbitrageDetectorState cannot be cloned due to execution callbacks");
-    }
-}
-
 pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
     fee_rate: f64,
     min_profit_threshold: f64,
     paths: Vec<Arc<TriangularPath>>,
     start_amount: f64,
-    fallback_executor: Arc<ArbitrageExecutor>,
-    fix_executor: Option<Arc<FixArbitrageExecutor>>,
-    min_volume_multiplier: f64,
-    is_perf: bool
-) -> Arc<ArbitrageDetectorState> {
-    let detector = ArbitrageDetectorState::new(
+    min_volume_multiplier: f64
+) -> Arc<ArbitrageDetector> {
+    ArbitrageDetector::new(
         orderbook_manager,
         paths,
         fee_rate,
         min_profit_threshold,
         start_amount,
-        min_volume_multiplier,
-        fallback_executor,
-        fix_executor
-    );
-
-    if is_perf {
-        detector.run_stats_task();
-    }
-
-    detector
-}
-
-pub fn start_detection_thread(detector: Arc<ArbitrageDetectorState>) -> thread::JoinHandle<()> {
-    thread::Builder
-        ::new()
-        .name("arbitrage-detector".to_string())
-        .spawn(move || {
-            let detector_for_callback = detector.clone();
-            detector.orderbook_manager.register_update_callback(
-                Arc::new(move |symbol_id: u16, book: &crate::orderbook::orderbook::OrderBook| {
-                    detector_for_callback.handle_update_by_id(symbol_id, book);
-                })
-            );
-
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-            }
-        })
-        .expect("Failed to spawn arbitrage detection thread")
+        min_volume_multiplier
+    )
 }
