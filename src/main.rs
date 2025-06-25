@@ -22,13 +22,11 @@ const WEBSOCKET_BUFFER_SIZE: usize = 100;
 
 fn main() -> Result<()> {
     let command = get_run_command();
-    let config = Config::from_env().context(
-        "Failed to load configuration from environment. Make sure you have a .env file with required variables."
-    )?;
+    let config = Config::from_env().context("Failed to load configuration")?;
 
     logging
         ::init_logging(config.log_level, config.debug, &config.log_config)
-        .context("Failed to initialize logging system")?;
+        .context("Failed to initialize logging")?;
 
     match command {
         Command::Run => app::normal_mode::run_normal_mode(config)?,

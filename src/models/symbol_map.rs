@@ -1,7 +1,5 @@
 use std::{ collections::HashSet, sync::Arc };
-
 use crate::utils::types::FastHashMap;
-
 use super::{ symbol::Symbol, triangular_path::TriangularPath };
 use ahash::HashMapExt;
 use parking_lot::RwLock;
@@ -11,7 +9,6 @@ pub struct SymbolMap {
     symbols: RwLock<FastHashMap<Arc<str>, Symbol>>,
     by_base: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
     by_quote: RwLock<FastHashMap<Arc<str>, Vec<Symbol>>>,
-
     triangular_paths: Vec<TriangularPath>,
 }
 
@@ -201,12 +198,9 @@ impl SymbolMap {
         if all_paths.len() > max_paths {
             use rand::seq::SliceRandom;
             let mut rng = rand::rng();
-
             all_paths.shuffle(&mut rng);
             all_paths.truncate(max_paths);
-
             self.triangular_paths = all_paths;
-
             tracing::info!("Randomly selected {} triangular paths", self.triangular_paths.len());
         } else {
             self.triangular_paths = all_paths;
@@ -254,8 +248,6 @@ impl SymbolMap {
                 result.push(third);
             }
         });
-        println!("Unique symbols: {:?}", result);
-
-        return result;
+        result
     }
 }

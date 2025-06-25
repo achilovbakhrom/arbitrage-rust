@@ -5,7 +5,6 @@ use anyhow::{ Result, Context };
 use std::time::Duration;
 use parking_lot::RwLock;
 use std::thread;
-
 use crate::models::level::Level;
 use crate::exchange::client::ExchangeClient;
 use crate::orderbook::orderbook::OrderBook;
@@ -80,8 +79,7 @@ impl OrderBookManager {
 
     #[inline]
     pub fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
-        let mut callbacks = self.update_callbacks.write();
-        callbacks.push(callback);
+        self.update_callbacks.write().push(callback);
     }
 
     #[inline(always)]
@@ -172,7 +170,7 @@ impl OrderBookManager {
         };
 
         match book.apply_depth_update_raw(bids, asks, first_update_id, last_update_id) {
-            Ok(true) => { true }
+            Ok(true) => true,
             Ok(false) => {
                 self.trigger_recovery_by_id(symbol_id);
                 false

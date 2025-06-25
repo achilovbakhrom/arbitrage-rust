@@ -1,10 +1,9 @@
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
-
 use crate::{
-    arbitrage::{ self, detector::ArbitrageDetector },
+    arbitrage,
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
-    executor::{ fix_executor::FixArbitrageExecutor },
+    executor::fix_executor::FixArbitrageExecutor,
     orderbook::manager::OrderBookManager,
     performance,
     utils::{
@@ -228,7 +227,7 @@ fn create_execution_callback(
 }
 
 fn start_detection_thread(
-    detector: Arc<ArbitrageDetector>,
+    detector: Arc<arbitrage::detector::ArbitrageDetector>,
     orderbook_manager: Arc<OrderBookManager>,
     shutdown: Arc<AtomicBool>
 ) -> thread::JoinHandle<()> {

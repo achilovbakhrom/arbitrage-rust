@@ -32,8 +32,11 @@ impl SymbolInterner {
 
     #[inline]
     pub fn get_or_intern_arc(&self, symbol: &Arc<str>) -> SymbolId {
-        if let Some(&id) = self.symbol_to_id.read().get(symbol) {
-            return id;
+        {
+            let symbol_map = self.symbol_to_id.read();
+            if let Some(&id) = symbol_map.get(symbol) {
+                return id;
+            }
         }
 
         let mut symbol_map = self.symbol_to_id.write();

@@ -6,7 +6,6 @@ use std::thread;
 use anyhow::{ Result, Context };
 use tracing::{ info, warn, error, debug };
 use crossbeam_channel::{ bounded, Receiver, Sender };
-
 use crate::arbitrage::detector::{ ArbitrageOpportunity, ExecutionCallback };
 use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide };
 use crate::exchange::mock_fix_api::MockFixClient;
@@ -23,21 +22,15 @@ struct ExecutionRequest {
 pub struct FixArbitrageExecutor {
     real_fix_client: Option<Arc<Mutex<FixClient>>>,
     mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
-
     symbol_map: Arc<SymbolMap>,
-
     is_debug_mode: bool,
-
     orderbook_manager: Arc<OrderBookManager>,
-
     execution_sender: Option<Sender<ExecutionRequest>>,
     execution_handles: Vec<thread::JoinHandle<()>>,
-
     execution_counter: Arc<AtomicU64>,
     successful_executions: Arc<AtomicU64>,
     total_execution_time_us: Arc<AtomicU64>,
     rejected_counter: Arc<AtomicU64>,
-
     min_profit_threshold: f64,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -167,13 +160,6 @@ impl FixArbitrageExecutor {
         rejected_counter: Arc<AtomicU64>,
         thread_id: usize
     ) {
-        #[cfg(target_os = "linux")]
-        {
-            let mut cpu_set = nix::sched::CpuSet::new();
-            cpu_set.set((thread_id + 2) % 4).ok();
-            nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &cpu_set).ok();
-        }
-
         let mut active_symbols: HashSet<u16> = HashSet::with_capacity(10);
 
         info!("FIX execution thread {} started with callback support", thread_id);

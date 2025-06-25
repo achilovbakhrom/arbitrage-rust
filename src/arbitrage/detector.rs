@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
-
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::utils::symbol_interner::global;
@@ -16,13 +15,14 @@ pub struct ArbitrageOpportunity {
 }
 
 impl ArbitrageOpportunity {
+    #[inline(always)]
     pub fn profit_percentage(&self) -> f64 {
         (self.profit_ratio - 1.0) * 100.0
     }
 
     pub fn display(&self) -> String {
         format!(
-            "{} → {} → {} | Profit: {:.4}% | Volume: OK | Time: {}ns",
+            "{} → {} → {} | {:.4}% | {}ns",
             self.path.first_symbol,
             self.path.second_symbol,
             self.path.third_symbol,
@@ -35,7 +35,7 @@ impl ArbitrageOpportunity {
 pub type ExecutionCallback = Arc<dyn Fn(ArbitrageOpportunity) + Send + Sync + 'static>;
 
 #[repr(C, align(64))]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PathData {
     first_symbol_id: u16,
     second_symbol_id: u16,
@@ -48,14 +48,17 @@ struct PathData {
 }
 
 impl PathData {
+    #[inline(always)]
     fn first_is_base_to_quote(&self) -> bool {
         (self.directions & 0b001) != 0
     }
 
+    #[inline(always)]
     fn second_is_base_to_quote(&self) -> bool {
         (self.directions & 0b010) != 0
     }
 
+    #[inline(always)]
     fn third_is_base_to_quote(&self) -> bool {
         (self.directions & 0b100) != 0
     }
@@ -78,11 +81,9 @@ pub struct ArbitrageDetector {
     path_data: Box<[PathData]>,
     symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>,
     execution_callbacks: parking_lot::RwLock<Vec<ExecutionCallback>>,
-
     start_amount: f32,
     min_volume_multiplier: f32,
     min_profit_for_execution: f32,
-
     stats_counter: Arc<AtomicUsize>,
     profit_counter: Arc<AtomicUsize>,
     execution_counter: Arc<AtomicU64>,
@@ -93,7 +94,6 @@ pub struct ArbitrageDetector {
     paths_checked_counter: Arc<AtomicU64>,
     symbols_processed_counter: Arc<AtomicU64>,
     last_execution_ns: Arc<AtomicU64>,
-
     shutdown: Arc<AtomicBool>,
 }
 
@@ -113,13 +113,11 @@ impl ArbitrageDetector {
 
         let all_symbols: Vec<String> = unwrapped_paths
             .iter()
-            .flat_map(|path| {
-                [
-                    path.first_symbol.to_string(),
-                    path.second_symbol.to_string(),
-                    path.third_symbol.to_string(),
-                ]
-            })
+            .flat_map(|path| [
+                path.first_symbol.to_string(),
+                path.second_symbol.to_string(),
+                path.third_symbol.to_string(),
+            ])
             .collect();
 
         global::intern_batch(&all_symbols);
@@ -166,7 +164,7 @@ impl ArbitrageDetector {
         }
 
         Arc::new(ArbitrageDetector {
-            orderbook_manager: orderbook_manager.clone(),
+            orderbook_manager,
             all_paths: unwrapped_paths.into_boxed_slice(),
             path_data: path_data.into_boxed_slice(),
             symbol_map,
@@ -188,12 +186,12 @@ impl ArbitrageDetector {
         })
     }
 
+    #[inline]
     pub fn register_execution_callback(&self, callback: ExecutionCallback) {
-        let mut callbacks = self.execution_callbacks.write();
-        callbacks.push(callback);
-        tracing::info!("Registered execution callback (total: {})", callbacks.len());
+        self.execution_callbacks.write().push(callback);
     }
 
+    #[inline]
     fn add_path_to_symbol(
         symbol_map: &mut Box<[SymbolPaths; MAX_SYMBOLS]>,
         symbol_id: u16,
@@ -208,6 +206,7 @@ impl ArbitrageDetector {
         }
     }
 
+    #[inline(always)]
     fn check_path(&self, path_idx: u16) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
@@ -301,6 +300,7 @@ impl ArbitrageDetector {
         }
     }
 
+    #[inline(always)]
     pub fn process_symbol_update(&self, symbol_id: u16) {
         self.symbols_processed_counter.fetch_add(1, Ordering::Relaxed);
 
@@ -329,6 +329,7 @@ impl ArbitrageDetector {
         }
     }
 
+    #[inline]
     fn trigger_execution_callbacks(&self, opportunity: ArbitrageOpportunity) {
         let callbacks = self.execution_callbacks.read();
         if !callbacks.is_empty() {
@@ -371,11 +372,12 @@ impl ArbitrageDetector {
         }
     }
 
+    #[inline]
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        tracing::info!("Detector shutdown initiated");
     }
 
+    #[inline]
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Relaxed)
     }
