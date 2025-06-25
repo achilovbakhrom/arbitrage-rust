@@ -1,4 +1,3 @@
-// src/exchange/fix_api.rs - Complete implementation with precision support
 use base64::{ engine::general_purpose, Engine as _ };
 use chrono::Utc;
 use crossbeam_channel::{ bounded, unbounded, Receiver, Sender };
@@ -183,7 +182,7 @@ impl FixClient {
         let tcp_stream = TcpStream::connect(&self.config.endpoint)?;
 
         tcp_stream.set_nodelay(true)?;
-        tcp_stream.set_nonblocking(true)?; // Make it non-blocking
+        tcp_stream.set_nonblocking(true)?;
         tcp_stream.set_read_timeout(Some(Duration::from_secs(1)))?;
         tcp_stream.set_write_timeout(Some(Duration::from_secs(1)))?;
 
@@ -540,7 +539,7 @@ impl FixClient {
             body.push_str(&format!("38={}\x01", formatted_qty));
         }
 
-        body.push_str("40=1\x01"); // OrdType (Market)
+        body.push_str("40=1\x01");
         body.push_str(&format!("49={}\x01", self.config.sender_comp_id));
         body.push_str(&format!("52={}\x01", sending_time));
         body.push_str(&format!("54={}\x01", order.side.to_fix_side()));
