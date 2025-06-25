@@ -157,7 +157,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
                 }
             );
 
-            if let Err(e) = client.process_messages_with_shutdown(&mut ws_stream, &shutdown_for_ws) {
+            if let Err(e) = client.process_messages(&mut ws_stream, &shutdown_for_ws) {
                 error!("WebSocket processing error: {}", e);
             }
         })?;

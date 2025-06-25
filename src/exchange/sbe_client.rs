@@ -133,14 +133,12 @@ impl<F> BinanceSbeClient<F>
         Ok(())
     }
 
-    pub fn process_messages_with_shutdown(
+    pub fn process_messages(
         &self,
         ws_stream: &mut WebSocket<MaybeTlsStream<TcpStream>>,
         shutdown: &std::sync::atomic::AtomicBool
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
-
-        let timing_enabled = self.timing_enabled.load(Ordering::Relaxed);
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
@@ -149,33 +147,13 @@ impl<F> BinanceSbeClient<F>
                 return Ok(());
             }
 
-            let ws_read_start = if timing_enabled { Some(Instant::now()) } else { None };
-
             let message_result = ws_stream.read();
-
-            let ws_read_time = if let Some(start) = ws_read_start {
-                start.elapsed().as_micros() as u64
-            } else {
-                0
-            };
 
             match message_result {
                 Ok(message) => {
                     match message {
                         Message::Binary(data) => {
-                            let sbe_parse_start = if timing_enabled {
-                                Some(Instant::now())
-                            } else {
-                                None
-                            };
-
                             let parse_result = self.handle_binary_message_optimized(&data);
-
-                            let sbe_parse_time = if let Some(start) = sbe_parse_start {
-                                start.elapsed().as_micros() as u64
-                            } else {
-                                0
-                            };
 
                             if let Err(e) = parse_result {
                                 debug!("Error handling binary message: {}", e);

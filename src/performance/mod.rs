@@ -558,7 +558,7 @@ pub fn run_performance_test(
 
     let test_state_for_ws = test_state.clone();
     let ws_handle = thread::spawn(move || {
-        let _ = client.process_messages_with_shutdown(&mut ws_stream, &test_state_for_ws.shutdown);
+        let _ = client.process_messages(&mut ws_stream, &test_state_for_ws.shutdown);
     });
 
     info!("Ultra-optimized performance test running... Press Ctrl+C to stop early");
