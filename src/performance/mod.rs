@@ -248,36 +248,6 @@ impl PerformanceTestState {
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
-    pub fn maybe_report_progress(&self) {
-        let elapsed = self.start_time.elapsed().as_secs();
-        let last_report = self.last_progress_report.load(Ordering::Relaxed);
-
-        if elapsed > last_report + 10 {
-            if
-                self.last_progress_report
-                    .compare_exchange_weak(
-                        last_report,
-                        elapsed,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed
-                    )
-                    .is_ok()
-            {
-                let remaining = self.duration.saturating_sub(self.start_time.elapsed());
-                let measurements = self.measurement_counter.load(Ordering::Relaxed);
-                let opportunities = self.opportunity_counter.load(Ordering::Relaxed);
-
-                info!(
-                    "Test progress: {:.1}% complete, {:.0}s remaining, {}k measurements, {} opportunities",
-                    ((elapsed as f64) / self.duration.as_secs_f64()) * 100.0,
-                    remaining.as_secs_f64(),
-                    measurements / 1000,
-                    opportunities
-                );
-            }
-        }
-    }
-
     pub fn save_results(&self) -> std::io::Result<()> {
         self.save_performance_results()?;
         self.save_opportunities()?;
@@ -393,43 +363,43 @@ pub fn run_performance_test(
         RwLock::new(FastHashMap::with_capacity(2048))
     );
 
-    let arbitrage_detection_callback = {
-        let detector_clone = detector.clone();
-        let detection_times_clone = detection_times.clone();
+    // let test_state_opp_clone = test_state.clone();
+    // thread::spawn(move || {
+    //     let mut counter = 0u64;
+    //     loop {
+    //         if test_state_opp_clone.is_complete() {
+    //             break;
+    //         }
 
-        move |symbol_id: u16, book: &crate::orderbook::orderbook::OrderBook| {
-            let detection_start = Instant::now();
-            detector_clone.process_symbol_update(symbol_id);
-            let detection_time = detection_start.elapsed();
+    //         thread::sleep(Duration::from_millis(100));
+    //         counter += 1;
 
-            let _ = detection_times_clone.write().insert(symbol_id, detection_time);
-        }
-    };
+    //         if counter % 10 == 0 {
+    //             for symbol_id in 0..10u16 {
+    //                 let opportunities =
+    //                     test_state_opp_clone.detect_arbitrage_opportunities_by_id(symbol_id);
+    //                 for opp in opportunities {
+    //                     test_state_opp_clone.record_opportunity(opp);
+    //                 }
+    //             }
+    //         }
+    //     }
+    // });
 
-    let test_state_opp_clone = test_state.clone();
-    thread::spawn(move || {
-        let mut counter = 0u64;
-        loop {
-            if test_state_opp_clone.is_complete() {
-                break;
+    orderbook_manager.register_update_callback(
+        Arc::new({
+            let detector_clone = detector.clone();
+            let detection_times_clone = detection_times.clone();
+
+            move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
+                let detection_start = Instant::now();
+                detector_clone.process_symbol_update(symbol_id);
+                let detection_time = detection_start.elapsed();
+
+                let _ = detection_times_clone.write().insert(symbol_id, detection_time);
             }
-
-            thread::sleep(Duration::from_millis(100));
-            counter += 1;
-
-            if counter % 10 == 0 {
-                for symbol_id in 0..10u16 {
-                    let opportunities =
-                        test_state_opp_clone.detect_arbitrage_opportunities_by_id(symbol_id);
-                    for opp in opportunities {
-                        test_state_opp_clone.record_opportunity(opp);
-                    }
-                }
-            }
-        }
-    });
-
-    orderbook_manager.register_update_callback(Arc::new(arbitrage_detection_callback));
+        })
+    );
 
     let detection_times_for_cb = detection_times.clone();
     let test_state_for_cb = test_state.clone();
@@ -469,7 +439,7 @@ pub fn run_performance_test(
                 orderbook_update_time +
                 arbitrage_detection_time;
 
-            let measurement = PerformanceMeasurement {
+            test_state_for_cb.record_measurement(PerformanceMeasurement {
                 timestamp: chrono::Local::now(),
                 sbe_parse_time_us,
                 orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
@@ -477,10 +447,7 @@ pub fn run_performance_test(
                 total_processing_time_us: total_processing_time.as_micros() as u64,
                 updates_processed: 1,
                 symbol_id,
-            };
-
-            test_state_for_cb.record_measurement(measurement);
-            test_state_for_cb.maybe_report_progress();
+            });
 
             orderbook_manager_clone.trigger_arbitrage_detection(symbol_id);
         }
