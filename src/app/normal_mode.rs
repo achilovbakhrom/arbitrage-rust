@@ -263,18 +263,6 @@ fn create_fix_executor(
     }
 }
 
-fn create_execution_callback(
-    fix_executor: Arc<FixArbitrageExecutor>
-) -> arbitrage::detector::ExecutionCallback {
-    Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-        info!(
-            "Execution opportunity: {} with {:.4}% profit",
-            opportunity.display(),
-            opportunity.profit_percentage()
-        );
-    })
-}
-
 fn start_detection_thread(
     detector: Arc<arbitrage::detector::ArbitrageDetector>,
     orderbook_manager: Arc<OrderBookManager>,
