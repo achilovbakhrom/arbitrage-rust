@@ -1,6 +1,6 @@
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 use crate::{
-    arbitrage,
+    arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
     executor::fix_executor::FixArbitrageExecutor,
@@ -72,10 +72,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     let fix_executor = create_fix_executor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
 
-    if let Some(ref executor) = fix_executor {
-        let execution_callback = create_execution_callback(executor.clone());
-        detector.register_execution_callback(execution_callback);
-    }
+    let execution_handler = start_execution_thread(detector.clone(), fix_executor.clone());
 
     let detector_mode = if fix_executor.is_some() {
         if config.debug {
@@ -116,7 +113,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        120,
+        600,
         output_file,
         triangular_paths
     );
@@ -134,6 +131,10 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     if let Err(e) = detection_handle.join() {
         error!("Error joining detection thread: {:?}", e);
+    }
+
+    if let Err(e) = execution_handler.join() {
+        error!("Error joining execution thread: {:?}", e);
     }
 
     match test_result {
@@ -214,18 +215,6 @@ fn create_fix_executor(
     }
 }
 
-fn create_execution_callback(
-    fix_executor: Arc<FixArbitrageExecutor>
-) -> arbitrage::detector::ExecutionCallback {
-    Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-        info!(
-            "Performance test opportunity: {} with {:.4}% profit",
-            opportunity.display(),
-            opportunity.profit_percentage()
-        );
-    })
-}
-
 fn start_detection_thread(
     detector: Arc<arbitrage::detector::ArbitrageDetector>,
     orderbook_manager: Arc<OrderBookManager>,
@@ -270,4 +259,28 @@ fn start_detection_thread(
 fn prepare_symbol_mappings(symbols: &[String]) -> Vec<(String, u16)> {
     global::intern_batch(symbols);
     global::get_all_mappings()
+}
+
+fn start_execution_thread(
+    detector: Arc<ArbitrageDetector>,
+    fix_executor: Option<Arc<FixArbitrageExecutor>>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("execution".to_string())
+        .spawn(move || {
+            if let Some(ref _executor) = fix_executor {
+                let execution_callback = Arc::new(
+                    move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                        info!(
+                            "Execution opportunity: {} with {:.4}% profit",
+                            opportunity.display(),
+                            opportunity.profit_percentage()
+                        );
+                    }
+                );
+                detector.register_execution_callback(execution_callback);
+            }
+        })
+        .expect("Failed to spawn execution thread")
 }

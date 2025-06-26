@@ -1,6 +1,6 @@
 use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 use crate::{
-    arbitrage,
+    arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
     executor::fix_executor::FixArbitrageExecutor,
@@ -60,18 +60,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     let fix_executor = create_fix_executor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
 
-    if let Some(ref _executor) = fix_executor {
-        let execution_callback = Arc::new(
-            move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-                info!(
-                    "Execution opportunity: {} with {:.4}% profit",
-                    opportunity.display(),
-                    opportunity.profit_percentage()
-                );
-            }
-        );
-        detector.register_execution_callback(execution_callback);
-    }
+    let execution_handler = start_execution_thread(detector.clone(), fix_executor.clone());
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
@@ -133,6 +122,10 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     if let Err(e) = detection_handle.join() {
         error!("Error joining detection thread: {:?}", e);
+    }
+
+    if let Err(e) = execution_handler.join() {
+        error!("Error joining execution thread: {:?}", e);
     }
 
     thread::sleep(Duration::from_millis(200));
@@ -290,4 +283,28 @@ fn start_detection_thread(
             info!("Arbitrage detection thread stopped");
         })
         .expect("Failed to spawn arbitrage detection thread")
+}
+
+fn start_execution_thread(
+    detector: Arc<ArbitrageDetector>,
+    fix_executor: Option<Arc<FixArbitrageExecutor>>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("execution".to_string())
+        .spawn(move || {
+            if let Some(ref _executor) = fix_executor {
+                let execution_callback = Arc::new(
+                    move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                        info!(
+                            "Execution opportunity: {} with {:.4}% profit",
+                            opportunity.display(),
+                            opportunity.profit_percentage()
+                        );
+                    }
+                );
+                detector.register_execution_callback(execution_callback);
+            }
+        })
+        .expect("Failed to spawn execution thread")
 }
