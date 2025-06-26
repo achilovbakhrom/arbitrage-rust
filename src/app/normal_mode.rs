@@ -3,11 +3,12 @@ use crate::{
     arbitrage,
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
-    executor::{ executor::ArbitrageExecutor, fix_executor::FixArbitrageExecutor },
+    executor::fix_executor::FixArbitrageExecutor,
     orderbook::manager::OrderBookManager,
     utils::{
         console::{ print_app_started, print_app_starting, print_config },
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
+        symbol_interner::global,
     },
     WEBSOCKET_BUFFER_SIZE,
 };
@@ -40,15 +41,14 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
     let unique_symbols = symbol_map.get_unique_symbols();
+    global::intern_batch(&unique_symbols);
 
+    // 1. Create Orderbook Manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
-    orderbook_manager.preload_symbols(&unique_symbols);
 
     let triangular_paths = symbol_map.get_trangular_paths_as_arc();
-    let fallback_executor = Arc::new(
-        ArbitrageExecutor::new(crate::executor::executor::ExecutionStrategy::FastSequential)
-    );
 
+    // 2. Create Detector
     let detector = arbitrage::detector::create_detector(
         orderbook_manager.clone(),
         config.fee,
@@ -60,26 +60,18 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     let fix_executor = create_fix_executor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
 
-    if let Some(ref executor) = fix_executor {
-        let execution_callback = create_execution_callback(executor.clone());
+    if let Some(ref _executor) = fix_executor {
+        let execution_callback = Arc::new(
+            move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                info!(
+                    "Execution opportunity: {} with {:.4}% profit",
+                    opportunity.display(),
+                    opportunity.profit_percentage()
+                );
+            }
+        );
         detector.register_execution_callback(execution_callback);
     }
-
-    let detector_mode = if fix_executor.is_some() {
-        if config.debug {
-            "FIX Mock Trading (Callback-Optimized)"
-        } else {
-            "FIX Real Trading (Callback-Optimized)"
-        }
-    } else {
-        "Simulation Only (Callback-Optimized)"
-    };
-
-    info!(
-        "Created arbitrage detector with threshold: {:.2}% (Mode: {})",
-        config.threshold * 100.0,
-        detector_mode
-    );
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
@@ -96,8 +88,10 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         orderbook_manager.clone(),
         shutdown.clone()
     );
+    // ----- Detecrtor end ------
 
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
+    // ----- Start sbe socket update -------
     let ws_handle = start_websocket_thread(
         config.sbe_api_key.clone(),
         symbol_mappings,
@@ -145,93 +139,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     info!("Triangular arbitrage system stopped");
     Ok(())
-}
-
-fn create_fix_executor(
-    orderbook_manager: Arc<OrderBookManager>,
-    symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
-    config: &Config
-) -> Result<Option<Arc<FixArbitrageExecutor>>> {
-    if config.should_enable_real_trading() || config.should_enable_mock_trading() {
-        info!("Creating FIX executor ({}) with precision support", if config.debug {
-            "Mock"
-        } else {
-            "Real"
-        });
-
-        let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
-
-        match
-            FixArbitrageExecutor::new(
-                orderbook_manager,
-                config.debug,
-                fix_config,
-                config.min_execution_profit_threshold,
-                symbol_map.clone()
-            )
-        {
-            Ok(mut executor) => {
-                if let Err(e) = executor.connect() {
-                    error!("Failed to connect FIX executor: {}", e);
-                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
-                }
-
-                let execution_callback = executor.enable_callback_execution(3);
-                let executor_arc = Arc::new(executor);
-
-                info!("✓ FIX executor connected successfully with precision support");
-                Ok(Some(executor_arc))
-            }
-            Err(e) => {
-                error!("Failed to create FIX executor: {}", e);
-                Err(anyhow!("Failed to create FIX executor: {}", e))
-            }
-        }
-    } else {
-        info!("Trading disabled, using simulation mode only");
-        Ok(None)
-    }
-}
-
-fn create_execution_callback(
-    fix_executor: Arc<FixArbitrageExecutor>
-) -> arbitrage::detector::ExecutionCallback {
-    Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-        info!(
-            "Execution opportunity: {} with {:.4}% profit",
-            opportunity.display(),
-            opportunity.profit_percentage()
-        );
-    })
-}
-
-fn start_detection_thread(
-    detector: Arc<arbitrage::detector::ArbitrageDetector>,
-    orderbook_manager: Arc<OrderBookManager>,
-    shutdown: Arc<AtomicBool>
-) -> thread::JoinHandle<()> {
-    thread::Builder
-        ::new()
-        .name("arbitrage-detector".to_string())
-        .spawn(move || {
-            info!("Arbitrage detection thread started");
-
-            let update_callback = {
-                let detector = detector.clone();
-                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                    detector.process_symbol_update(symbol_id);
-                })
-            };
-
-            orderbook_manager.register_update_callback(update_callback);
-
-            while !shutdown.load(Ordering::Relaxed) && !detector.is_shutdown() {
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            info!("Arbitrage detection thread stopped");
-        })
-        .expect("Failed to spawn arbitrage detection thread")
 }
 
 fn start_websocket_thread(
@@ -308,4 +215,79 @@ fn start_websocket_thread(
         })?;
 
     Ok(handle)
+}
+
+fn create_fix_executor(
+    orderbook_manager: Arc<OrderBookManager>,
+    symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
+    config: &Config
+) -> Result<Option<Arc<FixArbitrageExecutor>>> {
+    if config.should_enable_real_trading() || config.should_enable_mock_trading() {
+        info!("Creating FIX executor ({}) with precision support", if config.debug {
+            "Mock"
+        } else {
+            "Real"
+        });
+
+        let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
+
+        match
+            FixArbitrageExecutor::new(
+                orderbook_manager,
+                config.debug,
+                fix_config,
+                config.min_execution_profit_threshold,
+                symbol_map.clone()
+            )
+        {
+            Ok(mut executor) => {
+                if let Err(e) = executor.connect() {
+                    error!("Failed to connect FIX executor: {}", e);
+                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
+                }
+
+                let _execution_callback = executor.enable_callback_execution(3);
+                let executor_arc = Arc::new(executor);
+
+                info!("✓ FIX executor connected successfully with precision support");
+                Ok(Some(executor_arc))
+            }
+            Err(e) => {
+                error!("Failed to create FIX executor: {}", e);
+                Err(anyhow!("Failed to create FIX executor: {}", e))
+            }
+        }
+    } else {
+        info!("Trading disabled, using simulation mode only");
+        Ok(None)
+    }
+}
+
+fn start_detection_thread(
+    detector: Arc<arbitrage::detector::ArbitrageDetector>,
+    orderbook_manager: Arc<OrderBookManager>,
+    shutdown: Arc<AtomicBool>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("arbitrage-detector".to_string())
+        .spawn(move || {
+            info!("Arbitrage detection thread started");
+
+            let update_callback = {
+                let detector = detector.clone();
+                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
+                    detector.process_symbol_update(symbol_id);
+                })
+            };
+
+            orderbook_manager.register_update_callback(update_callback);
+
+            while !shutdown.load(Ordering::Relaxed) && !detector.is_shutdown() {
+                thread::sleep(Duration::from_millis(100));
+            }
+
+            info!("Arbitrage detection thread stopped");
+        })
+        .expect("Failed to spawn arbitrage detection thread")
 }

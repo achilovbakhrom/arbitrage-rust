@@ -5,19 +5,11 @@ use std::collections::HashSet;
 use std::thread;
 use anyhow::{ Result, Context };
 use tracing::{ info, warn, error, debug };
-use crossbeam_channel::{ bounded, Receiver, Sender };
 use crate::arbitrage::detector::{ ArbitrageOpportunity, ExecutionCallback };
 use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::models::symbol_map::SymbolMap;
-
-#[derive(Debug)]
-struct ExecutionRequest {
-    opportunity: ArbitrageOpportunity,
-    timestamp: Instant,
-    priority: u8,
-}
 
 pub struct FixArbitrageExecutor {
     real_fix_client: Option<Arc<Mutex<FixClient>>>,
@@ -25,14 +17,13 @@ pub struct FixArbitrageExecutor {
     symbol_map: Arc<SymbolMap>,
     is_debug_mode: bool,
     orderbook_manager: Arc<OrderBookManager>,
-    execution_sender: Option<Sender<ExecutionRequest>>,
-    execution_handles: Vec<thread::JoinHandle<()>>,
     execution_counter: Arc<AtomicU64>,
     successful_executions: Arc<AtomicU64>,
     total_execution_time_us: Arc<AtomicU64>,
     rejected_counter: Arc<AtomicU64>,
     min_profit_threshold: f64,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    active_symbols: Arc<Mutex<HashSet<u16>>>,
 }
 
 impl FixArbitrageExecutor {
@@ -70,161 +61,82 @@ impl FixArbitrageExecutor {
             symbol_map,
             is_debug_mode,
             orderbook_manager,
-            execution_sender: None,
-            execution_handles: Vec::new(),
             execution_counter: Arc::new(AtomicU64::new(0)),
             successful_executions: Arc::new(AtomicU64::new(0)),
             total_execution_time_us: Arc::new(AtomicU64::new(0)),
             rejected_counter: Arc::new(AtomicU64::new(0)),
             min_profit_threshold,
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            active_symbols: Arc::new(Mutex::new(HashSet::with_capacity(100))),
         })
     }
 
-    pub fn enable_callback_execution(&mut self, num_threads: usize) -> ExecutionCallback {
-        let (execution_sender, execution_receiver) = bounded(10000);
-        self.execution_sender = Some(execution_sender.clone());
+    pub fn enable_callback_execution(&mut self, _num_threads: usize) -> ExecutionCallback {
+        info!("Enabled callback-based execution (no threads needed)");
 
-        self.execution_handles.clear();
+        let real_client = self.real_fix_client.clone();
+        let mock_client = self.mock_fix_client.clone();
+        let is_debug = self.is_debug_mode;
+        let symbol_map = self.symbol_map.clone();
+        let executed_counter = self.execution_counter.clone();
+        let successful_counter = self.successful_executions.clone();
+        let time_counter = self.total_execution_time_us.clone();
+        let rejected_counter = self.rejected_counter.clone();
+        let active_symbols = self.active_symbols.clone();
 
-        for thread_id in 0..num_threads {
-            let receiver = execution_receiver.clone();
-            let real_client = self.real_fix_client.clone();
-            let mock_client = self.mock_fix_client.clone();
-            let is_debug = self.is_debug_mode;
-            let shutdown = self.shutdown.clone();
-            let symbol_map = self.symbol_map.clone();
-
-            let executed_counter = self.execution_counter.clone();
-            let successful_counter = self.successful_executions.clone();
-            let time_counter = self.total_execution_time_us.clone();
-            let rejected_counter = self.rejected_counter.clone();
-
-            let handle = thread::Builder
-                ::new()
-                .name(format!("fix-executor-{}", thread_id))
-                .spawn(move || {
-                    Self::execution_thread_worker(
-                        receiver,
-                        real_client,
-                        mock_client,
-                        is_debug,
-                        shutdown,
-                        symbol_map,
-                        executed_counter,
-                        successful_counter,
-                        time_counter,
-                        rejected_counter,
-                        thread_id
-                    );
-                })
-                .expect("Failed to spawn execution thread");
-
-            self.execution_handles.push(handle);
-        }
-
-        info!("Started {} FIX execution threads with callback support", num_threads);
-
-        let sender = execution_sender;
         Arc::new(move |opportunity: ArbitrageOpportunity| {
-            let priority = ((opportunity.profit_ratio - 1.0) * 1000.0) as u8;
+            let execution_start = Instant::now();
 
-            let exec_request = ExecutionRequest {
-                opportunity,
-                timestamp: Instant::now(),
-                priority,
+            let symbols = &opportunity.symbols_involved;
+            let has_conflict = {
+                let active = active_symbols.lock().unwrap();
+                symbols.iter().any(|&sym| active.contains(&sym))
             };
 
-            match sender.try_send(exec_request) {
-                Ok(_) => {}
-                Err(crossbeam_channel::TrySendError::Full(_)) => {
-                    debug!("FIX execution queue full, dropping opportunity");
+            if has_conflict {
+                rejected_counter.fetch_add(1, Ordering::Relaxed);
+                debug!("Rejected opportunity due to symbol conflict: {:?}", symbols);
+                return;
+            }
+
+            {
+                let mut active = active_symbols.lock().unwrap();
+                for &symbol in symbols {
+                    active.insert(symbol);
                 }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                    error!("FIX execution channel disconnected");
+            }
+
+            let success = Self::execute_triangular_arbitrage_optimized(
+                &opportunity,
+                &real_client,
+                &mock_client,
+                is_debug,
+                &symbol_map
+            );
+
+            let execution_time = execution_start.elapsed().as_micros() as u64;
+
+            {
+                let mut active = active_symbols.lock().unwrap();
+                for &symbol in symbols {
+                    active.remove(&symbol);
                 }
+            }
+
+            executed_counter.fetch_add(1, Ordering::Relaxed);
+            time_counter.fetch_add(execution_time, Ordering::Relaxed);
+
+            if success {
+                successful_counter.fetch_add(1, Ordering::Relaxed);
+                info!(
+                    "FIX executed: {:.4}% profit in {}μs",
+                    opportunity.profit_percentage(),
+                    execution_time / 1000
+                );
+            } else {
+                warn!("FIX execution failed: {}", opportunity.display());
             }
         })
-    }
-
-    fn execution_thread_worker(
-        receiver: Receiver<ExecutionRequest>,
-        real_fix_client: Option<Arc<Mutex<FixClient>>>,
-        mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
-        is_debug_mode: bool,
-        shutdown: Arc<std::sync::atomic::AtomicBool>,
-        symbol_map: Arc<SymbolMap>,
-        executed_counter: Arc<AtomicU64>,
-        successful_counter: Arc<AtomicU64>,
-        time_counter: Arc<AtomicU64>,
-        rejected_counter: Arc<AtomicU64>,
-        thread_id: usize
-    ) {
-        let mut active_symbols: HashSet<u16> = HashSet::with_capacity(10);
-
-        info!("FIX execution thread {} started with callback support", thread_id);
-
-        while !shutdown.load(Ordering::Relaxed) {
-            match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(exec_request) => {
-                    let execution_start = Instant::now();
-
-                    let symbols = &exec_request.opportunity.symbols_involved;
-                    let has_conflict = symbols.iter().any(|&sym| active_symbols.contains(&sym));
-
-                    if has_conflict {
-                        rejected_counter.fetch_add(1, Ordering::Relaxed);
-                        debug!("Rejected opportunity due to symbol conflict: {:?}", symbols);
-                        continue;
-                    }
-
-                    for &symbol in symbols {
-                        active_symbols.insert(symbol);
-                    }
-
-                    let success = Self::execute_triangular_arbitrage_optimized(
-                        &exec_request.opportunity,
-                        &real_fix_client,
-                        &mock_fix_client,
-                        is_debug_mode,
-                        &symbol_map
-                    );
-
-                    let execution_time = execution_start.elapsed().as_micros() as u64;
-
-                    for &symbol in symbols {
-                        active_symbols.remove(&symbol);
-                    }
-
-                    executed_counter.fetch_add(1, Ordering::Relaxed);
-                    time_counter.fetch_add(execution_time, Ordering::Relaxed);
-
-                    if success {
-                        successful_counter.fetch_add(1, Ordering::Relaxed);
-
-                        info!(
-                            "FIX Thread {} executed: {:.4}% profit in {}μs",
-                            thread_id,
-                            exec_request.opportunity.profit_percentage(),
-                            execution_time / 1000
-                        );
-                    } else {
-                        warn!(
-                            "FIX Thread {} execution failed: {}",
-                            thread_id,
-                            exec_request.opportunity.display()
-                        );
-                    }
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    info!("FIX execution thread {} receiver disconnected", thread_id);
-                    break;
-                }
-            }
-        }
-
-        info!("FIX execution thread {} shutting down", thread_id);
     }
 
     fn execute_triangular_arbitrage_optimized(
@@ -236,25 +148,31 @@ impl FixArbitrageExecutor {
     ) -> bool {
         if is_debug_mode {
             if let Some(mock_client) = mock_fix_client {
-                let mut client = mock_client.lock().unwrap();
-                let result = Self::execute_mock_triangular_trades(
-                    opportunity,
-                    &mut client,
-                    symbol_map
-                );
-                result.is_ok()
+                if let Ok(mut client) = mock_client.try_lock() {
+                    let result = Self::execute_mock_triangular_trades(
+                        opportunity,
+                        &mut client,
+                        symbol_map
+                    );
+                    result.is_ok()
+                } else {
+                    false
+                }
             } else {
                 false
             }
         } else {
             if let Some(real_client) = real_fix_client {
-                let mut client = real_client.lock().unwrap();
-                let result = Self::execute_real_triangular_trades(
-                    opportunity,
-                    &mut client,
-                    symbol_map
-                );
-                result.is_ok()
+                if let Ok(mut client) = real_client.try_lock() {
+                    let result = Self::execute_real_triangular_trades(
+                        opportunity,
+                        &mut client,
+                        symbol_map
+                    );
+                    result.is_ok()
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -267,7 +185,6 @@ impl FixArbitrageExecutor {
         symbol_map: &Arc<SymbolMap>
     ) -> Result<()> {
         let path = &opportunity.path;
-        let mut current_amount = opportunity.start_amount;
 
         let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
         let is_base_to_quote = [
@@ -290,26 +207,20 @@ impl FixArbitrageExecutor {
                     OrderSide::Buy
                 },
                 quantity: if is_base_to_quote[i] {
-                    current_amount
+                    opportunity.start_amount
                 } else {
                     0.0
                 },
                 quote_quantity: if is_base_to_quote[i] {
                     None
                 } else {
-                    Some(current_amount)
+                    Some(opportunity.start_amount)
                 },
                 qty_precision: Some(qty_precision),
                 price_precision: Some(price_precision),
             };
 
-            let result = client.place_market_order(order)?;
-
-            current_amount = if is_base_to_quote[i] {
-                result.cum_quote_qty
-            } else {
-                result.filled_qty
-            };
+            client.place_market_order(order)?;
         }
 
         Ok(())
@@ -321,7 +232,6 @@ impl FixArbitrageExecutor {
         symbol_map: &Arc<SymbolMap>
     ) -> Result<()> {
         let path = &opportunity.path;
-        let mut current_amount = opportunity.start_amount;
 
         let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
         let is_base_to_quote = [
@@ -344,26 +254,20 @@ impl FixArbitrageExecutor {
                     OrderSide::Buy
                 },
                 quantity: if is_base_to_quote[i] {
-                    current_amount
+                    opportunity.start_amount
                 } else {
                     0.0
                 },
                 quote_quantity: if is_base_to_quote[i] {
                     None
                 } else {
-                    Some(current_amount)
+                    Some(opportunity.start_amount)
                 },
                 qty_precision: Some(qty_precision),
                 price_precision: Some(price_precision),
             };
 
-            let result = client.place_market_order(order)?;
-
-            current_amount = if is_base_to_quote[i] {
-                result.cum_quote_qty
-            } else {
-                result.filled_qty
-            };
+            client.place_market_order(order)?;
         }
 
         Ok(())

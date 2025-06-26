@@ -20,7 +20,7 @@ pub struct OrderBookManager {
     exchange_client: Arc<dyn ExchangeClient + Send + Sync>,
     recovery_mutex: Arc<Mutex<()>>,
     last_recovery: Box<[std::sync::atomic::AtomicU64; MAX_SYMBOLS]>,
-    update_callbacks: Arc<RwLock<Vec<OrderbookUpdateCallback>>>,
+    update_callback: Arc<RwLock<Option<OrderbookUpdateCallback>>>,
     runtime_handle: tokio::runtime::Handle,
 }
 
@@ -64,13 +64,9 @@ impl OrderBookManager {
             exchange_client,
             recovery_mutex: Arc::new(Mutex::new(())),
             last_recovery,
-            update_callbacks: Arc::new(RwLock::new(Vec::with_capacity(10))),
+            update_callback: Arc::new(RwLock::new(None)),
             runtime_handle,
         }
-    }
-
-    pub fn preload_symbols(&self, symbols: &[String]) {
-        global::intern_batch(symbols);
     }
 
     pub fn get_symbol_mappings(&self) -> Vec<(String, u16)> {
@@ -79,17 +75,17 @@ impl OrderBookManager {
 
     #[inline]
     pub fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
-        self.update_callbacks.write().push(callback);
+        let mut cb = self.update_callback.write();
+        *cb = Some(callback);
     }
 
     #[inline(always)]
     pub fn trigger_arbitrage_detection(&self, symbol_id: SymbolId) {
-        let callbacks = self.update_callbacks.read();
-        if !callbacks.is_empty() {
+        let callback = self.update_callback.read();
+
+        if let Some(ref cb) = *callback {
             if let Some(book) = self.get_book_by_id(symbol_id) {
-                for callback in callbacks.iter() {
-                    callback(symbol_id, &book);
-                }
+                cb(symbol_id, &book);
             }
         }
     }
@@ -337,17 +333,6 @@ impl OrderBookManager {
         }
     }
 
-    pub fn get_top_of_book_internal(
-        &self,
-        symbol: &Arc<str>
-    ) -> Option<(Option<Level>, Option<Level>)> {
-        if let Some(symbol_id) = global::get_id_arc(symbol) {
-            self.get_top_of_book_by_id(symbol_id)
-        } else {
-            None
-        }
-    }
-
     pub async fn fetch_snapshot(
         &self,
         symbol: &str
@@ -405,7 +390,7 @@ impl Clone for OrderBookManager {
             exchange_client: self.exchange_client.clone(),
             recovery_mutex: self.recovery_mutex.clone(),
             last_recovery: new_last_recovery,
-            update_callbacks: self.update_callbacks.clone(),
+            update_callback: self.update_callback.clone(),
             runtime_handle: self.runtime_handle.clone(),
         }
     }

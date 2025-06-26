@@ -1,6 +1,5 @@
 use base64::{ engine::general_purpose, Engine as _ };
 use chrono::Utc;
-use crossbeam_channel::{ bounded, unbounded, Receiver, Sender };
 use ed25519_dalek::{ Signature, Signer, SigningKey };
 use native_tls::{ TlsConnector, TlsStream };
 use parking_lot::RwLock;
@@ -97,16 +96,11 @@ pub struct SymbolPrecision {
     pub price_precision: u8,
 }
 
-struct OrderExecution {
-    sender: Sender<ExecutionResult>,
-    start_time: Instant,
-}
+type ExecutionCallback = Arc<dyn Fn(ExecutionResult) + Send + Sync>;
 
-#[derive(Debug)]
-enum InternalMessage {
-    SendMessage(String),
-    Heartbeat,
-    Shutdown,
+struct OrderExecution {
+    callback: ExecutionCallback,
+    start_time: Instant,
 }
 
 pub struct FixClient {
@@ -115,14 +109,11 @@ pub struct FixClient {
     pending_orders: Arc<RwLock<HashMap<String, OrderExecution>>>,
     signing_key: SigningKey,
     is_connected: AtomicBool,
-
-    message_sender: Option<Sender<InternalMessage>>,
     shutdown: Arc<AtomicBool>,
-
     connection_handle: Option<thread::JoinHandle<()>>,
     heartbeat_handle: Option<thread::JoinHandle<()>>,
-
     symbol_precisions: Arc<RwLock<HashMap<String, SymbolPrecision>>>,
+    stream: Arc<RwLock<Option<TlsStream<TcpStream>>>>,
 }
 
 impl FixClient {
@@ -149,11 +140,11 @@ impl FixClient {
             pending_orders: Arc::new(RwLock::new(HashMap::new())),
             signing_key,
             is_connected: AtomicBool::new(false),
-            message_sender: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             connection_handle: None,
             heartbeat_handle: None,
             symbol_precisions: Arc::new(RwLock::new(HashMap::new())),
+            stream: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -175,9 +166,6 @@ impl FixClient {
     pub fn connect(&mut self) -> Result<()> {
         eprintln!("Connecting to FIX endpoint: {}", self.config.endpoint);
 
-        let (message_tx, message_rx) = unbounded();
-        self.message_sender = Some(message_tx);
-
         let connector = TlsConnector::new()?;
         let tcp_stream = TcpStream::connect(&self.config.endpoint)?;
 
@@ -193,20 +181,30 @@ impl FixClient {
         tls_stream.write_all(logon_message.as_bytes())?;
         tls_stream.flush()?;
 
+        *self.stream.write() = Some(tls_stream);
+
         let pending_orders = Arc::clone(&self.pending_orders);
         let shutdown = Arc::clone(&self.shutdown);
+        let stream_ref = Arc::clone(&self.stream);
 
         let handle = thread::spawn(move || {
-            Self::connection_handler(tls_stream, message_rx, pending_orders, shutdown);
+            Self::connection_handler(stream_ref, pending_orders, shutdown);
         });
 
         self.connection_handle = Some(handle);
-
         self.start_heartbeat()?;
-
         self.is_connected.store(true, Ordering::Release);
-        eprintln!("FIX client connected successfully");
 
+        eprintln!("FIX client connected successfully");
+        Ok(())
+    }
+
+    fn send_message(&self, message: String) -> Result<()> {
+        let mut stream_guard = self.stream.write();
+        if let Some(ref mut stream) = *stream_guard {
+            stream.write_all(message.as_bytes())?;
+            stream.flush()?;
+        }
         Ok(())
     }
 
@@ -217,7 +215,6 @@ impl FixClient {
         let signature = self.sign_logon_payload(&seq_num.to_string(), &sending_time);
 
         let mut body = String::new();
-
         body.push_str(&format!("34={}\x01", seq_num));
         body.push_str("35=A\x01");
         body.push_str(&format!("49={}\x01", self.config.sender_comp_id));
@@ -259,8 +256,7 @@ impl FixClient {
     }
 
     fn connection_handler(
-        mut stream: TlsStream<TcpStream>,
-        message_rx: Receiver<InternalMessage>,
+        stream_ref: Arc<RwLock<Option<TlsStream<TcpStream>>>>,
         pending_orders: Arc<RwLock<HashMap<String, OrderExecution>>>,
         shutdown: Arc<AtomicBool>
     ) {
@@ -272,66 +268,41 @@ impl FixClient {
                 break;
             }
 
-            while let Ok(msg) = message_rx.try_recv() {
-                match msg {
-                    InternalMessage::SendMessage(fix_msg) => {
-                        if let Err(e) = stream.write_all(fix_msg.as_bytes()) {
-                            eprintln!("Failed to send message: {}", e);
-                            return;
+            {
+                let mut stream_guard = stream_ref.write();
+                if let Some(ref mut stream) = *stream_guard {
+                    match stream.read(&mut temp_buf) {
+                        Ok(0) => {
+                            eprintln!("Connection closed by server");
+                            break;
                         }
-                        if let Err(e) = stream.flush() {
-                            eprintln!("Failed to flush message: {}", e);
-                            return;
-                        }
-                    }
-                    InternalMessage::Heartbeat => {
-                        let heartbeat = Self::build_heartbeat_message();
-                        if let Err(e) = stream.write_all(heartbeat.as_bytes()) {
-                            eprintln!("Failed to send heartbeat: {}", e);
-                            return;
-                        }
-                        if let Err(e) = stream.flush() {
-                            eprintln!("Failed to flush heartbeat: {}", e);
-                            return;
-                        }
-                    }
-                    InternalMessage::Shutdown => {
-                        return;
-                    }
-                }
-            }
+                        Ok(n) => {
+                            buffer.extend_from_slice(&temp_buf[0..n]);
 
-            match stream.read(&mut temp_buf) {
-                Ok(0) => {
-                    eprintln!("Connection closed by server");
-                    break;
-                }
-                Ok(n) => {
-                    buffer.extend_from_slice(&temp_buf[0..n]);
-
-                    while let Some(pos) = buffer.iter().position(|&b| b == 0x01) {
-                        let msg_bytes: Vec<u8> = buffer.drain(0..=pos).collect();
-                        if let Ok(msg_str) = String::from_utf8(msg_bytes) {
-                            if
-                                let Err(e) = Self::process_incoming_message(
-                                    &msg_str,
-                                    &pending_orders
-                                )
-                            {
-                                eprintln!("Error processing message: {}", e);
+                            while let Some(pos) = buffer.iter().position(|&b| b == 0x01) {
+                                let msg_bytes: Vec<u8> = buffer.drain(0..=pos).collect();
+                                if let Ok(msg_str) = String::from_utf8(msg_bytes) {
+                                    if
+                                        let Err(e) = Self::process_incoming_message(
+                                            &msg_str,
+                                            &pending_orders
+                                        )
+                                    {
+                                        eprintln!("Error processing message: {}", e);
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-                Err(e) => {
-                    if
-                        e.kind() == std::io::ErrorKind::WouldBlock ||
-                        e.kind() == std::io::ErrorKind::TimedOut
-                    {
-                        // No data available, continue
-                    } else {
-                        eprintln!("Error reading from stream: {}", e);
-                        break;
+                        Err(e) => {
+                            if
+                                e.kind() == std::io::ErrorKind::WouldBlock ||
+                                e.kind() == std::io::ErrorKind::TimedOut
+                            {
+                            } else {
+                                eprintln!("Error reading from stream: {}", e);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -347,10 +318,10 @@ impl FixClient {
 
         let body =
             format!("34=1\x01\
-         35=0\x01\
-         49=RUST_ARBITRAGE\x01\
-         52={}\x01\
-         56=SPOT\x01", sending_time);
+             35=0\x01\
+             49=RUST_ARBITRAGE\x01\
+             52={}\x01\
+             56=SPOT\x01", sending_time);
 
         let header = format!("8=FIX.4.4\x019={}\x01", body.len());
         let message = format!("{}{}", header, body);
@@ -361,7 +332,7 @@ impl FixClient {
     fn start_heartbeat(&mut self) -> Result<()> {
         let interval_secs = self.config.heartbeat_interval as u64;
         let shutdown = Arc::clone(&self.shutdown);
-        let message_sender = self.message_sender.as_ref().unwrap().clone();
+        let stream_ref = Arc::clone(&self.stream);
 
         let handle = thread::spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
@@ -371,9 +342,17 @@ impl FixClient {
                     break;
                 }
 
-                if let Err(e) = message_sender.send(InternalMessage::Heartbeat) {
-                    eprintln!("Failed to send heartbeat signal: {}", e);
-                    break;
+                let heartbeat = Self::build_heartbeat_message();
+                let mut stream_guard = stream_ref.write();
+                if let Some(ref mut stream) = *stream_guard {
+                    if let Err(e) = stream.write_all(heartbeat.as_bytes()) {
+                        eprintln!("Failed to send heartbeat: {}", e);
+                        break;
+                    }
+                    if let Err(e) = stream.flush() {
+                        eprintln!("Failed to flush heartbeat: {}", e);
+                        break;
+                    }
                 }
             }
         });
@@ -400,10 +379,7 @@ impl FixClient {
                     if let Some(order_exec) = orders.remove(&client_order_id) {
                         let mut result = exec_result;
                         result.execution_time = order_exec.start_time.elapsed();
-
-                        if let Err(_) = order_exec.sender.send(result) {
-                            eprintln!("Failed to send execution result for order {}", client_order_id);
-                        }
+                        (order_exec.callback)(result);
                     }
                 }
             }
@@ -412,12 +388,8 @@ impl FixClient {
                     eprintln!("Received Test Request: {}", test_req_id);
                 }
             }
-            Some("0") => {
-                // Heartbeat - no action needed
-            }
-            _ => {
-                // Unknown message type
-            }
+            Some("0") => {}
+            _ => {}
         }
 
         Ok(())
@@ -498,8 +470,9 @@ impl FixClient {
         )
     }
 
-    pub fn place_market_order(&mut self, mut order: MarketOrder) -> Result<ExecutionResult> {
-        let start_time = Instant::now();
+    pub fn place_market_order_async<F>(&mut self, mut order: MarketOrder, callback: F) -> Result<()>
+        where F: Fn(ExecutionResult) + Send + Sync + 'static
+    {
         let client_order_id = format!(
             "{}_{}",
             self.config.sender_comp_id,
@@ -514,12 +487,11 @@ impl FixClient {
             }
         }
 
-        let (tx, rx) = bounded(1);
         {
             let mut pending = self.pending_orders.write();
             pending.insert(client_order_id.clone(), OrderExecution {
-                sender: tx,
-                start_time,
+                callback: Arc::new(callback),
+                start_time: Instant::now(),
             });
         }
 
@@ -553,19 +525,7 @@ impl FixClient {
         }
 
         let full_message = self.build_fix_message(&body);
-
-        if let Some(sender) = &self.message_sender {
-            sender
-                .send(InternalMessage::SendMessage(full_message))
-                .map_err(|_| {
-                    FixError::Connection(
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "Message channel closed"
-                        )
-                    )
-                })?;
-        }
+        self.send_message(full_message)?;
 
         eprintln!(
             "Placed market order: {} {} {} (precision: {:?})",
@@ -583,13 +543,11 @@ impl FixClient {
             order.qty_precision
         );
 
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(result) => Ok(result),
-            Err(_) => {
-                self.pending_orders.write().remove(&client_order_id);
-                Err(FixError::Timeout)
-            }
-        }
+        Ok(())
+    }
+
+    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<()> {
+        self.place_market_order_async(order, |_result| {})
     }
 
     pub fn disconnect(&mut self) -> Result<()> {
@@ -612,11 +570,7 @@ impl FixClient {
         );
 
         let logout_message = self.build_fix_message(&body);
-
-        if let Some(sender) = &self.message_sender {
-            let _ = sender.send(InternalMessage::SendMessage(logout_message));
-            let _ = sender.send(InternalMessage::Shutdown);
-        }
+        let _ = self.send_message(logout_message);
 
         if let Some(handle) = self.heartbeat_handle.take() {
             let _ = handle.join();

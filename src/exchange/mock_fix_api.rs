@@ -47,17 +47,17 @@ impl MockFixClient {
         (value * factor).floor() / factor
     }
 
-    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
+    pub fn place_market_order_async<F>(&mut self, order: MarketOrder, callback: F) -> Result<()>
+        where F: Fn(ExecutionResult) + Send + 'static
+    {
         if !self.is_connected {
             return Err(anyhow::anyhow!("Mock FIX client not connected"));
         }
 
         let start_time = Instant::now();
-
         std::thread::sleep(self.simulated_latency);
 
         let success = rand::random::<f64>() < self.success_rate;
-
         let execution_time = start_time.elapsed();
 
         if success {
@@ -107,7 +107,7 @@ impl MockFixClient {
                 precision
             );
 
-            Ok(ExecutionResult {
+            let result = ExecutionResult {
                 client_order_id,
                 order_id: format!("MOCK_ORDER_{}", rand::random::<u64>()),
                 symbol: order.symbol,
@@ -124,14 +124,21 @@ impl MockFixClient {
                 last_px: avg_price,
                 last_qty: filled_qty,
                 execution_time,
-            })
+            };
+
+            callback(result);
         } else {
             warn!(
                 "Mock FIX: Order execution failed for {} (precision: {:?})",
                 order.symbol,
                 order.qty_precision
             );
-            Err(anyhow::anyhow!("Mock execution failed - insufficient liquidity"))
         }
+
+        Ok(())
+    }
+
+    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<()> {
+        self.place_market_order_async(order, |_result| {})
     }
 }
