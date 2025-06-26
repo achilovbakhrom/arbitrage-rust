@@ -9,7 +9,6 @@ pub struct ArbitrageOpportunity {
     pub path: Arc<TriangularPath>,
     pub profit_ratio: f64,
     pub start_amount: f64,
-    pub end_amount: f64,
     pub execution_time_ns: u64,
     pub symbols_involved: [u16; 3],
 }
@@ -89,8 +88,6 @@ pub struct ArbitrageDetector {
     execution_counter: Arc<AtomicU64>,
     opportunities_found_counter: Arc<AtomicU64>,
     opportunities_sent_counter: Arc<AtomicU64>,
-    opportunities_executed_counter: Arc<AtomicU64>,
-    opportunities_rejected_counter: Arc<AtomicU64>,
     paths_checked_counter: Arc<AtomicU64>,
     symbols_processed_counter: Arc<AtomicU64>,
     last_execution_ns: Arc<AtomicU64>,
@@ -177,8 +174,6 @@ impl ArbitrageDetector {
             execution_counter: Arc::new(AtomicU64::new(0)),
             opportunities_found_counter: Arc::new(AtomicU64::new(0)),
             opportunities_sent_counter: Arc::new(AtomicU64::new(0)),
-            opportunities_executed_counter: Arc::new(AtomicU64::new(0)),
-            opportunities_rejected_counter: Arc::new(AtomicU64::new(0)),
             paths_checked_counter: Arc::new(AtomicU64::new(0)),
             symbols_processed_counter: Arc::new(AtomicU64::new(0)),
             last_execution_ns: Arc::new(AtomicU64::new(0)),
@@ -293,7 +288,6 @@ impl ArbitrageDetector {
                 path: Arc::new(path.clone()),
                 profit_ratio: profit_ratio as f64,
                 start_amount: self.start_amount as f64,
-                end_amount: (self.start_amount as f64) * (profit_ratio as f64),
                 execution_time_ns: 0,
                 symbols_involved: [first_symbol_id, second_symbol_id, third_symbol_id],
             })
@@ -348,19 +342,6 @@ impl ArbitrageDetector {
         )
     }
 
-    pub fn get_performance_stats(&self) -> DetectorPerformanceStats {
-        DetectorPerformanceStats {
-            symbols_processed: self.symbols_processed_counter.load(Ordering::Relaxed),
-            paths_checked: self.paths_checked_counter.load(Ordering::Relaxed),
-            opportunities_found: self.opportunities_found_counter.load(Ordering::Relaxed),
-            opportunities_sent: self.opportunities_sent_counter.load(Ordering::Relaxed),
-            opportunities_executed: self.opportunities_executed_counter.load(Ordering::Relaxed),
-            opportunities_rejected: self.opportunities_rejected_counter.load(Ordering::Relaxed),
-            executions: self.execution_counter.load(Ordering::Relaxed),
-            profitable_executions: self.profit_counter.load(Ordering::Relaxed) as u64,
-        }
-    }
-
     pub fn get_fix_execution_stats(&self) -> Option<crate::executor::fix_executor::ExecutionStats> {
         None
     }
@@ -387,18 +368,6 @@ impl ArbitrageDetector {
 pub struct DetectorOptimizationStats {
     pub total_paths: usize,
     pub symbol_map_entries: usize,
-}
-
-#[derive(Debug)]
-pub struct DetectorPerformanceStats {
-    pub symbols_processed: u64,
-    pub paths_checked: u64,
-    pub opportunities_found: u64,
-    pub opportunities_sent: u64,
-    pub opportunities_executed: u64,
-    pub opportunities_rejected: u64,
-    pub executions: u64,
-    pub profitable_executions: u64,
 }
 
 pub fn create_detector(

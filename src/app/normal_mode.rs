@@ -58,7 +58,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         config.min_volume_multiplier
     );
 
-    let fix_executor = create_fix_executor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
+    let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
 
     let execution_handler = start_execution_thread(detector.clone(), fix_executor.clone());
 
@@ -211,7 +211,6 @@ fn start_websocket_thread(
 }
 
 fn create_fix_executor(
-    orderbook_manager: Arc<OrderBookManager>,
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
     config: &Config
 ) -> Result<Option<Arc<FixArbitrageExecutor>>> {
@@ -224,15 +223,7 @@ fn create_fix_executor(
 
         let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
-        match
-            FixArbitrageExecutor::new(
-                orderbook_manager,
-                config.debug,
-                fix_config,
-                config.min_execution_profit_threshold,
-                symbol_map.clone()
-            )
-        {
+        match FixArbitrageExecutor::new(config.debug, fix_config, symbol_map.clone()) {
             Ok(mut executor) => {
                 if let Err(e) = executor.connect() {
                     error!("Failed to connect FIX executor: {}", e);

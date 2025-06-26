@@ -2,13 +2,12 @@ use std::sync::{ Arc, Mutex };
 use std::time::Instant;
 use std::sync::atomic::{ AtomicU64, Ordering };
 use std::collections::HashSet;
-use std::thread;
+
 use anyhow::{ Result, Context };
-use tracing::{ info, warn, error, debug };
+use tracing::{ info, warn, debug };
 use crate::arbitrage::detector::{ ArbitrageOpportunity, ExecutionCallback };
 use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide };
 use crate::exchange::mock_fix_api::MockFixClient;
-use crate::orderbook::manager::OrderBookManager;
 use crate::models::symbol_map::SymbolMap;
 
 pub struct FixArbitrageExecutor {
@@ -16,22 +15,18 @@ pub struct FixArbitrageExecutor {
     mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
     symbol_map: Arc<SymbolMap>,
     is_debug_mode: bool,
-    orderbook_manager: Arc<OrderBookManager>,
     execution_counter: Arc<AtomicU64>,
     successful_executions: Arc<AtomicU64>,
     total_execution_time_us: Arc<AtomicU64>,
     rejected_counter: Arc<AtomicU64>,
-    min_profit_threshold: f64,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     active_symbols: Arc<Mutex<HashSet<u16>>>,
 }
 
 impl FixArbitrageExecutor {
     pub fn new(
-        orderbook_manager: Arc<OrderBookManager>,
         is_debug_mode: bool,
         fix_config: Option<crate::exchange::fix_api::FixConfig>,
-        min_profit_threshold: f64,
         symbol_map: Arc<SymbolMap>
     ) -> Result<Self> {
         let (real_fix_client, mock_fix_client) = if is_debug_mode {
@@ -60,12 +55,10 @@ impl FixArbitrageExecutor {
             mock_fix_client,
             symbol_map,
             is_debug_mode,
-            orderbook_manager,
             execution_counter: Arc::new(AtomicU64::new(0)),
             successful_executions: Arc::new(AtomicU64::new(0)),
             total_execution_time_us: Arc::new(AtomicU64::new(0)),
             rejected_counter: Arc::new(AtomicU64::new(0)),
-            min_profit_threshold,
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_symbols: Arc::new(Mutex::new(HashSet::with_capacity(100))),
         })

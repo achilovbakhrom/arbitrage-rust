@@ -1,4 +1,4 @@
-use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
+use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread };
 use crate::{
     arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
@@ -31,7 +31,6 @@ pub fn create_output_file() -> Result<String> {
 pub fn run_performance_test(config: Config) -> Result<()> {
     print_config(&config);
     info!("Starting performance test for triangular arbitrage system");
-    info!("Test duration: 120 seconds");
 
     let output_file = create_output_file()?;
 
@@ -57,7 +56,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let unique_symbols = symbol_map.get_unique_symbols();
 
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
-    prepare_symbol_mappings(&unique_symbols);
+    global::intern_batch(&unique_symbols);
 
     let triangular_paths = symbol_map.get_trangular_paths_as_arc();
 
@@ -70,41 +69,14 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         config.min_volume_multiplier
     );
 
-    let fix_executor = create_fix_executor(orderbook_manager.clone(), symbol_map.clone(), &config)?;
+    let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
 
-    let execution_handler = start_execution_thread(detector.clone(), fix_executor.clone());
+    let execution_handler = start_execution_thread(detector.clone());
 
-    let detector_mode = if fix_executor.is_some() {
-        if config.debug {
-            "FIX Mock Trading (Performance Test)"
-        } else {
-            "FIX Real Trading (Performance Test)"
-        }
-    } else {
-        "Simulation Only (Performance Test)"
-    };
-
-    info!(
-        "Created arbitrage detector with threshold: {:.2}% (Mode: {})",
-        config.threshold * 100.0,
-        detector_mode
-    );
+    print_executor_info(fix_executor.is_some(), config.debug, config.threshold);
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let detection_handle = start_detection_thread(
-        detector.clone(),
-        orderbook_manager.clone(),
-        shutdown.clone()
-    );
-
-    let opt_stats = orderbook_manager.get_optimization_stats();
-    let detector_opt_stats = detector.get_optimization_stats();
-    info!("Optimization stats - OrderBook: {} books", opt_stats.total_books);
-    info!(
-        "Optimization stats - Detector: {} paths, {} symbol map entries",
-        detector_opt_stats.total_paths,
-        detector_opt_stats.symbol_map_entries
-    );
+    let detection_handle = start_detection_thread(detector.clone(), orderbook_manager.clone());
 
     info!("Starting performance test...");
 
@@ -113,7 +85,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         unique_symbols,
         orderbook_manager.clone(),
         detector.clone(),
-        600,
+        120,
         output_file,
         triangular_paths
     );
@@ -169,8 +141,21 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     Ok(())
 }
 
+fn print_executor_info(has_exec: bool, is_debug: bool, threshold: f64) {
+    let mode = if has_exec {
+        if is_debug {
+            "FIX Mock Trading (Performance Test)"
+        } else {
+            "FIX Real Trading (Performance Test)"
+        }
+    } else {
+        "Simulation Only (Performance Test)"
+    };
+
+    info!("Created arbitrage detector with threshold: {:.2}% (Mode: {})", threshold * 100.0, mode);
+}
+
 fn create_fix_executor(
-    orderbook_manager: Arc<OrderBookManager>,
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
     config: &Config
 ) -> Result<Option<Arc<FixArbitrageExecutor>>> {
@@ -183,15 +168,7 @@ fn create_fix_executor(
 
         let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
-        match
-            FixArbitrageExecutor::new(
-                orderbook_manager,
-                config.debug,
-                fix_config,
-                config.min_execution_profit_threshold,
-                symbol_map.clone()
-            )
-        {
+        match FixArbitrageExecutor::new(config.debug, fix_config, symbol_map.clone()) {
             Ok(mut executor) => {
                 if let Err(e) = executor.connect() {
                     error!("Failed to connect FIX executor: {}", e);
@@ -217,8 +194,7 @@ fn create_fix_executor(
 
 fn start_detection_thread(
     detector: Arc<arbitrage::detector::ArbitrageDetector>,
-    orderbook_manager: Arc<OrderBookManager>,
-    shutdown: Arc<AtomicBool>
+    orderbook_manager: Arc<OrderBookManager>
 ) -> thread::JoinHandle<()> {
     thread::Builder
         ::new()
@@ -235,52 +211,25 @@ fn start_detection_thread(
 
             orderbook_manager.register_update_callback(update_callback);
 
-            let stats_start = std::time::Instant::now();
-
-            while !shutdown.load(Ordering::Relaxed) && !detector.is_shutdown() {
-                thread::sleep(Duration::from_millis(100));
-
-                if stats_start.elapsed() > Duration::from_secs(30) {
-                    let stats = detector.get_performance_stats();
-                    info!(
-                        "Performance stats: {} symbols processed, {} paths checked, {} opportunities found",
-                        stats.symbols_processed,
-                        stats.paths_checked,
-                        stats.opportunities_found
-                    );
-                }
-            }
-
             info!("Performance arbitrage detection thread stopped");
         })
         .expect("Failed to spawn performance arbitrage detection thread")
 }
 
-fn prepare_symbol_mappings(symbols: &[String]) -> Vec<(String, u16)> {
-    global::intern_batch(symbols);
-    global::get_all_mappings()
-}
-
-fn start_execution_thread(
-    detector: Arc<ArbitrageDetector>,
-    fix_executor: Option<Arc<FixArbitrageExecutor>>
-) -> thread::JoinHandle<()> {
+fn start_execution_thread(detector: Arc<ArbitrageDetector>) -> thread::JoinHandle<()> {
     thread::Builder
         ::new()
         .name("execution".to_string())
         .spawn(move || {
-            if let Some(ref _executor) = fix_executor {
-                let execution_callback = Arc::new(
-                    move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-                        info!(
-                            "Execution opportunity: {} with {:.4}% profit",
-                            opportunity.display(),
-                            opportunity.profit_percentage()
-                        );
-                    }
-                );
-                detector.register_execution_callback(execution_callback);
-            }
+            detector.register_execution_callback(
+                Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                    info!(
+                        "Execution opportunity: {} with {:.4}% profit",
+                        opportunity.display(),
+                        opportunity.profit_percentage()
+                    );
+                })
+            );
         })
         .expect("Failed to spawn execution thread")
 }
