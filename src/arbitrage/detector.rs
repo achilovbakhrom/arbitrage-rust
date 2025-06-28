@@ -98,6 +98,7 @@ impl ArbitrageDetector {
     pub fn new(
         orderbook_manager: Arc<OrderBookManager>,
         paths: Vec<Arc<TriangularPath>>,
+        shutdown: Arc<AtomicBool>,
         fee_rate: f64,
         min_profit_threshold: f64,
         start_amount: f64,
@@ -177,7 +178,7 @@ impl ArbitrageDetector {
             paths_checked_counter: Arc::new(AtomicU64::new(0)),
             symbols_processed_counter: Arc::new(AtomicU64::new(0)),
             last_execution_ns: Arc::new(AtomicU64::new(0)),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown,
         })
     }
 
@@ -346,13 +347,6 @@ impl ArbitrageDetector {
         None
     }
 
-    pub fn get_optimization_stats(&self) -> DetectorOptimizationStats {
-        DetectorOptimizationStats {
-            total_paths: self.all_paths.len(),
-            symbol_map_entries: global::len(),
-        }
-    }
-
     #[inline]
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
@@ -364,23 +358,19 @@ impl ArbitrageDetector {
     }
 }
 
-#[derive(Debug)]
-pub struct DetectorOptimizationStats {
-    pub total_paths: usize,
-    pub symbol_map_entries: usize,
-}
-
 pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
+    paths: Vec<Arc<TriangularPath>>,
+    shutdown: Arc<AtomicBool>,
     fee_rate: f64,
     min_profit_threshold: f64,
-    paths: Vec<Arc<TriangularPath>>,
     start_amount: f64,
     min_volume_multiplier: f64
 ) -> Arc<ArbitrageDetector> {
     ArbitrageDetector::new(
         orderbook_manager,
         paths,
+        shutdown,
         fee_rate,
         min_profit_threshold,
         start_amount,

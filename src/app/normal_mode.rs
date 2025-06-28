@@ -40,20 +40,23 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     info!("✓ Fetched {} symbols from exchange", symbols.len());
 
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
+    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
     let unique_symbols = symbol_map.get_unique_symbols();
     global::intern_batch(&unique_symbols);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
 
     // 1. Create Orderbook Manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
 
-    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
-
     // 2. Create Detector
     let detector = arbitrage::detector::create_detector(
-        orderbook_manager.clone(),
+        Arc::clone(&orderbook_manager),
+        triangular_paths,
+        Arc::clone(&shutdown),
         config.fee,
         config.threshold,
-        triangular_paths,
         config.trade_amount,
         config.min_volume_multiplier
     );
@@ -61,9 +64,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
 
     let execution_handler = start_execution_thread(detector.clone(), fix_executor.clone());
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
 
     ctrlc
         ::set_handler(move || {
@@ -105,8 +105,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
     }
-
-    detector.shutdown();
 
     if let Some(fix_exec) = fix_executor {
         if let Err(e) = fix_exec.disconnect() {

@@ -12,7 +12,6 @@ use tracing::{ info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetector;
-use crate::models::triangular_path::TriangularPath;
 use crate::utils::types::FastHashMap;
 use crate::utils::symbol_interner::global;
 use parking_lot::RwLock;
@@ -52,7 +51,6 @@ pub struct PerformanceTestState {
     pub output_file: String,
     pub opportunities_file: String,
     pub shutdown: Arc<AtomicBool>,
-    pub triangular_paths: Box<[TriangularPath]>,
     pub orderbook_manager: Arc<OrderBookManager>,
     pub measurement_counter: AtomicU64,
     pub opportunity_counter: AtomicU64,
@@ -64,18 +62,12 @@ impl PerformanceTestState {
         detector: Arc<ArbitrageDetector>,
         duration_secs: u64,
         output_file: String,
-        triangular_paths: Vec<Arc<TriangularPath>>,
         orderbook_manager: Arc<OrderBookManager>
     ) -> Self {
         let opportunities_file = output_file.replace(
             "performance_results.csv",
             "arbitrage_opportunities.csv"
         );
-
-        let unwrapped_paths: Vec<TriangularPath> = triangular_paths
-            .iter()
-            .map(|arc_path| (**arc_path).clone())
-            .collect();
 
         Self {
             detector,
@@ -86,7 +78,6 @@ impl PerformanceTestState {
             output_file,
             opportunities_file,
             shutdown: Arc::new(AtomicBool::new(false)),
-            triangular_paths: unwrapped_paths.into_boxed_slice(),
             orderbook_manager,
             measurement_counter: AtomicU64::new(0),
             opportunity_counter: AtomicU64::new(0),
@@ -115,128 +106,6 @@ impl PerformanceTestState {
             }
         } else if let Ok(mut measurements) = self.measurements.try_lock() {
             measurements.push_back(measurement);
-        }
-    }
-
-    pub fn record_opportunity(&self, opportunity: ArbitrageOpportunity) {
-        self.opportunity_counter.fetch_add(1, Ordering::Relaxed);
-
-        if let Ok(mut opportunities) = self.opportunities.try_lock() {
-            opportunities.push_back(opportunity);
-
-            if opportunities.len() > 4000 {
-                opportunities.drain(0..1000);
-            }
-        }
-    }
-
-    pub fn detect_arbitrage_opportunities_by_id(
-        &self,
-        symbol_id: u16
-    ) -> Vec<ArbitrageOpportunity> {
-        let count = self.measurement_counter.load(Ordering::Relaxed);
-        if count % 2000 != 0 {
-            return Vec::new();
-        }
-
-        let mut opportunities = Vec::with_capacity(4);
-        let now = chrono::Local::now();
-
-        for path in self.triangular_paths.iter().take(5) {
-            let first_id = self.get_symbol_id(&path.first_symbol);
-            let second_id = self.get_symbol_id(&path.second_symbol);
-            let third_id = self.get_symbol_id(&path.third_symbol);
-
-            if
-                first_id == Some(symbol_id) ||
-                second_id == Some(symbol_id) ||
-                third_id == Some(symbol_id)
-            {
-                if
-                    let (Some(price1), Some(price2), Some(price3)) =
-                        self.get_path_prices_by_id(path)
-                {
-                    let start_amount = 1000.0;
-                    let mut amount = start_amount;
-
-                    amount = if path.first_is_base_to_quote {
-                        amount * price1
-                    } else {
-                        amount / price1
-                    };
-
-                    amount = if path.second_is_base_to_quote {
-                        amount * price2
-                    } else {
-                        amount / price2
-                    };
-
-                    amount = if path.third_is_base_to_quote {
-                        amount * price3
-                    } else {
-                        amount / price3
-                    };
-
-                    amount *= 0.997;
-
-                    let profit_amount = amount - start_amount;
-                    let profit_percentage = (profit_amount / start_amount) * 100.0;
-
-                    if profit_percentage > 0.05 {
-                        let path_string = format!(
-                            "{}->{}->{}",
-                            path.first_symbol,
-                            path.second_symbol,
-                            path.third_symbol
-                        );
-
-                        opportunities.push(ArbitrageOpportunity {
-                            timestamp: now,
-                            path: path_string,
-                            symbol1: path.first_symbol.to_string(),
-                            symbol2: path.second_symbol.to_string(),
-                            symbol3: path.third_symbol.to_string(),
-                            price1,
-                            price2,
-                            price3,
-                            profit_percentage,
-                            profit_amount,
-                            execution_time_ns: 150_000,
-                        });
-                    }
-                }
-            }
-        }
-
-        opportunities
-    }
-
-    fn get_path_prices_by_id(
-        &self,
-        path: &TriangularPath
-    ) -> (Option<f64>, Option<f64>, Option<f64>) {
-        let first_id = self.get_symbol_id(&path.first_symbol);
-        let second_id = self.get_symbol_id(&path.second_symbol);
-        let third_id = self.get_symbol_id(&path.third_symbol);
-
-        let price1 = first_id.and_then(|id|
-            self.get_symbol_price_by_id(id, path.first_is_base_to_quote)
-        );
-        let price2 = second_id.and_then(|id|
-            self.get_symbol_price_by_id(id, path.second_is_base_to_quote)
-        );
-        let price3 = third_id.and_then(|id|
-            self.get_symbol_price_by_id(id, path.third_is_base_to_quote)
-        );
-
-        (price1, price2, price3)
-    }
-
-    fn get_symbol_price_by_id(&self, symbol_id: u16, is_base_to_quote: bool) -> Option<f64> {
-        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book_by_id(symbol_id) {
-            if is_base_to_quote { bid.map(|b| b.price) } else { ask.map(|a| a.price) }
-        } else {
-            None
         }
     }
 
@@ -339,15 +208,13 @@ pub fn run_performance_test(
     orderbook_manager: Arc<OrderBookManager>,
     detector: Arc<ArbitrageDetector>,
     duration_secs: u64,
-    output_file: String,
-    triangular_paths: Vec<Arc<TriangularPath>>
+    output_file: String
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
         PerformanceTestState::new(
             detector.clone(),
             duration_secs,
             output_file,
-            triangular_paths,
             orderbook_manager.clone()
         )
     );
