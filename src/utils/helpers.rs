@@ -91,3 +91,30 @@ pub fn build_symbol_map(
 
     Ok(Arc::new(symbol_map))
 }
+
+pub fn create_output_file() -> anyhow::Result<String> {
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let output_dir = format!("./performance_results/{}", timestamp);
+    std::fs
+        ::create_dir_all(&output_dir)
+        .context(format!("Failed to create output directory: {}", output_dir))?;
+
+    let output_file = format!("{}/performance_results.csv", output_dir);
+    info!("Results will be saved to: {}", output_file);
+
+    Ok(output_file)
+}
+
+pub fn print_executor_info(has_exec: bool, is_debug: bool, threshold: f64) {
+    let mode = if has_exec {
+        if is_debug {
+            "FIX Mock Trading (Performance Test)"
+        } else {
+            "FIX Real Trading (Performance Test)"
+        }
+    } else {
+        "Simulation Only (Performance Test)"
+    };
+
+    info!("Created arbitrage detector with threshold: {:.2}% (Mode: {})", threshold * 100.0, mode);
+}

@@ -1,4 +1,4 @@
-use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread };
+use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::{ Duration, Instant } };
 use crate::{
     arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
@@ -8,25 +8,21 @@ use crate::{
     performance,
     utils::{
         console::print_config,
-        helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
+        helpers::{
+            build_symbol_map,
+            build_tokio_async_runtime,
+            create_output_file,
+            print_executor_info,
+            run_api_with_timeout,
+        },
         symbol_interner::global,
+        types::FastHashMap,
     },
 };
+use ahash::HashMapExt;
 use anyhow::{ anyhow, Context, Result };
+use parking_lot::RwLock;
 use tracing::{ error, info };
-
-pub fn create_output_file() -> Result<String> {
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let output_dir = format!("./performance_results/{}", timestamp);
-    std::fs
-        ::create_dir_all(&output_dir)
-        .context(format!("Failed to create output directory: {}", output_dir))?;
-
-    let output_file = format!("{}/performance_results.csv", output_dir);
-    info!("Results will be saved to: {}", output_file);
-
-    Ok(output_file)
-}
 
 pub fn run_performance_test(config: Config) -> Result<()> {
     print_config(&config);
@@ -34,7 +30,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     let output_file = create_output_file()?;
 
-    let client = Arc::new(
+    let api_client = Arc::new(
         BinanceClient::new(config.fix_api.clone(), config.debug).context(
             "Failed to create Binance client"
         )?
@@ -42,44 +38,54 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     let rt = build_tokio_async_runtime()?;
 
-    if run_api_with_timeout(&rt, client.is_operational())? {
+    if run_api_with_timeout(&rt, api_client.is_operational())? {
         info!("✓ Exchange is operational");
     } else {
         error!("❌ Exchange is not operational or timed out");
         return Err(anyhow!("Exchange is not operational"));
     }
 
-    let symbols = run_api_with_timeout(&rt, client.get_active_spot_symbols())?;
+    let symbols = run_api_with_timeout(&rt, api_client.get_active_spot_symbols())?;
     info!("✓ Fetched {} symbols from exchange", symbols.len());
 
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
+    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
     let unique_symbols = symbol_map.get_unique_symbols();
 
-    let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    shutdown.store(false, Ordering::Relaxed);
+
+    // 1. Create orderbook
+    let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, api_client.clone()));
     global::intern_batch(&unique_symbols);
 
-    let triangular_paths = symbol_map.get_trangular_paths_as_arc();
+    let detection_times: Arc<RwLock<FastHashMap<u16, Duration>>> = Arc::new(
+        RwLock::new(FastHashMap::with_capacity(2048))
+    );
 
+    // 2.Create detector
     let detector = arbitrage::detector::create_detector(
-        orderbook_manager.clone(),
+        Arc::clone(&orderbook_manager),
+        triangular_paths.clone(),
+        Arc::clone(&shutdown),
         config.fee,
         config.threshold,
-        triangular_paths.clone(),
         config.trade_amount,
         config.min_volume_multiplier
     );
+    let detection_handle = start_detection_thread(
+        Arc::clone(&orderbook_manager),
+        Arc::clone(&detector),
+        Arc::clone(&shutdown),
+        detection_times.clone()
+    );
 
+    // 3. Create executor
     let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
-
-    let execution_handler = start_execution_thread(detector.clone());
-
     print_executor_info(fix_executor.is_some(), config.debug, config.threshold);
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let detection_handle = start_detection_thread(detector.clone(), orderbook_manager.clone());
+    let execution_handler = start_execution_thread(Arc::clone(&detector), Arc::clone(&shutdown));
 
     info!("Starting performance test...");
-
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
         unique_symbols,
@@ -87,11 +93,9 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         detector.clone(),
         120,
         output_file,
-        triangular_paths
+        shutdown,
+        detection_times
     );
-
-    shutdown.store(true, Ordering::Relaxed);
-    detector.shutdown();
 
     if let Some(fix_exec) = fix_executor {
         if let Err(e) = fix_exec.disconnect() {
@@ -109,6 +113,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         error!("Error joining execution thread: {:?}", e);
     }
 
+    // On finish
     match test_result {
         Ok(_) => {
             info!("Performance test completed successfully!");
@@ -123,14 +128,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
             if let Some(fix_stats) = detector.get_fix_execution_stats() {
                 info!("Final FIX Execution Stats: {}", fix_stats);
             }
-
-            let exec_stats = detector.get_execution_stats();
-            info!(
-                "Final execution stats: {} opportunities, {} executions, {} profitable",
-                exec_stats.0,
-                exec_stats.1,
-                exec_stats.2
-            );
         }
         Err(e) => {
             error!("Performance test failed: {}", e);
@@ -141,20 +138,65 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     Ok(())
 }
 
-fn print_executor_info(has_exec: bool, is_debug: bool, threshold: f64) {
-    let mode = if has_exec {
-        if is_debug {
-            "FIX Mock Trading (Performance Test)"
-        } else {
-            "FIX Real Trading (Performance Test)"
-        }
-    } else {
-        "Simulation Only (Performance Test)"
-    };
+fn start_detection_thread(
+    orderbook_manager: Arc<OrderBookManager>,
+    detector: Arc<arbitrage::detector::ArbitrageDetector>,
+    shutdown: Arc<AtomicBool>,
+    detection_times: Arc<RwLock<FastHashMap<u16, Duration>>>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("perf-arbitrage-detector".to_string())
+        .spawn(move || {
+            info!("Performance arbitrage detection thread started");
 
-    info!("Created arbitrage detector with threshold: {:.2}% (Mode: {})", threshold * 100.0, mode);
+            orderbook_manager.register_update_callback({
+                let detector = detector.clone();
+                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
+                    let detection_start = Instant::now();
+                    detector.process_symbol_update(symbol_id);
+                    let detection_time = detection_start.elapsed();
+                    detection_times.write().insert(symbol_id, detection_time);
+                })
+            });
+
+            println!("orderbook_manager.register_update_callback");
+
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+
+            info!("Performance arbitrage detection thread stopped");
+        })
+        .expect("Failed to spawn performance arbitrage detection thread")
 }
 
+fn start_execution_thread(
+    detector: Arc<ArbitrageDetector>,
+    shutdown: Arc<AtomicBool>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("execution".to_string())
+        .spawn(move || {
+            detector.register_execution_callback(
+                Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                    info!(
+                        "Execution opportunity: {} with {:.4}% profit",
+                        opportunity.display(),
+                        opportunity.profit_percentage()
+                    );
+                })
+            );
+
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .expect("Failed to spawn execution thread")
+}
+
+/// -------------- HELPERS ----------------------
 fn create_fix_executor(
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
     config: &Config
@@ -190,46 +232,4 @@ fn create_fix_executor(
         info!("Trading disabled, using simulation mode only");
         Ok(None)
     }
-}
-
-fn start_detection_thread(
-    detector: Arc<arbitrage::detector::ArbitrageDetector>,
-    orderbook_manager: Arc<OrderBookManager>
-) -> thread::JoinHandle<()> {
-    thread::Builder
-        ::new()
-        .name("perf-arbitrage-detector".to_string())
-        .spawn(move || {
-            info!("Performance arbitrage detection thread started");
-
-            let update_callback = {
-                let detector = detector.clone();
-                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                    detector.process_symbol_update(symbol_id);
-                })
-            };
-
-            orderbook_manager.register_update_callback(update_callback);
-
-            info!("Performance arbitrage detection thread stopped");
-        })
-        .expect("Failed to spawn performance arbitrage detection thread")
-}
-
-fn start_execution_thread(detector: Arc<ArbitrageDetector>) -> thread::JoinHandle<()> {
-    thread::Builder
-        ::new()
-        .name("execution".to_string())
-        .spawn(move || {
-            detector.register_execution_callback(
-                Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-                    info!(
-                        "Execution opportunity: {} with {:.4}% profit",
-                        opportunity.display(),
-                        opportunity.profit_percentage()
-                    );
-                })
-            );
-        })
-        .expect("Failed to spawn execution thread")
 }

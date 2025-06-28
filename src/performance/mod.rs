@@ -7,15 +7,14 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
 use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
-use ahash::HashMapExt;
-use tracing::{ info, warn };
+use tracing::{ error, info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetector;
-use crate::models::triangular_path::TriangularPath;
 use crate::utils::types::FastHashMap;
 use crate::utils::symbol_interner::global;
 use parking_lot::RwLock;
+use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct PerformanceMeasurement {
@@ -52,7 +51,6 @@ pub struct PerformanceTestState {
     pub output_file: String,
     pub opportunities_file: String,
     pub shutdown: Arc<AtomicBool>,
-    pub triangular_paths: Box<[TriangularPath]>,
     pub orderbook_manager: Arc<OrderBookManager>,
     pub measurement_counter: AtomicU64,
     pub opportunity_counter: AtomicU64,
@@ -61,21 +59,16 @@ pub struct PerformanceTestState {
 
 impl PerformanceTestState {
     pub fn new(
+        orderbook_manager: Arc<OrderBookManager>,
         detector: Arc<ArbitrageDetector>,
-        duration_secs: u64,
         output_file: String,
-        triangular_paths: Vec<Arc<TriangularPath>>,
-        orderbook_manager: Arc<OrderBookManager>
+        duration_secs: u64,
+        shutdown: Arc<AtomicBool>
     ) -> Self {
         let opportunities_file = output_file.replace(
             "performance_results.csv",
             "arbitrage_opportunities.csv"
         );
-
-        let unwrapped_paths: Vec<TriangularPath> = triangular_paths
-            .iter()
-            .map(|arc_path| (**arc_path).clone())
-            .collect();
 
         Self {
             detector,
@@ -85,17 +78,12 @@ impl PerformanceTestState {
             duration: Duration::from_secs(duration_secs),
             output_file,
             opportunities_file,
-            shutdown: Arc::new(AtomicBool::new(false)),
-            triangular_paths: unwrapped_paths.into_boxed_slice(),
+            shutdown: shutdown,
             orderbook_manager,
             measurement_counter: AtomicU64::new(0),
             opportunity_counter: AtomicU64::new(0),
             last_progress_report: AtomicU64::new(0),
         }
-    }
-
-    fn get_symbol_id(&self, symbol: &str) -> Option<u16> {
-        global::get_id(symbol)
     }
 
     fn get_symbol_string(&self, symbol_id: u16) -> Option<String> {
@@ -115,128 +103,6 @@ impl PerformanceTestState {
             }
         } else if let Ok(mut measurements) = self.measurements.try_lock() {
             measurements.push_back(measurement);
-        }
-    }
-
-    pub fn record_opportunity(&self, opportunity: ArbitrageOpportunity) {
-        self.opportunity_counter.fetch_add(1, Ordering::Relaxed);
-
-        if let Ok(mut opportunities) = self.opportunities.try_lock() {
-            opportunities.push_back(opportunity);
-
-            if opportunities.len() > 4000 {
-                opportunities.drain(0..1000);
-            }
-        }
-    }
-
-    pub fn detect_arbitrage_opportunities_by_id(
-        &self,
-        symbol_id: u16
-    ) -> Vec<ArbitrageOpportunity> {
-        let count = self.measurement_counter.load(Ordering::Relaxed);
-        if count % 2000 != 0 {
-            return Vec::new();
-        }
-
-        let mut opportunities = Vec::with_capacity(4);
-        let now = chrono::Local::now();
-
-        for path in self.triangular_paths.iter().take(5) {
-            let first_id = self.get_symbol_id(&path.first_symbol);
-            let second_id = self.get_symbol_id(&path.second_symbol);
-            let third_id = self.get_symbol_id(&path.third_symbol);
-
-            if
-                first_id == Some(symbol_id) ||
-                second_id == Some(symbol_id) ||
-                third_id == Some(symbol_id)
-            {
-                if
-                    let (Some(price1), Some(price2), Some(price3)) =
-                        self.get_path_prices_by_id(path)
-                {
-                    let start_amount = 1000.0;
-                    let mut amount = start_amount;
-
-                    amount = if path.first_is_base_to_quote {
-                        amount * price1
-                    } else {
-                        amount / price1
-                    };
-
-                    amount = if path.second_is_base_to_quote {
-                        amount * price2
-                    } else {
-                        amount / price2
-                    };
-
-                    amount = if path.third_is_base_to_quote {
-                        amount * price3
-                    } else {
-                        amount / price3
-                    };
-
-                    amount *= 0.997;
-
-                    let profit_amount = amount - start_amount;
-                    let profit_percentage = (profit_amount / start_amount) * 100.0;
-
-                    if profit_percentage > 0.05 {
-                        let path_string = format!(
-                            "{}->{}->{}",
-                            path.first_symbol,
-                            path.second_symbol,
-                            path.third_symbol
-                        );
-
-                        opportunities.push(ArbitrageOpportunity {
-                            timestamp: now,
-                            path: path_string,
-                            symbol1: path.first_symbol.to_string(),
-                            symbol2: path.second_symbol.to_string(),
-                            symbol3: path.third_symbol.to_string(),
-                            price1,
-                            price2,
-                            price3,
-                            profit_percentage,
-                            profit_amount,
-                            execution_time_ns: 150_000,
-                        });
-                    }
-                }
-            }
-        }
-
-        opportunities
-    }
-
-    fn get_path_prices_by_id(
-        &self,
-        path: &TriangularPath
-    ) -> (Option<f64>, Option<f64>, Option<f64>) {
-        let first_id = self.get_symbol_id(&path.first_symbol);
-        let second_id = self.get_symbol_id(&path.second_symbol);
-        let third_id = self.get_symbol_id(&path.third_symbol);
-
-        let price1 = first_id.and_then(|id|
-            self.get_symbol_price_by_id(id, path.first_is_base_to_quote)
-        );
-        let price2 = second_id.and_then(|id|
-            self.get_symbol_price_by_id(id, path.second_is_base_to_quote)
-        );
-        let price3 = third_id.and_then(|id|
-            self.get_symbol_price_by_id(id, path.third_is_base_to_quote)
-        );
-
-        (price1, price2, price3)
-    }
-
-    fn get_symbol_price_by_id(&self, symbol_id: u16, is_base_to_quote: bool) -> Option<f64> {
-        if let Some((bid, ask)) = self.orderbook_manager.get_top_of_book_by_id(symbol_id) {
-            if is_base_to_quote { bid.map(|b| b.price) } else { ask.map(|a| a.price) }
-        } else {
-            None
         }
     }
 
@@ -340,135 +206,38 @@ pub fn run_performance_test(
     detector: Arc<ArbitrageDetector>,
     duration_secs: u64,
     output_file: String,
-    triangular_paths: Vec<Arc<TriangularPath>>
+    shutdown: Arc<AtomicBool>,
+    detection_times: Arc<RwLock<FastHashMap<u16, Duration>>>
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
         PerformanceTestState::new(
-            detector.clone(),
-            duration_secs,
+            Arc::clone(&orderbook_manager),
+            Arc::clone(&detector),
             output_file,
-            triangular_paths,
-            orderbook_manager.clone()
+            duration_secs,
+            shutdown.clone()
         )
     );
 
     info!("Starting performance test for {} seconds", duration_secs);
 
-    let client = BinanceSbeClient::new(api_key);
-    let symbol_mappings = orderbook_manager.get_symbol_mappings();
-    client.preload_symbol_mappings(&symbol_mappings);
-    client.enable_timing();
-
-    let detection_times: Arc<RwLock<FastHashMap<u16, Duration>>> = Arc::new(
-        RwLock::new(FastHashMap::with_capacity(2048))
-    );
-
-    // let test_state_opp_clone = test_state.clone();
-    // thread::spawn(move || {
-    //     let mut counter = 0u64;
-    //     loop {
-    //         if test_state_opp_clone.is_complete() {
-    //             break;
-    //         }
-
-    //         thread::sleep(Duration::from_millis(100));
-    //         counter += 1;
-
-    //         if counter % 10 == 0 {
-    //             for symbol_id in 0..10u16 {
-    //                 let opportunities =
-    //                     test_state_opp_clone.detect_arbitrage_opportunities_by_id(symbol_id);
-    //                 for opp in opportunities {
-    //                     test_state_opp_clone.record_opportunity(opp);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // });
-
-    orderbook_manager.register_update_callback(
-        Arc::new({
-            let detector_clone = detector.clone();
-            let detection_times_clone = detection_times.clone();
-
-            move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                let detection_start = Instant::now();
-                detector_clone.process_symbol_update(symbol_id);
-                let detection_time = detection_start.elapsed();
-
-                let _ = detection_times_clone.write().insert(symbol_id, detection_time);
-            }
-        })
-    );
-
     let detection_times_for_cb = detection_times.clone();
     let test_state_for_cb = test_state.clone();
-    let orderbook_manager_clone = orderbook_manager.clone();
 
-    client.set_depth_callback(
-        move |
-            symbol_id: u16,
-            bids: &[(f64, f64); 5],
-            asks: &[(f64, f64); 5],
-            first_update_id: u64,
-            last_update_id: u64,
-            sbe_parse_time_us: u64
-        | {
-            if test_state_for_cb.is_complete() {
-                return;
-            }
-
-            let orderbook_update_start = Instant::now();
-            let _ = orderbook_manager_clone.apply_depth_update_pure(
-                symbol_id,
-                bids,
-                asks,
-                first_update_id,
-                last_update_id
-            );
-            let orderbook_update_time = orderbook_update_start.elapsed();
-
-            let arbitrage_detection_time = detection_times_for_cb
-                .read()
-                .get(&symbol_id)
-                .copied()
-                .unwrap_or_else(|| Duration::from_nanos(0));
-
-            let total_processing_time =
-                Duration::from_micros(sbe_parse_time_us) +
-                orderbook_update_time +
-                arbitrage_detection_time;
-
-            test_state_for_cb.record_measurement(PerformanceMeasurement {
-                timestamp: chrono::Local::now(),
-                sbe_parse_time_us,
-                orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
-                arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
-                total_processing_time_us: total_processing_time.as_micros() as u64,
-                updates_processed: 1,
-                symbol_id,
-            });
-
-            orderbook_manager_clone.trigger_arbitrage_detection(symbol_id);
-        }
-    );
-
-    let mut ws_stream = client.connect()?;
-    let channels = vec!["depth".to_string()];
-    client.subscribe(&mut ws_stream, &symbols, &channels)?;
-
-    info!("WebSocket connected and subscribed to {} symbols", symbols.len());
+    let ws_handler = start_websocket_thread(
+        api_key,
+        symbols,
+        orderbook_manager.clone(),
+        shutdown,
+        test_state_for_cb,
+        detection_times_for_cb
+    )?;
 
     let test_state_for_signal = test_state.clone();
     ctrlc::set_handler(move || {
         info!("Received Ctrl+C, stopping performance test...");
         test_state_for_signal.stop();
     })?;
-
-    let test_state_for_ws = test_state.clone();
-    let ws_handle = thread::spawn(move || {
-        let _ = client.process_messages(&mut ws_stream, &test_state_for_ws.shutdown);
-    });
 
     info!("Performance test running... Press Ctrl+C to stop early");
 
@@ -479,7 +248,7 @@ pub fn run_performance_test(
 
     test_state.stop();
 
-    if let Err(e) = ws_handle.join() {
+    if let Err(e) = ws_handler.join() {
         warn!("Error joining WebSocket thread: {:?}", e);
     }
 
@@ -496,4 +265,104 @@ pub fn run_performance_test(
     test_state.save_results()?;
 
     Ok(())
+}
+
+pub fn start_websocket_thread(
+    sbe_api_key: String,
+    symbols: Vec<String>,
+    orderbook_manager: Arc<OrderBookManager>,
+    shutdown: Arc<AtomicBool>,
+    test_state_for_cb: Arc<PerformanceTestState>,
+    detection_times_for_cb: Arc<RwLock<FastHashMap<u16, Duration>>>
+) -> Result<thread::JoinHandle<()>> {
+    let handle = thread::Builder
+        ::new()
+        .name("websocket-thread".to_string())
+        .spawn(move || {
+            let client = BinanceSbeClient::new(sbe_api_key);
+            client.enable_timing();
+
+            client.set_depth_callback(
+                move |
+                    symbol_id: u16,
+                    bids: &[(f64, f64); 5],
+                    asks: &[(f64, f64); 5],
+                    first_update_id: u64,
+                    last_update_id: u64,
+                    sbe_parse_time_us: u64
+                | {
+                    if test_state_for_cb.is_complete() {
+                        return;
+                    }
+
+                    let orderbook_update_start = Instant::now();
+                    let _ = orderbook_manager.apply_depth_update_pure(
+                        symbol_id,
+                        bids,
+                        asks,
+                        first_update_id,
+                        last_update_id
+                    );
+                    let orderbook_update_time = orderbook_update_start.elapsed();
+
+                    let arbitrage_detection_time = detection_times_for_cb
+                        .read()
+                        .get(&symbol_id)
+                        .copied()
+                        .unwrap_or_else(|| Duration::from_nanos(0));
+
+                    let total_processing_time =
+                        Duration::from_micros(sbe_parse_time_us) +
+                        orderbook_update_time +
+                        arbitrage_detection_time;
+
+                    test_state_for_cb.record_measurement(PerformanceMeasurement {
+                        timestamp: chrono::Local::now(),
+                        sbe_parse_time_us,
+                        orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
+                        arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
+                        total_processing_time_us: total_processing_time.as_micros() as u64,
+                        updates_processed: 1,
+                        symbol_id,
+                    });
+
+                    orderbook_manager.trigger_arbitrage_detection(symbol_id);
+                }
+            );
+
+            let mut ws_stream = loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                match client.connect() {
+                    Ok(stream) => {
+                        break stream;
+                    }
+                    Err(err) => {
+                        warn!("Connection failed: {}, retrying in 5 seconds...", err);
+                        thread::sleep(Duration::from_secs(5));
+                    }
+                }
+            };
+            let channels = vec!["depth".to_string()];
+
+            match client.subscribe(&mut ws_stream, &symbols, channels.iter().as_slice()) {
+                Ok(_) => info!("Successfully subscribed to {} symbols", symbols.len()),
+                Err(e) => {
+                    error!("Failed to subscribe: {}", e);
+                    return;
+                }
+            }
+
+            if let Err(e) = client.process_messages(&mut ws_stream, &shutdown) {
+                error!("WebSocket processing error: {}", e);
+            }
+
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })?;
+
+    Ok(handle)
 }
