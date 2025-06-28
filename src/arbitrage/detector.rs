@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{ AtomicUsize, AtomicBool, AtomicU64, Ordering };
+use std::sync::atomic::{ AtomicBool, Ordering };
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::utils::symbol_interner::global;
@@ -83,14 +83,6 @@ pub struct ArbitrageDetector {
     start_amount: f32,
     min_volume_multiplier: f32,
     min_profit_for_execution: f32,
-    stats_counter: Arc<AtomicUsize>,
-    profit_counter: Arc<AtomicUsize>,
-    execution_counter: Arc<AtomicU64>,
-    opportunities_found_counter: Arc<AtomicU64>,
-    opportunities_sent_counter: Arc<AtomicU64>,
-    paths_checked_counter: Arc<AtomicU64>,
-    symbols_processed_counter: Arc<AtomicU64>,
-    last_execution_ns: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -170,14 +162,6 @@ impl ArbitrageDetector {
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
             min_profit_for_execution: (1.0 + min_profit_threshold) as f32,
-            stats_counter: Arc::new(AtomicUsize::new(0)),
-            profit_counter: Arc::new(AtomicUsize::new(0)),
-            execution_counter: Arc::new(AtomicU64::new(0)),
-            opportunities_found_counter: Arc::new(AtomicU64::new(0)),
-            opportunities_sent_counter: Arc::new(AtomicU64::new(0)),
-            paths_checked_counter: Arc::new(AtomicU64::new(0)),
-            symbols_processed_counter: Arc::new(AtomicU64::new(0)),
-            last_execution_ns: Arc::new(AtomicU64::new(0)),
             shutdown: shutdown,
         })
     }
@@ -297,8 +281,6 @@ impl ArbitrageDetector {
 
     #[inline(always)]
     pub fn process_symbol_update(&self, symbol_id: u16) {
-        self.symbols_processed_counter.fetch_add(1, Ordering::Relaxed);
-
         if (symbol_id as usize) < MAX_SYMBOLS {
             let symbol_paths = &self.symbol_map[symbol_id as usize];
             let path_count = symbol_paths.count as usize;
@@ -311,13 +293,10 @@ impl ArbitrageDetector {
 
             for i in 0..max_paths_to_check {
                 let path_idx = unsafe { *symbol_paths.indices.get_unchecked(i) };
-                self.paths_checked_counter.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(opportunity) = self.check_path(path_idx) {
                     if opportunity.profit_ratio >= (self.min_profit_for_execution as f64) {
-                        self.opportunities_found_counter.fetch_add(1, Ordering::Relaxed);
                         self.trigger_execution_callbacks(opportunity);
-                        self.stats_counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -328,28 +307,14 @@ impl ArbitrageDetector {
     fn trigger_execution_callbacks(&self, opportunity: ArbitrageOpportunity) {
         let callbacks = self.execution_callbacks.read();
         if !callbacks.is_empty() {
-            self.opportunities_sent_counter.fetch_add(1, Ordering::Relaxed);
             for callback in callbacks.iter() {
                 callback(opportunity.clone());
             }
         }
     }
 
-    pub fn get_execution_stats(&self) -> (u64, u64, u64) {
-        (
-            self.execution_counter.load(Ordering::Relaxed),
-            self.profit_counter.load(Ordering::Relaxed) as u64,
-            self.last_execution_ns.load(Ordering::Relaxed),
-        )
-    }
-
     pub fn get_fix_execution_stats(&self) -> Option<crate::executor::fix_executor::ExecutionStats> {
         None
-    }
-
-    #[inline]
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
     }
 
     #[inline]

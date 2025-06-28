@@ -7,14 +7,14 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
 use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
-use ahash::HashMapExt;
-use tracing::{ info, warn };
+use tracing::{ error, info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
 use crate::arbitrage::detector::ArbitrageDetector;
 use crate::utils::types::FastHashMap;
 use crate::utils::symbol_interner::global;
 use parking_lot::RwLock;
+use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct PerformanceMeasurement {
@@ -206,7 +206,8 @@ pub fn run_performance_test(
     detector: Arc<ArbitrageDetector>,
     duration_secs: u64,
     output_file: String,
-    shutdown: Arc<AtomicBool>
+    shutdown: Arc<AtomicBool>,
+    detection_times: Arc<RwLock<FastHashMap<u16, Duration>>>
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
         PerformanceTestState::new(
@@ -214,127 +215,29 @@ pub fn run_performance_test(
             Arc::clone(&detector),
             output_file,
             duration_secs,
-            shutdown
+            shutdown.clone()
         )
     );
 
     info!("Starting performance test for {} seconds", duration_secs);
 
-    let client = BinanceSbeClient::new(api_key);
-    let symbol_mappings = orderbook_manager.get_symbol_mappings();
-    client.preload_symbol_mappings(&symbol_mappings);
-    client.enable_timing();
-
-    let detection_times: Arc<RwLock<FastHashMap<u16, Duration>>> = Arc::new(
-        RwLock::new(FastHashMap::with_capacity(2048))
-    );
-
-    // let test_state_opp_clone = test_state.clone();
-    // thread::spawn(move || {
-    //     let mut counter = 0u64;
-    //     loop {
-    //         if test_state_opp_clone.is_complete() {
-    //             break;
-    //         }
-
-    //         thread::sleep(Duration::from_millis(100));
-    //         counter += 1;
-
-    //         if counter % 10 == 0 {
-    //             for symbol_id in 0..10u16 {
-    //                 let opportunities =
-    //                     test_state_opp_clone.detect_arbitrage_opportunities_by_id(symbol_id);
-    //                 for opp in opportunities {
-    //                     test_state_opp_clone.record_opportunity(opp);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // });
-
-    orderbook_manager.register_update_callback(
-        Arc::new({
-            let detector_clone = detector.clone();
-            let detection_times_clone = detection_times.clone();
-
-            move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                let detection_start = Instant::now();
-                detector_clone.process_symbol_update(symbol_id);
-                let detection_time = detection_start.elapsed();
-
-                let _ = detection_times_clone.write().insert(symbol_id, detection_time);
-            }
-        })
-    );
-
     let detection_times_for_cb = detection_times.clone();
     let test_state_for_cb = test_state.clone();
-    let orderbook_manager_clone = orderbook_manager.clone();
 
-    client.set_depth_callback(
-        move |
-            symbol_id: u16,
-            bids: &[(f64, f64); 5],
-            asks: &[(f64, f64); 5],
-            first_update_id: u64,
-            last_update_id: u64,
-            sbe_parse_time_us: u64
-        | {
-            if test_state_for_cb.is_complete() {
-                return;
-            }
-
-            let orderbook_update_start = Instant::now();
-            let _ = orderbook_manager_clone.apply_depth_update_pure(
-                symbol_id,
-                bids,
-                asks,
-                first_update_id,
-                last_update_id
-            );
-            let orderbook_update_time = orderbook_update_start.elapsed();
-
-            let arbitrage_detection_time = detection_times_for_cb
-                .read()
-                .get(&symbol_id)
-                .copied()
-                .unwrap_or_else(|| Duration::from_nanos(0));
-
-            let total_processing_time =
-                Duration::from_micros(sbe_parse_time_us) +
-                orderbook_update_time +
-                arbitrage_detection_time;
-
-            test_state_for_cb.record_measurement(PerformanceMeasurement {
-                timestamp: chrono::Local::now(),
-                sbe_parse_time_us,
-                orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
-                arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
-                total_processing_time_us: total_processing_time.as_micros() as u64,
-                updates_processed: 1,
-                symbol_id,
-            });
-
-            orderbook_manager_clone.trigger_arbitrage_detection(symbol_id);
-        }
-    );
-
-    let mut ws_stream = client.connect()?;
-    let channels = vec!["depth".to_string()];
-    client.subscribe(&mut ws_stream, &symbols, &channels)?;
-
-    info!("WebSocket connected and subscribed to {} symbols", symbols.len());
+    let ws_handler = start_websocket_thread(
+        api_key,
+        symbols,
+        orderbook_manager.clone(),
+        shutdown,
+        test_state_for_cb,
+        detection_times_for_cb
+    )?;
 
     let test_state_for_signal = test_state.clone();
     ctrlc::set_handler(move || {
         info!("Received Ctrl+C, stopping performance test...");
         test_state_for_signal.stop();
     })?;
-
-    let test_state_for_ws = test_state.clone();
-    let ws_handle = thread::spawn(move || {
-        let _ = client.process_messages(&mut ws_stream, &test_state_for_ws.shutdown);
-    });
 
     info!("Performance test running... Press Ctrl+C to stop early");
 
@@ -345,7 +248,7 @@ pub fn run_performance_test(
 
     test_state.stop();
 
-    if let Err(e) = ws_handle.join() {
+    if let Err(e) = ws_handler.join() {
         warn!("Error joining WebSocket thread: {:?}", e);
     }
 
@@ -362,4 +265,104 @@ pub fn run_performance_test(
     test_state.save_results()?;
 
     Ok(())
+}
+
+pub fn start_websocket_thread(
+    sbe_api_key: String,
+    symbols: Vec<String>,
+    orderbook_manager: Arc<OrderBookManager>,
+    shutdown: Arc<AtomicBool>,
+    test_state_for_cb: Arc<PerformanceTestState>,
+    detection_times_for_cb: Arc<RwLock<FastHashMap<u16, Duration>>>
+) -> Result<thread::JoinHandle<()>> {
+    let handle = thread::Builder
+        ::new()
+        .name("websocket-thread".to_string())
+        .spawn(move || {
+            let client = BinanceSbeClient::new(sbe_api_key);
+            client.enable_timing();
+
+            client.set_depth_callback(
+                move |
+                    symbol_id: u16,
+                    bids: &[(f64, f64); 5],
+                    asks: &[(f64, f64); 5],
+                    first_update_id: u64,
+                    last_update_id: u64,
+                    sbe_parse_time_us: u64
+                | {
+                    if test_state_for_cb.is_complete() {
+                        return;
+                    }
+
+                    let orderbook_update_start = Instant::now();
+                    let _ = orderbook_manager.apply_depth_update_pure(
+                        symbol_id,
+                        bids,
+                        asks,
+                        first_update_id,
+                        last_update_id
+                    );
+                    let orderbook_update_time = orderbook_update_start.elapsed();
+
+                    let arbitrage_detection_time = detection_times_for_cb
+                        .read()
+                        .get(&symbol_id)
+                        .copied()
+                        .unwrap_or_else(|| Duration::from_nanos(0));
+
+                    let total_processing_time =
+                        Duration::from_micros(sbe_parse_time_us) +
+                        orderbook_update_time +
+                        arbitrage_detection_time;
+
+                    test_state_for_cb.record_measurement(PerformanceMeasurement {
+                        timestamp: chrono::Local::now(),
+                        sbe_parse_time_us,
+                        orderbook_update_time_us: orderbook_update_time.as_micros() as u64,
+                        arbitrage_detection_time_us: arbitrage_detection_time.as_micros() as u64,
+                        total_processing_time_us: total_processing_time.as_micros() as u64,
+                        updates_processed: 1,
+                        symbol_id,
+                    });
+
+                    orderbook_manager.trigger_arbitrage_detection(symbol_id);
+                }
+            );
+
+            let mut ws_stream = loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                match client.connect() {
+                    Ok(stream) => {
+                        break stream;
+                    }
+                    Err(err) => {
+                        warn!("Connection failed: {}, retrying in 5 seconds...", err);
+                        thread::sleep(Duration::from_secs(5));
+                    }
+                }
+            };
+            let channels = vec!["depth".to_string()];
+
+            match client.subscribe(&mut ws_stream, &symbols, channels.iter().as_slice()) {
+                Ok(_) => info!("Successfully subscribed to {} symbols", symbols.len()),
+                Err(e) => {
+                    error!("Failed to subscribe: {}", e);
+                    return;
+                }
+            }
+
+            if let Err(e) = client.process_messages(&mut ws_stream, &shutdown) {
+                error!("WebSocket processing error: {}", e);
+            }
+
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })?;
+
+    Ok(handle)
 }
