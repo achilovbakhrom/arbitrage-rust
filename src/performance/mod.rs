@@ -59,10 +59,11 @@ pub struct PerformanceTestState {
 
 impl PerformanceTestState {
     pub fn new(
+        orderbook_manager: Arc<OrderBookManager>,
         detector: Arc<ArbitrageDetector>,
-        duration_secs: u64,
         output_file: String,
-        orderbook_manager: Arc<OrderBookManager>
+        duration_secs: u64,
+        shutdown: Arc<AtomicBool>
     ) -> Self {
         let opportunities_file = output_file.replace(
             "performance_results.csv",
@@ -77,16 +78,12 @@ impl PerformanceTestState {
             duration: Duration::from_secs(duration_secs),
             output_file,
             opportunities_file,
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown,
             orderbook_manager,
             measurement_counter: AtomicU64::new(0),
             opportunity_counter: AtomicU64::new(0),
             last_progress_report: AtomicU64::new(0),
         }
-    }
-
-    fn get_symbol_id(&self, symbol: &str) -> Option<u16> {
-        global::get_id(symbol)
     }
 
     fn get_symbol_string(&self, symbol_id: u16) -> Option<String> {
@@ -208,14 +205,16 @@ pub fn run_performance_test(
     orderbook_manager: Arc<OrderBookManager>,
     detector: Arc<ArbitrageDetector>,
     duration_secs: u64,
-    output_file: String
+    output_file: String,
+    shutdown: Arc<AtomicBool>
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
         PerformanceTestState::new(
-            detector.clone(),
-            duration_secs,
+            Arc::clone(&orderbook_manager),
+            Arc::clone(&detector),
             output_file,
-            orderbook_manager.clone()
+            duration_secs,
+            shutdown
         )
     );
 

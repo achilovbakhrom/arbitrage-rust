@@ -83,7 +83,8 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         orderbook_manager.clone(),
         detector.clone(),
         120,
-        output_file
+        output_file,
+        shutdown
     );
 
     if let Some(fix_exec) = fix_executor {
@@ -102,6 +103,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         error!("Error joining execution thread: {:?}", e);
     }
 
+    // On finish
     match test_result {
         Ok(_) => {
             info!("Performance test completed successfully!");
@@ -134,6 +136,47 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     Ok(())
 }
 
+fn start_detection_thread(
+    orderbook_manager: Arc<OrderBookManager>,
+    detector: Arc<arbitrage::detector::ArbitrageDetector>
+) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("perf-arbitrage-detector".to_string())
+        .spawn(move || {
+            info!("Performance arbitrage detection thread started");
+
+            orderbook_manager.register_update_callback({
+                let detector = detector.clone();
+                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
+                    detector.process_symbol_update(symbol_id);
+                })
+            });
+
+            info!("Performance arbitrage detection thread stopped");
+        })
+        .expect("Failed to spawn performance arbitrage detection thread")
+}
+
+fn start_execution_thread(detector: Arc<ArbitrageDetector>) -> thread::JoinHandle<()> {
+    thread::Builder
+        ::new()
+        .name("execution".to_string())
+        .spawn(move || {
+            detector.register_execution_callback(
+                Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                    info!(
+                        "Execution opportunity: {} with {:.4}% profit",
+                        opportunity.display(),
+                        opportunity.profit_percentage()
+                    );
+                })
+            );
+        })
+        .expect("Failed to spawn execution thread")
+}
+
+/// -------------- HELPERS ----------------------
 fn create_fix_executor(
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
     config: &Config
@@ -169,46 +212,4 @@ fn create_fix_executor(
         info!("Trading disabled, using simulation mode only");
         Ok(None)
     }
-}
-
-fn start_detection_thread(
-    orderbook_manager: Arc<OrderBookManager>,
-    detector: Arc<arbitrage::detector::ArbitrageDetector>
-) -> thread::JoinHandle<()> {
-    thread::Builder
-        ::new()
-        .name("perf-arbitrage-detector".to_string())
-        .spawn(move || {
-            info!("Performance arbitrage detection thread started");
-
-            let update_callback = {
-                let detector = detector.clone();
-                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                    detector.process_symbol_update(symbol_id);
-                })
-            };
-
-            orderbook_manager.register_update_callback(update_callback);
-
-            info!("Performance arbitrage detection thread stopped");
-        })
-        .expect("Failed to spawn performance arbitrage detection thread")
-}
-
-fn start_execution_thread(detector: Arc<ArbitrageDetector>) -> thread::JoinHandle<()> {
-    thread::Builder
-        ::new()
-        .name("execution".to_string())
-        .spawn(move || {
-            detector.register_execution_callback(
-                Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
-                    info!(
-                        "Execution opportunity: {} with {:.4}% profit",
-                        opportunity.display(),
-                        opportunity.profit_percentage()
-                    );
-                })
-            );
-        })
-        .expect("Failed to spawn execution thread")
 }
