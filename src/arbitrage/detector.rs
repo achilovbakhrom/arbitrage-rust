@@ -222,68 +222,61 @@ impl ArbitrageDetector {
                 path_data.third_symbol_id
             );
 
-            if !first_book.is_synced() {
+            if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
                 return None;
             }
-            if !second_book.is_synced() {
-                return None;
-            }
-            if !third_book.is_synced() {
-                return None;
-            }
-
-            let (first_bid, first_ask) = first_book.get_cached_top_of_book();
-            let (second_bid, second_ask) = second_book.get_cached_top_of_book();
-            let (third_bid, third_ask) = third_book.get_cached_top_of_book();
-
-            let (first_price, first_qty) = if path_data.first_is_base_to_quote() {
-                first_bid?
-            } else {
-                first_ask?
-            };
-
-            let (second_price, second_qty) = if path_data.second_is_base_to_quote() {
-                second_bid?
-            } else {
-                second_ask?
-            };
-
-            let (third_price, third_qty) = if path_data.third_is_base_to_quote() {
-                third_bid?
-            } else {
-                third_ask?
-            };
 
             let min_vol = self.start_amount * self.min_volume_multiplier;
+
             if
-                (first_qty as f32) < min_vol ||
-                (second_qty as f32) < min_vol ||
-                (third_qty as f32) < min_vol
+                !first_book.has_sufficient_liquidity(
+                    min_vol as f64,
+                    path_data.first_is_base_to_quote()
+                ) ||
+                !second_book.has_sufficient_liquidity(
+                    min_vol as f64,
+                    path_data.second_is_base_to_quote()
+                ) ||
+                !third_book.has_sufficient_liquidity(
+                    min_vol as f64,
+                    path_data.third_is_base_to_quote()
+                )
             {
                 return None;
             }
 
-            let mut amount = self.start_amount;
-            let first_price_f32 = first_price as f32;
-            let second_price_f32 = second_price as f32;
-            let third_price_f32 = third_price as f32;
+            let first_price = first_book.get_effective_price(
+                self.start_amount as f64,
+                path_data.first_is_base_to_quote()
+            )? as f32;
 
+            let mut amount = self.start_amount;
             if path_data.first_is_base_to_quote() {
-                amount *= first_price_f32;
+                amount *= first_price;
             } else {
-                amount /= first_price_f32;
+                amount /= first_price;
             }
+
+            let second_price = second_book.get_effective_price(
+                amount as f64,
+                path_data.second_is_base_to_quote()
+            )? as f32;
 
             if path_data.second_is_base_to_quote() {
-                amount *= second_price_f32;
+                amount *= second_price;
             } else {
-                amount /= second_price_f32;
+                amount /= second_price;
             }
 
+            let third_price = third_book.get_effective_price(
+                amount as f64,
+                path_data.third_is_base_to_quote()
+            )? as f32;
+
             if path_data.third_is_base_to_quote() {
-                amount *= third_price_f32;
+                amount *= third_price;
             } else {
-                amount /= third_price_f32;
+                amount /= third_price;
             }
 
             amount *= path_data.fee_multiplier_cubed;
