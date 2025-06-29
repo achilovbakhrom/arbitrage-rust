@@ -349,17 +349,115 @@ impl OrderBook {
     }
 
     #[inline(always)]
-    pub fn get_cached_top_of_book(&self) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
-        let (bid_price, bid_qty, ask_price, ask_qty, _) = unsafe { *self.hot.best_prices.get() };
+    pub fn is_synced(&self) -> bool {
+        self.hot.state.load(Ordering::Relaxed) == (OrderBookState::Synced as u8)
+    }
+}
 
-        let bid = if bid_price > 0.0 && bid_qty > 0.0 { Some((bid_price, bid_qty)) } else { None };
-        let ask = if ask_price > 0.0 && ask_qty > 0.0 { Some((ask_price, ask_qty)) } else { None };
+impl OrderBook {
+    #[inline(always)]
+    pub fn get_effective_price(&self, volume: f64, is_bid_side: bool) -> Option<f64> {
+        if volume <= 0.0 || !self.is_synced() {
+            return None;
+        }
 
-        (bid, ask)
+        unsafe {
+            let (bid_count, ask_count) = *self.hot.counts.get();
+
+            if is_bid_side {
+                if bid_count == 0 {
+                    return None;
+                }
+                let bids_ptr = self.levels.bids.get();
+                self.calculate_vwap(&*bids_ptr, bid_count, volume)
+            } else {
+                if ask_count == 0 {
+                    return None;
+                }
+                let asks_ptr = self.levels.asks.get();
+                self.calculate_vwap(&*asks_ptr, ask_count, volume)
+            }
+        }
     }
 
     #[inline(always)]
-    pub fn is_synced(&self) -> bool {
-        self.hot.state.load(Ordering::Relaxed) == (OrderBookState::Synced as u8)
+    unsafe fn calculate_vwap(
+        &self,
+        levels: &[(f64, f64); MAX_DEPTH],
+        count: u8,
+        target_volume: f64
+    ) -> Option<f64> {
+        let mut remaining_volume = target_volume;
+        let mut weighted_price_sum = 0.0;
+        let mut total_filled = 0.0;
+
+        for i in 0..count as usize {
+            let (price, available_qty) = *levels.get_unchecked(i);
+
+            if available_qty <= 0.0 {
+                continue;
+            }
+
+            let fill_amount = remaining_volume.min(available_qty);
+            weighted_price_sum += price * fill_amount;
+            total_filled += fill_amount;
+            remaining_volume -= fill_amount;
+
+            if remaining_volume <= 0.0 {
+                break;
+            }
+        }
+
+        if total_filled >= target_volume {
+            Some(weighted_price_sum / total_filled)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn has_sufficient_liquidity(&self, volume: f64, is_bid_side: bool) -> bool {
+        if volume <= 0.0 || !self.is_synced() {
+            return false;
+        }
+
+        unsafe {
+            let (bid_count, ask_count) = *self.hot.counts.get();
+
+            if is_bid_side {
+                if bid_count == 0 {
+                    return false;
+                }
+                let bids_ptr = self.levels.bids.get();
+                self.check_liquidity(&*bids_ptr, bid_count, volume)
+            } else {
+                if ask_count == 0 {
+                    return false;
+                }
+                let asks_ptr = self.levels.asks.get();
+                self.check_liquidity(&*asks_ptr, ask_count, volume)
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn check_liquidity(
+        &self,
+        levels: &[(f64, f64); MAX_DEPTH],
+        count: u8,
+        target_volume: f64
+    ) -> bool {
+        let mut available_volume = 0.0;
+
+        for i in 0..count as usize {
+            let (_, qty) = *levels.get_unchecked(i);
+            available_volume += qty;
+
+            if available_volume >= target_volume {
+                return true;
+            }
+        }
+
+        false
     }
 }

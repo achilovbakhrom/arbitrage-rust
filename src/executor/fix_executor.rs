@@ -64,7 +64,7 @@ impl FixArbitrageExecutor {
         })
     }
 
-    pub fn enable_callback_execution(&mut self, _num_threads: usize) -> ExecutionCallback {
+    pub fn get_callback(&self) -> ExecutionCallback {
         info!("Enabled callback-based execution (no threads needed)");
 
         let real_client = self.real_fix_client.clone();
@@ -310,7 +310,6 @@ pub struct ExecutionStats {
     pub rejected_executions: u64,
     pub success_rate: f64,
     pub avg_execution_time_us: u64,
-    pub total_execution_time_us: u64,
 }
 
 impl std::fmt::Display for ExecutionStats {
