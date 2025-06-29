@@ -1,4 +1,4 @@
-use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
+use std::{ ops::Deref, sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 use crate::{
     arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
@@ -228,13 +228,12 @@ fn create_fix_executor(
         let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
         match FixArbitrageExecutor::new(config.debug, fix_config, symbol_map.clone()) {
-            Ok(mut executor) => {
+            Ok(executor) => {
                 if let Err(e) = executor.connect() {
                     error!("Failed to connect FIX executor: {}", e);
                     return Err(anyhow!("Failed to connect FIX executor: {}", e));
                 }
 
-                let _execution_callback = executor.enable_callback_execution(3);
                 let executor_arc = Arc::new(executor);
 
                 info!("✓ FIX executor connected successfully with precision support");
@@ -289,7 +288,8 @@ fn start_execution_thread(
         ::new()
         .name("execution".to_string())
         .spawn(move || {
-            if let Some(ref _executor) = fix_executor {
+            if let Some(executor) = fix_executor {
+                let callback = executor.get_callback();
                 detector.register_execution_callback(
                     Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
                         info!(
@@ -297,6 +297,7 @@ fn start_execution_thread(
                             opportunity.display(),
                             opportunity.profit_percentage()
                         );
+                        callback(opportunity);
                     })
                 );
 
