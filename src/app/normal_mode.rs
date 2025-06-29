@@ -49,6 +49,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
 
     // 1. Create Orderbook Manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
+    global::intern_batch(&unique_symbols);
 
     // 2. Create Detector
     let detector = arbitrage::detector::create_detector(
@@ -61,9 +62,21 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         config.min_volume_multiplier
     );
 
-    let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
+    let detection_handle = start_detection_thread(
+        Arc::clone(&detector),
+        Arc::clone(&orderbook_manager),
+        shutdown.clone()
+    );
 
-    let execution_handler = start_execution_thread(detector.clone(), fix_executor.clone());
+    // ----- Detecrtor end ------
+
+    let fix_executor = create_fix_executor(Arc::clone(&symbol_map), &config)?;
+
+    let execution_handler = start_execution_thread(
+        Arc::clone(&detector),
+        fix_executor.clone(),
+        Arc::clone(&shutdown)
+    );
 
     ctrlc
         ::set_handler(move || {
@@ -71,13 +84,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
             shutdown_clone.store(true, Ordering::Relaxed);
         })
         .context("Error setting Ctrl-C handler")?;
-
-    let detection_handle = start_detection_thread(
-        detector.clone(),
-        orderbook_manager.clone(),
-        shutdown.clone()
-    );
-    // ----- Detecrtor end ------
 
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
     // ----- Start sbe socket update -------
@@ -276,23 +282,27 @@ fn start_detection_thread(
 
 fn start_execution_thread(
     detector: Arc<ArbitrageDetector>,
-    fix_executor: Option<Arc<FixArbitrageExecutor>>
+    fix_executor: Option<Arc<FixArbitrageExecutor>>,
+    shutdown: Arc<AtomicBool>
 ) -> thread::JoinHandle<()> {
     thread::Builder
         ::new()
         .name("execution".to_string())
         .spawn(move || {
             if let Some(ref _executor) = fix_executor {
-                let execution_callback = Arc::new(
-                    move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
+                detector.register_execution_callback(
+                    Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
                         info!(
                             "Execution opportunity: {} with {:.4}% profit",
                             opportunity.display(),
                             opportunity.profit_percentage()
                         );
-                    }
+                    })
                 );
-                detector.register_execution_callback(execution_callback);
+
+                while !shutdown.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
         })
         .expect("Failed to spawn execution thread")

@@ -53,7 +53,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let unique_symbols = symbol_map.get_unique_symbols();
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    shutdown.store(false, Ordering::Relaxed);
 
     // 1. Create orderbook
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, api_client.clone()));
@@ -66,7 +65,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     // 2.Create detector
     let detector = arbitrage::detector::create_detector(
         Arc::clone(&orderbook_manager),
-        triangular_paths.clone(),
+        triangular_paths.clone(), // this is not Arc
         Arc::clone(&shutdown),
         config.fee,
         config.threshold,
