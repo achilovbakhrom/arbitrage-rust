@@ -309,29 +309,6 @@ impl OrderBookManager {
         }
     }
 
-    #[inline(always)]
-    pub fn get_top_of_book_by_id(
-        &self,
-        symbol_id: SymbolId
-    ) -> Option<(Option<Level>, Option<Level>)> {
-        if symbol_id >= (MAX_SYMBOLS as u16) {
-            return None;
-        }
-
-        unsafe {
-            let books_ptr = self.books.as_ptr();
-            if let Some(book) = &*books_ptr.add(symbol_id as usize) {
-                if book.is_synced() {
-                    Some(book.snapshot())
-                } else {
-                    self.trigger_recovery_by_id(symbol_id);
-                    None
-                }
-            } else {
-                None
-            }
-        }
-    }
 
     pub async fn fetch_snapshot(
         &self,

@@ -19,7 +19,6 @@ struct HotData {
     last_update_id: AtomicU64,
     counts: UnsafeCell<(u8, u8)>,
     best_prices: UnsafeCell<(f64, f64, f64, f64, f64)>,
-    _padding: [u8; 80],
 }
 
 #[repr(C, align(64))]
@@ -48,7 +47,6 @@ impl OrderBook {
                 last_update_id: AtomicU64::new(0),
                 counts: UnsafeCell::new((0, 0)),
                 best_prices: UnsafeCell::new((0.0, 0.0, 0.0, 0.0, 0.0)),
-                _padding: [0; 80],
             },
             levels: Box::new(Levels {
                 bids: UnsafeCell::new([(0.0, 0.0); MAX_DEPTH]),
@@ -348,29 +346,6 @@ impl OrderBook {
             self.update_best_prices();
             self.set_state(OrderBookState::Synced);
         }
-    }
-
-    #[inline(always)]
-    pub fn snapshot(&self) -> (Option<Level>, Option<Level>) {
-        if self.hot.state.load(Ordering::Relaxed) != (OrderBookState::Synced as u8) {
-            return (None, None);
-        }
-
-        let (bid_price, bid_qty, ask_price, ask_qty, _) = unsafe { *self.hot.best_prices.get() };
-
-        let bid_level = if bid_price > 0.0 && bid_qty > 0.0 {
-            Some(Level { price: bid_price, quantity: bid_qty })
-        } else {
-            None
-        };
-
-        let ask_level = if ask_price > 0.0 && ask_qty > 0.0 {
-            Some(Level { price: ask_price, quantity: ask_qty })
-        } else {
-            None
-        };
-
-        (bid_level, ask_level)
     }
 
     #[inline(always)]
