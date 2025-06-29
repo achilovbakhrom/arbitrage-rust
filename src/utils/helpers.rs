@@ -10,10 +10,10 @@ use crate::{
 };
 
 pub fn get_run_command() -> Command {
-    if std::env::args().nth(1).as_deref() == Some("perf-test") {
-        Command::PerformanceTest
-    } else {
-        Command::Run
+    match std::env::args().nth(1).as_deref() {
+        Some("perf-test") => Command::PerformanceTest,
+        Some("test-exec") => Command::TestExecution,
+        _ => Command::Run,
     }
 }
 

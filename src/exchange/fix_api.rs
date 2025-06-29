@@ -527,27 +527,7 @@ impl FixClient {
         let full_message = self.build_fix_message(&body);
         self.send_message(full_message)?;
 
-        eprintln!(
-            "Placed market order: {} {} {} (precision: {:?})",
-            if matches!(order.side, OrderSide::Buy) {
-                "BUY"
-            } else {
-                "SELL"
-            },
-            order.symbol,
-            if order.quote_quantity.is_some() {
-                self.format_quantity(order.quote_quantity.unwrap(), order.qty_precision)
-            } else {
-                self.format_quantity(order.quantity, order.qty_precision)
-            },
-            order.qty_precision
-        );
-
         Ok(())
-    }
-
-    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<()> {
-        self.place_market_order_async(order, |_result| {})
     }
 
     pub fn disconnect(&mut self) -> Result<()> {

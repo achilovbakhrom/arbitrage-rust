@@ -31,6 +31,7 @@ fn main() -> Result<()> {
     match command {
         Command::Run => app::normal_mode::run_normal_mode(config)?,
         Command::PerformanceTest => app::perf_mode::run_performance_test(config)?,
+        Command::TestExecution => app::test_execution::run_test_execution(config)?,
     }
 
     Ok(())

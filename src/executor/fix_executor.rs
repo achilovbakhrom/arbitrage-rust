@@ -1,7 +1,8 @@
 use std::sync::{ Arc, Mutex };
-use std::time::Instant;
-use std::sync::atomic::{ AtomicU64, Ordering };
+use std::time::{ Instant, Duration };
+use std::sync::atomic::{ AtomicU64, AtomicBool, Ordering };
 use std::collections::HashSet;
+use std::thread;
 
 use anyhow::{ Result, Context };
 use tracing::{ info, warn, debug };
@@ -19,8 +20,11 @@ pub struct FixArbitrageExecutor {
     successful_executions: Arc<AtomicU64>,
     total_execution_time_us: Arc<AtomicU64>,
     rejected_counter: Arc<AtomicU64>,
-    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown: Arc<AtomicBool>,
     active_symbols: Arc<Mutex<HashSet<u16>>>,
+    global_execution_lock: Arc<AtomicBool>,
+    last_execution_time: Arc<Mutex<Option<Instant>>>,
+    execution_delay_ms: u64,
 }
 
 impl FixArbitrageExecutor {
@@ -59,13 +63,16 @@ impl FixArbitrageExecutor {
             successful_executions: Arc::new(AtomicU64::new(0)),
             total_execution_time_us: Arc::new(AtomicU64::new(0)),
             rejected_counter: Arc::new(AtomicU64::new(0)),
-            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
             active_symbols: Arc::new(Mutex::new(HashSet::with_capacity(100))),
+            global_execution_lock: Arc::new(AtomicBool::new(false)),
+            last_execution_time: Arc::new(Mutex::new(None)),
+            execution_delay_ms: 3500,
         })
     }
 
     pub fn get_callback(&self) -> ExecutionCallback {
-        info!("Enabled callback-based execution (no threads needed)");
+        info!("Enabled callback-based execution with global throttling");
 
         let real_client = self.real_fix_client.clone();
         let mock_client = self.mock_fix_client.clone();
@@ -76,17 +83,42 @@ impl FixArbitrageExecutor {
         let time_counter = self.total_execution_time_us.clone();
         let rejected_counter = self.rejected_counter.clone();
         let active_symbols = self.active_symbols.clone();
+        let global_lock = self.global_execution_lock.clone();
+        let last_exec_time = self.last_execution_time.clone();
+        let delay_ms = self.execution_delay_ms;
 
         Arc::new(move |opportunity: ArbitrageOpportunity| {
-            let execution_start = Instant::now();
+            if
+                global_lock
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+            {
+                rejected_counter.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
 
+            {
+                let last_time_guard = last_exec_time.lock().unwrap();
+                if let Some(last_time) = *last_time_guard {
+                    let elapsed = last_time.elapsed();
+                    if elapsed < Duration::from_millis(delay_ms) {
+                        let remaining = Duration::from_millis(delay_ms) - elapsed;
+                        drop(last_time_guard);
+                        thread::sleep(remaining);
+                    }
+                }
+            }
+
+            let execution_start = Instant::now();
             let symbols = &opportunity.symbols_involved;
+
             let has_conflict = {
                 let active = active_symbols.lock().unwrap();
                 symbols.iter().any(|&sym| active.contains(&sym))
             };
 
             if has_conflict {
+                global_lock.store(false, Ordering::Release);
                 rejected_counter.fetch_add(1, Ordering::Relaxed);
                 debug!("Rejected opportunity due to symbol conflict: {:?}", symbols);
                 return;
@@ -99,7 +131,7 @@ impl FixArbitrageExecutor {
                 }
             }
 
-            let success = Self::execute_triangular_arbitrage_optimized(
+            let success = Self::execute_triangular_arbitrage_fast(
                 &opportunity,
                 &real_client,
                 &mock_client,
@@ -115,6 +147,13 @@ impl FixArbitrageExecutor {
                     active.remove(&symbol);
                 }
             }
+
+            {
+                let mut last_time_guard = last_exec_time.lock().unwrap();
+                *last_time_guard = Some(Instant::now());
+            }
+
+            global_lock.store(false, Ordering::Release);
 
             executed_counter.fetch_add(1, Ordering::Relaxed);
             time_counter.fetch_add(execution_time, Ordering::Relaxed);
@@ -132,7 +171,7 @@ impl FixArbitrageExecutor {
         })
     }
 
-    fn execute_triangular_arbitrage_optimized(
+    fn execute_triangular_arbitrage_fast(
         opportunity: &ArbitrageOpportunity,
         real_fix_client: &Option<Arc<Mutex<FixClient>>>,
         mock_fix_client: &Option<Arc<Mutex<MockFixClient>>>,
@@ -142,7 +181,7 @@ impl FixArbitrageExecutor {
         if is_debug_mode {
             if let Some(mock_client) = mock_fix_client {
                 if let Ok(mut client) = mock_client.try_lock() {
-                    let result = Self::execute_mock_triangular_trades(
+                    let result = Self::execute_mock_triangular_trades_fast(
                         opportunity,
                         &mut client,
                         symbol_map
@@ -157,7 +196,7 @@ impl FixArbitrageExecutor {
         } else {
             if let Some(real_client) = real_fix_client {
                 if let Ok(mut client) = real_client.try_lock() {
-                    let result = Self::execute_real_triangular_trades(
+                    let result = Self::execute_real_triangular_trades_fast(
                         opportunity,
                         &mut client,
                         symbol_map
@@ -172,13 +211,12 @@ impl FixArbitrageExecutor {
         }
     }
 
-    fn execute_mock_triangular_trades(
+    fn execute_mock_triangular_trades_fast(
         opportunity: &ArbitrageOpportunity,
         client: &mut MockFixClient,
         symbol_map: &Arc<SymbolMap>
     ) -> Result<()> {
         let path = &opportunity.path;
-
         let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
         let is_base_to_quote = [
             path.first_is_base_to_quote,
@@ -186,11 +224,15 @@ impl FixArbitrageExecutor {
             path.third_is_base_to_quote,
         ];
 
+        let mut current_amount = opportunity.start_amount;
+
         for (i, &symbol) in symbols.iter().enumerate() {
-            let (qty_precision, price_precision) = symbol_map
-                .get(symbol)
-                .map(|s| (s.qty_precision, s.price_precision))
-                .unwrap_or((8, 8));
+            let precision_info = symbol_map.get(symbol);
+            let (qty_precision, price_precision) = if let Some(info) = precision_info {
+                (info.qty_precision, info.price_precision)
+            } else {
+                (8, 8)
+            };
 
             let order = MarketOrder {
                 symbol: symbol.to_string(),
@@ -200,32 +242,67 @@ impl FixArbitrageExecutor {
                     OrderSide::Buy
                 },
                 quantity: if is_base_to_quote[i] {
-                    opportunity.start_amount
+                    current_amount
                 } else {
                     0.0
                 },
                 quote_quantity: if is_base_to_quote[i] {
                     None
                 } else {
-                    Some(opportunity.start_amount)
+                    Some(current_amount)
                 },
                 qty_precision: Some(qty_precision),
                 price_precision: Some(price_precision),
             };
 
-            client.place_market_order(order)?;
+            let execution_complete = Arc::new(AtomicBool::new(false));
+            let execution_success = Arc::new(AtomicBool::new(false));
+            let execution_amount = Arc::new(std::sync::Mutex::new(0.0));
+
+            let complete_flag = execution_complete.clone();
+            let success_flag = execution_success.clone();
+            let amount_ref = execution_amount.clone();
+
+            client.place_market_order_async(order, move |result| {
+                if result.order_status == "FILLED" {
+                    success_flag.store(true, Ordering::Relaxed);
+                    if let Ok(mut amount) = amount_ref.try_lock() {
+                        *amount = if result.side == "BUY" {
+                            result.filled_qty
+                        } else {
+                            result.cum_quote_qty
+                        };
+                    }
+                }
+                complete_flag.store(true, Ordering::Relaxed);
+            })?;
+
+            let timeout = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !execution_complete.load(Ordering::Relaxed) {
+                if std::time::Instant::now() > timeout {
+                    return Err(anyhow::anyhow!("Trade {} execution timeout", i + 1));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            if !execution_success.load(Ordering::Relaxed) {
+                return Err(anyhow::anyhow!("Trade {} execution failed", i + 1));
+            }
+
+            if i < symbols.len() - 1 {
+                current_amount = *execution_amount.lock().unwrap();
+            }
         }
 
         Ok(())
     }
 
-    fn execute_real_triangular_trades(
+    fn execute_real_triangular_trades_fast(
         opportunity: &ArbitrageOpportunity,
         client: &mut FixClient,
         symbol_map: &Arc<SymbolMap>
     ) -> Result<()> {
         let path = &opportunity.path;
-
         let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
         let is_base_to_quote = [
             path.first_is_base_to_quote,
@@ -233,11 +310,15 @@ impl FixArbitrageExecutor {
             path.third_is_base_to_quote,
         ];
 
+        let mut current_amount = opportunity.start_amount;
+
         for (i, &symbol) in symbols.iter().enumerate() {
-            let (qty_precision, price_precision) = symbol_map
-                .get(symbol)
-                .map(|s| (s.qty_precision, s.price_precision))
-                .unwrap_or((8, 8));
+            let precision_info = symbol_map.get(symbol);
+            let (qty_precision, price_precision) = if let Some(info) = precision_info {
+                (info.qty_precision, info.price_precision)
+            } else {
+                (8, 8)
+            };
 
             let order = MarketOrder {
                 symbol: symbol.to_string(),
@@ -247,20 +328,56 @@ impl FixArbitrageExecutor {
                     OrderSide::Buy
                 },
                 quantity: if is_base_to_quote[i] {
-                    opportunity.start_amount
+                    current_amount
                 } else {
                     0.0
                 },
                 quote_quantity: if is_base_to_quote[i] {
                     None
                 } else {
-                    Some(opportunity.start_amount)
+                    Some(current_amount)
                 },
                 qty_precision: Some(qty_precision),
                 price_precision: Some(price_precision),
             };
 
-            client.place_market_order(order)?;
+            let execution_complete = Arc::new(AtomicBool::new(false));
+            let execution_success = Arc::new(AtomicBool::new(false));
+            let execution_amount = Arc::new(std::sync::Mutex::new(0.0));
+
+            let complete_flag = execution_complete.clone();
+            let success_flag = execution_success.clone();
+            let amount_ref = execution_amount.clone();
+
+            client.place_market_order_async(order, move |result| {
+                if result.order_status == "FILLED" {
+                    success_flag.store(true, Ordering::Relaxed);
+                    if let Ok(mut amount) = amount_ref.try_lock() {
+                        *amount = if result.side == "BUY" {
+                            result.filled_qty
+                        } else {
+                            result.cum_quote_qty
+                        };
+                    }
+                }
+                complete_flag.store(true, Ordering::Relaxed);
+            })?;
+
+            let timeout = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !execution_complete.load(Ordering::Relaxed) {
+                if std::time::Instant::now() > timeout {
+                    return Err(anyhow::anyhow!("Trade {} execution timeout", i + 1));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            if !execution_success.load(Ordering::Relaxed) {
+                return Err(anyhow::anyhow!("Trade {} execution failed", i + 1));
+            }
+
+            if i < symbols.len() - 1 {
+                current_amount = *execution_amount.lock().unwrap();
+            }
         }
 
         Ok(())
@@ -300,6 +417,54 @@ impl FixArbitrageExecutor {
 
         info!("FIX arbitrage executor disconnected");
         Ok(())
+    }
+
+    pub fn force_execute_opportunity(&self, opportunity: ArbitrageOpportunity) -> bool {
+        if
+            self.global_execution_lock
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            return false;
+        }
+
+        let success = if self.is_debug_mode {
+            if let Some(mock_client) = &self.mock_fix_client {
+                if let Ok(mut client) = mock_client.try_lock() {
+                    Self::execute_mock_triangular_trades_fast(
+                        &opportunity,
+                        &mut client,
+                        &self.symbol_map
+                    ).is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            if let Some(real_client) = &self.real_fix_client {
+                if let Ok(mut client) = real_client.try_lock() {
+                    Self::execute_real_triangular_trades_fast(
+                        &opportunity,
+                        &mut client,
+                        &self.symbol_map
+                    ).is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        {
+            let mut last_time_guard = self.last_execution_time.lock().unwrap();
+            *last_time_guard = Some(Instant::now());
+        }
+
+        self.global_execution_lock.store(false, Ordering::Release);
+        success
     }
 }
 
