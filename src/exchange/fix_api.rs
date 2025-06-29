@@ -527,12 +527,7 @@ impl FixClient {
         let full_message = self.build_fix_message(&body);
         self.send_message(full_message)?;
 
-
         Ok(())
-    }
-
-    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<()> {
-        self.place_market_order_async(order, |_result| {})
     }
 
     pub fn disconnect(&mut self) -> Result<()> {
