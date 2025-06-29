@@ -2,4 +2,5 @@
 pub enum Command {
     Run,
     PerformanceTest,
+    TestExecution,
 }
