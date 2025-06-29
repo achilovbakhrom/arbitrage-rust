@@ -1,5 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
+use tracing::info;
+
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook::manager::OrderBookManager;
 use crate::utils::symbol_interner::global;
@@ -9,7 +11,6 @@ pub struct ArbitrageOpportunity {
     pub path: Arc<TriangularPath>,
     pub profit_ratio: f64,
     pub start_amount: f64,
-    pub execution_time_ns: u64,
     pub symbols_involved: [u16; 3],
 }
 
@@ -21,12 +22,11 @@ impl ArbitrageOpportunity {
 
     pub fn display(&self) -> String {
         format!(
-            "{} → {} → {} | {:.4}% | {}ns",
+            "{} → {} → {} | {:.4}%",
             self.path.first_symbol,
             self.path.second_symbol,
             self.path.third_symbol,
-            self.profit_percentage(),
-            self.execution_time_ns
+            self.profit_percentage()
         )
     }
 }
@@ -208,7 +208,7 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path_fast(&self, path_idx: u16) -> Option<f32> {
+    fn check_path_internal(&self, path_idx: u16) -> Option<f32> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
@@ -299,23 +299,23 @@ impl ArbitrageDetector {
 
     #[inline(always)]
     fn check_path(&self, path_idx: u16) -> Option<ArbitrageOpportunity> {
-        let profit_ratio = self.check_path_fast(path_idx)?;
+        let profit_ratio = self.check_path_internal(path_idx)?;
 
         unsafe {
             let path = self.all_paths.get_unchecked(path_idx as usize);
             let path_data = self.path_data.get_unchecked(path_idx as usize);
-
-            Some(ArbitrageOpportunity {
+            let opp = ArbitrageOpportunity {
                 path: Arc::new(path.clone()),
                 profit_ratio: profit_ratio as f64,
                 start_amount: self.start_amount as f64,
-                execution_time_ns: 0,
                 symbols_involved: [
                     path_data.first_symbol_id,
                     path_data.second_symbol_id,
                     path_data.third_symbol_id,
                 ],
-            })
+            };
+            info!("Found opportunity: {:?}", opp);
+            Some(opp)
         }
     }
 
@@ -338,7 +338,7 @@ impl ArbitrageDetector {
             for i in 0..max_paths_to_check {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
-                if let Some(profit_ratio) = self.check_path_fast(path_idx) {
+                if let Some(profit_ratio) = self.check_path_internal(path_idx) {
                     if profit_ratio >= self.min_profit_for_execution {
                         if let Some(opportunity) = self.check_path(path_idx) {
                             self.trigger_execution_callbacks(opportunity);

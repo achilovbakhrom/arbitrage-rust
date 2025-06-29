@@ -6,11 +6,10 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
-use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
+use std::sync::atomic::{ AtomicBool, Ordering };
 use tracing::{ error, info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
 use crate::orderbook::manager::OrderBookManager;
-use crate::arbitrage::detector::ArbitrageDetector;
 use crate::utils::types::FastHashMap;
 use crate::utils::symbol_interner::global;
 use parking_lot::RwLock;
@@ -43,7 +42,6 @@ pub struct ArbitrageOpportunity {
 }
 
 pub struct PerformanceTestState {
-    pub detector: Arc<ArbitrageDetector>,
     pub measurements: Arc<Mutex<VecDeque<PerformanceMeasurement>>>,
     pub opportunities: Arc<Mutex<VecDeque<ArbitrageOpportunity>>>,
     pub start_time: Instant,
@@ -51,27 +49,16 @@ pub struct PerformanceTestState {
     pub output_file: String,
     pub opportunities_file: String,
     pub shutdown: Arc<AtomicBool>,
-    pub orderbook_manager: Arc<OrderBookManager>,
-    pub measurement_counter: AtomicU64,
-    pub opportunity_counter: AtomicU64,
-    pub last_progress_report: AtomicU64,
 }
 
 impl PerformanceTestState {
-    pub fn new(
-        orderbook_manager: Arc<OrderBookManager>,
-        detector: Arc<ArbitrageDetector>,
-        output_file: String,
-        duration_secs: u64,
-        shutdown: Arc<AtomicBool>
-    ) -> Self {
+    pub fn new(output_file: String, duration_secs: u64, shutdown: Arc<AtomicBool>) -> Self {
         let opportunities_file = output_file.replace(
             "performance_results.csv",
             "arbitrage_opportunities.csv"
         );
 
         Self {
-            detector,
             measurements: Arc::new(Mutex::new(VecDeque::with_capacity(50000))),
             opportunities: Arc::new(Mutex::new(VecDeque::with_capacity(5000))),
             start_time: Instant::now(),
@@ -79,10 +66,6 @@ impl PerformanceTestState {
             output_file,
             opportunities_file,
             shutdown: shutdown,
-            orderbook_manager,
-            measurement_counter: AtomicU64::new(0),
-            opportunity_counter: AtomicU64::new(0),
-            last_progress_report: AtomicU64::new(0),
         }
     }
 
@@ -91,17 +74,7 @@ impl PerformanceTestState {
     }
 
     pub fn record_measurement(&self, measurement: PerformanceMeasurement) {
-        let count = self.measurement_counter.fetch_add(1, Ordering::Relaxed);
-
-        if count % 100 == 0 {
-            if let Ok(mut measurements) = self.measurements.try_lock() {
-                measurements.push_back(measurement);
-
-                if measurements.len() > 40000 {
-                    measurements.drain(0..10000);
-                }
-            }
-        } else if let Ok(mut measurements) = self.measurements.try_lock() {
+        if let Ok(mut measurements) = self.measurements.try_lock() {
             measurements.push_back(measurement);
         }
     }
@@ -203,20 +176,13 @@ pub fn run_performance_test(
     api_key: String,
     symbols: Vec<String>,
     orderbook_manager: Arc<OrderBookManager>,
-    detector: Arc<ArbitrageDetector>,
     duration_secs: u64,
     output_file: String,
     shutdown: Arc<AtomicBool>,
     detection_times: Arc<RwLock<FastHashMap<u16, Duration>>>
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
-        PerformanceTestState::new(
-            Arc::clone(&orderbook_manager),
-            Arc::clone(&detector),
-            output_file,
-            duration_secs,
-            shutdown.clone()
-        )
+        PerformanceTestState::new(output_file, duration_secs, shutdown.clone())
     );
 
     info!("Starting performance test for {} seconds", duration_secs);
@@ -254,14 +220,6 @@ pub fn run_performance_test(
 
     info!("Performance test ({} seconds) completed", duration_secs);
 
-    let final_measurements = test_state.measurement_counter.load(Ordering::Relaxed);
-    let final_opportunities = test_state.opportunity_counter.load(Ordering::Relaxed);
-    info!(
-        "Final stats: {} measurements, {} opportunities",
-        final_measurements,
-        final_opportunities
-    );
-
     test_state.save_results()?;
 
     Ok(())
@@ -296,7 +254,7 @@ pub fn start_websocket_thread(
                     }
 
                     let orderbook_update_start = Instant::now();
-                    let _ = orderbook_manager.apply_depth_update_pure(
+                    orderbook_manager.apply_depth_update_pure(
                         symbol_id,
                         bids,
                         asks,

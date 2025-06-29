@@ -90,7 +90,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         config.sbe_api_key,
         unique_symbols,
         orderbook_manager.clone(),
-        detector.clone(),
         120,
         output_file,
         shutdown,
