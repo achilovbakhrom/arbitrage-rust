@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{ Write, Read };
 use std::net::TcpStream;
 use std::sync::atomic::{ AtomicBool, AtomicU32, Ordering };
-use std::sync::Arc;
+use std::sync::{ Arc, Condvar, Mutex };
 use std::thread;
 use std::time::{ Duration, Instant };
 
@@ -96,10 +96,9 @@ pub struct SymbolPrecision {
     pub price_precision: u8,
 }
 
-type ExecutionCallback = Arc<dyn Fn(ExecutionResult) + Send + Sync>;
-
 struct OrderExecution {
-    callback: ExecutionCallback,
+    result: Arc<Mutex<Option<ExecutionResult>>>,
+    condvar: Arc<Condvar>,
     start_time: Instant,
 }
 
@@ -379,7 +378,12 @@ impl FixClient {
                     if let Some(order_exec) = orders.remove(&client_order_id) {
                         let mut result = exec_result;
                         result.execution_time = order_exec.start_time.elapsed();
-                        (order_exec.callback)(result);
+
+                        {
+                            let mut guard = order_exec.result.lock().unwrap();
+                            *guard = Some(result);
+                        }
+                        order_exec.condvar.notify_one();
                     }
                 }
             }
@@ -470,29 +474,34 @@ impl FixClient {
         )
     }
 
-    pub fn place_market_order_async<F>(&mut self, mut order: MarketOrder, callback: F) -> Result<()>
-        where F: Fn(ExecutionResult) + Send + Sync + 'static
-    {
+    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
         let client_order_id = format!(
             "{}_{}",
             self.config.sender_comp_id,
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         );
 
+        let result = Arc::new(Mutex::new(None));
+        let condvar = Arc::new(Condvar::new());
+
+        let order_exec = OrderExecution {
+            result: result.clone(),
+            condvar: condvar.clone(),
+            start_time: Instant::now(),
+        };
+
+        {
+            let mut pending = self.pending_orders.write();
+            pending.insert(client_order_id.clone(), order_exec);
+        }
+
+        let mut order = order;
         if order.qty_precision.is_none() {
             let cache = self.symbol_precisions.read();
             if let Some(precision_info) = cache.get(&order.symbol) {
                 order.qty_precision = Some(precision_info.qty_precision);
                 order.price_precision = Some(precision_info.price_precision);
             }
-        }
-
-        {
-            let mut pending = self.pending_orders.write();
-            pending.insert(client_order_id.clone(), OrderExecution {
-                callback: Arc::new(callback),
-                start_time: Instant::now(),
-            });
         }
 
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
@@ -527,7 +536,23 @@ impl FixClient {
         let full_message = self.build_fix_message(&body);
         self.send_message(full_message)?;
 
-        Ok(())
+        let guard = result.lock().unwrap();
+        let mut result = condvar.wait_timeout(guard, Duration::from_secs(10)).unwrap();
+
+        match result.0.take() {
+            Some(exec_result) => {
+                if exec_result.order_status == "FILLED" {
+                    Ok(exec_result)
+                } else {
+                    Err(
+                        FixError::Execution(
+                            format!("Order not filled: {}", exec_result.order_status)
+                        )
+                    )
+                }
+            }
+            None => Err(FixError::Timeout),
+        }
     }
 
     pub fn disconnect(&mut self) -> Result<()> {

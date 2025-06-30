@@ -1,6 +1,6 @@
 use std::time::{ Duration, Instant };
 use anyhow::Result;
-use tracing::{ info, warn };
+use tracing::info;
 use std::collections::HashMap;
 use super::fix_api::{ ExecutionResult, MarketOrder, OrderSide };
 
@@ -47,9 +47,7 @@ impl MockFixClient {
         (value * factor).floor() / factor
     }
 
-    pub fn place_market_order_async<F>(&mut self, order: MarketOrder, callback: F) -> Result<()>
-        where F: Fn(ExecutionResult) + Send + 'static
-    {
+    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
         if !self.is_connected {
             return Err(anyhow::anyhow!("Mock FIX client not connected"));
         }
@@ -58,87 +56,69 @@ impl MockFixClient {
         std::thread::sleep(self.simulated_latency);
 
         let success = rand::random::<f64>() < self.success_rate;
-        let execution_time = start_time.elapsed();
-
-        if success {
-            let client_order_id = format!(
-                "MOCK_{}",
-                std::time::SystemTime
-                    ::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            );
-
-            let precision = order.qty_precision
-                .or_else(|| { self.symbol_precisions.get(&order.symbol).map(|(q, _)| *q) })
-                .unwrap_or(8);
-
-            let precise_quantity = if let Some(quote_qty) = order.quote_quantity {
-                Self::apply_precision(quote_qty, precision)
-            } else {
-                Self::apply_precision(order.quantity, precision)
-            };
-
-            let slippage_factor = 1.0 + (rand::random::<f64>() * 0.0004 + 0.0001);
-            let simulated_price = match order.side {
-                OrderSide::Buy => 50000.0 * slippage_factor,
-                OrderSide::Sell => 50000.0 / slippage_factor,
-            };
-
-            let filled_qty = if order.quote_quantity.is_some() {
-                precise_quantity / simulated_price
-            } else {
-                precise_quantity
-            };
-
-            let avg_price = simulated_price;
-            let cum_quote_qty = filled_qty * avg_price;
-
-            info!(
-                "Mock FIX: Order executed - {} {} {} @ {:.8} (precision: {})",
-                match order.side {
-                    OrderSide::Buy => "BUY",
-                    OrderSide::Sell => "SELL",
-                },
-                order.symbol,
-                self.format_quantity(filled_qty, order.qty_precision),
-                avg_price,
-                precision
-            );
-
-            let result = ExecutionResult {
-                client_order_id,
-                order_id: format!("MOCK_ORDER_{}", rand::random::<u64>()),
-                symbol: order.symbol,
-                side: match order.side {
-                    OrderSide::Buy => "BUY".to_string(),
-                    OrderSide::Sell => "SELL".to_string(),
-                },
-                filled_qty,
-                avg_price,
-                cum_quote_qty,
-                leaves_qty: 0.0,
-                order_status: "FILLED".to_string(),
-                exec_type: "TRADE".to_string(),
-                last_px: avg_price,
-                last_qty: filled_qty,
-                execution_time,
-            };
-
-            callback(result);
-        } else {
-            warn!(
-                "Mock FIX: Order execution failed for {} (precision: {:?})",
-                order.symbol,
-                order.qty_precision
-            );
+        if !success {
+            return Err(anyhow::anyhow!("Mock order execution failed"));
         }
 
-        Ok(())
-    }
+        let client_order_id = format!(
+            "MOCK_{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        );
 
-    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<()> {
-        self.place_market_order_async(order, |_result| {})
+        let precision = order.qty_precision
+            .or_else(|| self.symbol_precisions.get(&order.symbol).map(|(q, _)| *q))
+            .unwrap_or(8);
+
+        let precise_quantity = if let Some(quote_qty) = order.quote_quantity {
+            Self::apply_precision(quote_qty, precision)
+        } else {
+            Self::apply_precision(order.quantity, precision)
+        };
+
+        let slippage_factor = 1.0 + (rand::random::<f64>() * 0.0004 + 0.0001);
+        let simulated_price = match order.side {
+            OrderSide::Buy => 50000.0 * slippage_factor,
+            OrderSide::Sell => 50000.0 / slippage_factor,
+        };
+
+        let filled_qty = if order.quote_quantity.is_some() {
+            precise_quantity / simulated_price
+        } else {
+            precise_quantity
+        };
+
+        let avg_price = simulated_price;
+        let cum_quote_qty = filled_qty * avg_price;
+
+        info!(
+            "Mock FIX: Order executed - {} {} {} @ {:.8} (precision: {})",
+            match order.side {
+                OrderSide::Buy => "BUY",
+                OrderSide::Sell => "SELL",
+            },
+            order.symbol,
+            self.format_quantity(filled_qty, order.qty_precision),
+            avg_price,
+            precision
+        );
+
+        Ok(ExecutionResult {
+            client_order_id,
+            order_id: format!("MOCK_ORDER_{}", rand::random::<u64>()),
+            symbol: order.symbol,
+            side: match order.side {
+                OrderSide::Buy => "BUY".to_string(),
+                OrderSide::Sell => "SELL".to_string(),
+            },
+            filled_qty,
+            avg_price,
+            cum_quote_qty,
+            leaves_qty: 0.0,
+            order_status: "FILLED".to_string(),
+            exec_type: "TRADE".to_string(),
+            last_px: avg_price,
+            last_qty: filled_qty,
+            execution_time: start_time.elapsed(),
+        })
     }
 }
