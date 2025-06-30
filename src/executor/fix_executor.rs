@@ -181,12 +181,11 @@ impl FixArbitrageExecutor {
         if is_debug_mode {
             if let Some(mock_client) = mock_fix_client {
                 if let Ok(mut client) = mock_client.try_lock() {
-                    let result = Self::execute_mock_triangular_trades_fast(
+                    Self::execute_mock_triangular_trades_fast(
                         opportunity,
                         &mut client,
                         symbol_map
-                    );
-                    result.is_ok()
+                    ).is_ok()
                 } else {
                     false
                 }
@@ -196,12 +195,11 @@ impl FixArbitrageExecutor {
         } else {
             if let Some(real_client) = real_fix_client {
                 if let Ok(mut client) = real_client.try_lock() {
-                    let result = Self::execute_real_triangular_trades_fast(
+                    Self::execute_real_triangular_trades_fast(
                         opportunity,
                         &mut client,
                         symbol_map
-                    );
-                    result.is_ok()
+                    ).is_ok()
                 } else {
                     false
                 }
@@ -255,42 +253,14 @@ impl FixArbitrageExecutor {
                 price_precision: Some(price_precision),
             };
 
-            let execution_complete = Arc::new(AtomicBool::new(false));
-            let execution_success = Arc::new(AtomicBool::new(false));
-            let execution_amount = Arc::new(std::sync::Mutex::new(0.0));
-
-            let complete_flag = execution_complete.clone();
-            let success_flag = execution_success.clone();
-            let amount_ref = execution_amount.clone();
-
-            client.place_market_order_async(order, move |result| {
-                if result.order_status == "FILLED" {
-                    success_flag.store(true, Ordering::Relaxed);
-                    if let Ok(mut amount) = amount_ref.try_lock() {
-                        *amount = if result.side == "BUY" {
-                            result.filled_qty
-                        } else {
-                            result.cum_quote_qty
-                        };
-                    }
-                }
-                complete_flag.store(true, Ordering::Relaxed);
-            })?;
-
-            let timeout = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !execution_complete.load(Ordering::Relaxed) {
-                if std::time::Instant::now() > timeout {
-                    return Err(anyhow::anyhow!("Trade {} execution timeout", i + 1));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-
-            if !execution_success.load(Ordering::Relaxed) {
-                return Err(anyhow::anyhow!("Trade {} execution failed", i + 1));
-            }
+            let result = client.place_market_order(order)?;
 
             if i < symbols.len() - 1 {
-                current_amount = *execution_amount.lock().unwrap();
+                current_amount = if result.side == "BUY" {
+                    result.filled_qty
+                } else {
+                    result.cum_quote_qty
+                };
             }
         }
 
@@ -341,42 +311,14 @@ impl FixArbitrageExecutor {
                 price_precision: Some(price_precision),
             };
 
-            let execution_complete = Arc::new(AtomicBool::new(false));
-            let execution_success = Arc::new(AtomicBool::new(false));
-            let execution_amount = Arc::new(std::sync::Mutex::new(0.0));
-
-            let complete_flag = execution_complete.clone();
-            let success_flag = execution_success.clone();
-            let amount_ref = execution_amount.clone();
-
-            client.place_market_order_async(order, move |result| {
-                if result.order_status == "FILLED" {
-                    success_flag.store(true, Ordering::Relaxed);
-                    if let Ok(mut amount) = amount_ref.try_lock() {
-                        *amount = if result.side == "BUY" {
-                            result.filled_qty
-                        } else {
-                            result.cum_quote_qty
-                        };
-                    }
-                }
-                complete_flag.store(true, Ordering::Relaxed);
-            })?;
-
-            let timeout = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !execution_complete.load(Ordering::Relaxed) {
-                if std::time::Instant::now() > timeout {
-                    return Err(anyhow::anyhow!("Trade {} execution timeout", i + 1));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-
-            if !execution_success.load(Ordering::Relaxed) {
-                return Err(anyhow::anyhow!("Trade {} execution failed", i + 1));
-            }
+            let result = client.place_market_order(order)?;
 
             if i < symbols.len() - 1 {
-                current_amount = *execution_amount.lock().unwrap();
+                current_amount = if result.side == "BUY" {
+                    result.filled_qty
+                } else {
+                    result.cum_quote_qty
+                };
             }
         }
 
