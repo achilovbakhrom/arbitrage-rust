@@ -948,24 +948,13 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        let sender_comp_field = format!("49={}", self.sender_comp_id);
-        let target_comp_field = format!("56={}", self.config.target_comp_id);
         let seq_num_field = format!("34={}", seq_num);
+        let sender_comp_field = format!("49={}", self.sender_comp_id);
         let sending_time_field = format!("52={}", sending_time);
+        let target_comp_field = format!("56={}", self.config.target_comp_id);
         let client_order_id_field = format!("11={}", client_order_id);
         let symbol_field = format!("55={}", order.symbol.to_uppercase());
         let side_field = format!("54={}", order.side.to_fix_side());
-
-        let mut fields = Vec::with_capacity(12);
-        fields.push("35=D");
-        fields.push(&sender_comp_field);
-        fields.push(&target_comp_field);
-        fields.push(&seq_num_field);
-        fields.push(&sending_time_field);
-        fields.push(&client_order_id_field);
-        fields.push(&symbol_field);
-        fields.push("40=1");
-        fields.push(&side_field);
 
         let quantity_field = if let Some(quote_qty) = order.quote_quantity {
             let formatted_qty = self.format_quantity(quote_qty, order.qty_precision);
@@ -974,9 +963,19 @@ impl FixClient {
             let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
             format!("38={}", formatted_qty)
         };
-        fields.push(&quantity_field);
 
-        fields.push("59=4");
+        let mut fields = Vec::with_capacity(10);
+        fields.push("35=D");
+        fields.push(&seq_num_field);
+        fields.push(&sender_comp_field);
+        fields.push(&sending_time_field);
+        fields.push(&target_comp_field);
+        fields.push(&client_order_id_field);
+        fields.push(&quantity_field);
+        fields.push("40=1");
+        fields.push(&side_field);
+        fields.push(&symbol_field);
+        // fields.push("59=4");
 
         let message = self.build_fix_message_fast(&fields);
         self.send_message_fast(message)?;
