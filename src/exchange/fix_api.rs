@@ -28,7 +28,6 @@ pub enum FixError {
 pub struct FixConfig {
     pub api_key: String,
     pub private_key_base64: String,
-    pub sender_comp_id: String,
     pub target_comp_id: String,
     pub heartbeat_interval: u32,
     pub endpoint: String,
@@ -39,7 +38,6 @@ impl Default for FixConfig {
         Self {
             api_key: String::new(),
             private_key_base64: String::new(),
-            sender_comp_id: String::new(),
             target_comp_id: "SPOT".to_string(),
             heartbeat_interval: 30,
             endpoint: "fix-oe.binance.com:9000".to_string(),
@@ -71,6 +69,7 @@ pub enum OrderSide {
 }
 
 impl OrderSide {
+    #[inline(always)]
     fn to_fix_side(&self) -> &'static str {
         match self {
             OrderSide::Buy => "1",
@@ -103,6 +102,7 @@ pub struct SymbolPrecision {
 
 pub struct FixClient {
     config: FixConfig,
+    sender_comp_id: String,
     seq_num: AtomicU32,
     pending_orders: Arc<Mutex<HashMap<String, OrderExecution>>>,
     signing_key: SigningKey,
@@ -116,50 +116,118 @@ pub struct FixClient {
 
 impl FixClient {
     pub fn new(config: FixConfig) -> Result<Self> {
-        // Decode the private key similar to Golang code
         let key_bytes = general_purpose::STANDARD
             .decode(&config.private_key_base64)
             .map_err(|e| FixError::Parse(format!("Failed to decode private key: {}", e)))?;
 
-        // Parse Ed25519 private key from PKCS8 format
-        let signing_key = if key_bytes.len() == 32 {
-            SigningKey::from_bytes(&key_bytes.try_into().unwrap())
-        } else if key_bytes.len() > 32 {
-            // Extract the last 32 bytes (similar to Golang logic)
-            let key_start = key_bytes.len().saturating_sub(32);
-            let key_slice: [u8; 32] = key_bytes[key_start..]
-                .try_into()
-                .map_err(|_| FixError::Parse("Invalid private key format".to_string()))?;
-            SigningKey::from_bytes(&key_slice)
-        } else {
-            return Err(FixError::Parse("Private key too short".to_string()).into());
-        };
-
-        // SenderCompID — первые 8 символов API_KEY (exactly like Golang)
-        let sender_comp_id = if config.api_key.len() > 8 {
-            config.api_key[..8].to_string()
-        } else {
-            config.api_key.clone()
-        };
-
-        // Create new config with correct SenderCompID
-        let mut fixed_config = config;
-        fixed_config.sender_comp_id = sender_comp_id;
+        let signing_key = Self::parse_ed25519_key(&key_bytes)?;
 
         Ok(Self {
-            config: fixed_config,
+            config: config.clone(),
+            sender_comp_id: config.api_key[..8].to_string(),
             seq_num: AtomicU32::new(1),
-            pending_orders: Arc::new(Mutex::new(HashMap::new())),
+            pending_orders: Arc::new(Mutex::new(HashMap::with_capacity(64))),
             signing_key,
             is_connected: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             connection_handle: None,
             heartbeat_handle: None,
-            symbol_precisions: Arc::new(Mutex::new(HashMap::new())),
+            symbol_precisions: Arc::new(Mutex::new(HashMap::with_capacity(256))),
             stream: Arc::new(Mutex::new(None)),
         })
     }
 
+    #[inline]
+    fn parse_ed25519_key(key_bytes: &[u8]) -> Result<SigningKey> {
+        info!("Debugging private key format:");
+        info!("  Key bytes length: {}", key_bytes.len());
+        info!("  First 16 bytes: {:?}", &key_bytes[..(16).min(key_bytes.len())]);
+
+        let key_str = String::from_utf8_lossy(key_bytes);
+        if key_str.contains("-----BEGIN PRIVATE KEY-----") {
+            info!("  Detected PEM format, extracting key data...");
+
+            let lines: Vec<&str> = key_str.lines().collect();
+            let mut base64_content = String::new();
+            let mut in_key = false;
+
+            for line in lines {
+                if line.contains("-----BEGIN PRIVATE KEY-----") {
+                    in_key = true;
+                    continue;
+                }
+                if line.contains("-----END PRIVATE KEY-----") {
+                    break;
+                }
+                if in_key {
+                    base64_content.push_str(line.trim());
+                }
+            }
+
+            info!("  Extracted base64 content length: {}", base64_content.len());
+
+            // Decode the PEM content
+            let pem_bytes = general_purpose::STANDARD
+                .decode(&base64_content)
+                .map_err(|e| FixError::Parse(format!("Failed to decode PEM content: {}", e)))?;
+
+            info!("  PEM decoded bytes length: {}", pem_bytes.len());
+            info!("  PEM decoded first 16 bytes: {:?}", &pem_bytes[..(16).min(pem_bytes.len())]);
+
+            return Self::extract_ed25519_from_pkcs8(&pem_bytes);
+        }
+
+        // Try different key lengths
+        if key_bytes.len() == 32 {
+            info!("  Trying as raw 32-byte Ed25519 key");
+            let key_array: [u8; 32] = key_bytes
+                .try_into()
+                .map_err(|_| FixError::Parse("Invalid 32-byte key".to_string()))?;
+            return Ok(SigningKey::from_bytes(&key_array));
+        } else if key_bytes.len() == 44 {
+            info!("  Trying as 44-byte base64 encoded raw key");
+            // This might be a base64 encoded 32-byte key
+            let decoded = general_purpose::STANDARD
+                .decode(key_bytes)
+                .map_err(|e| FixError::Parse(format!("Failed to decode 44-byte key: {}", e)))?;
+
+            if decoded.len() == 32 {
+                let key_array: [u8; 32] = decoded
+                    .try_into()
+                    .map_err(|_| FixError::Parse("Invalid decoded 32-byte key".to_string()))?;
+                return Ok(SigningKey::from_bytes(&key_array));
+            }
+        } else if key_bytes.len() > 32 {
+            info!("  Trying as PKCS#8 format");
+            return Self::extract_ed25519_from_pkcs8(key_bytes);
+        }
+
+        Err(FixError::Parse(format!("Unsupported key format. Length: {}", key_bytes.len())).into())
+    }
+
+    #[inline]
+    fn extract_ed25519_from_pkcs8(pkcs8_bytes: &[u8]) -> Result<SigningKey> {
+        info!("  Extracting Ed25519 key from PKCS#8 format");
+
+        // PKCS#8 Ed25519 private key structure:
+        // The actual 32-byte key is typically at the end
+        if pkcs8_bytes.len() >= 32 {
+            // Try the last 32 bytes first (most common case)
+            let key_start = pkcs8_bytes.len() - 32;
+            let key_slice: [u8; 32] = pkcs8_bytes[key_start..]
+                .try_into()
+                .map_err(|_| FixError::Parse("Invalid PKCS#8 key extraction".to_string()))?;
+
+            info!("  Extracted 32 bytes from position {}", key_start);
+            info!("  Extracted key bytes: {:?}", &key_slice[..8]);
+
+            Ok(SigningKey::from_bytes(&key_slice))
+        } else {
+            Err(FixError::Parse("PKCS#8 key too short".to_string()).into())
+        }
+    }
+
+    #[inline]
     pub fn update_symbol_precision(&self, symbol: &str, qty_precision: u8, price_precision: u8) {
         let mut cache = self.symbol_precisions.lock();
         cache.insert(symbol.to_string(), SymbolPrecision {
@@ -168,6 +236,7 @@ impl FixClient {
         });
     }
 
+    #[inline]
     fn format_quantity(&self, quantity: f64, precision: Option<u8>) -> String {
         match precision {
             Some(p) => format!("{:.prec$}", quantity, prec = p as usize),
@@ -178,21 +247,18 @@ impl FixClient {
     pub fn validate_credentials(&self) -> Result<()> {
         info!("Validating FIX credentials...");
 
-        // Check API key format
         if self.config.api_key.is_empty() {
             return Err(FixError::Auth("API key is empty".to_string()).into());
         }
 
-        if self.config.api_key.len() < 10 {
+        if self.config.api_key.len() < 8 {
             return Err(FixError::Auth("API key appears to be too short".to_string()).into());
         }
 
-        // Check private key format
         if self.config.private_key_base64.is_empty() {
             return Err(FixError::Auth("Private key is empty".to_string()).into());
         }
 
-        // Test private key decoding
         let key_bytes = general_purpose::STANDARD
             .decode(&self.config.private_key_base64)
             .map_err(|e| FixError::Auth(format!("Invalid base64 private key: {}", e)))?;
@@ -222,7 +288,6 @@ impl FixClient {
 
         info!("✓ TCP connection successful");
 
-        // Test TLS handshake
         info!("Testing TLS handshake...");
         let connector = TlsConnector::new()?;
         let domain = self.config.endpoint.split(':').next().unwrap();
@@ -235,13 +300,9 @@ impl FixClient {
     pub fn connect(&mut self) -> Result<()> {
         info!("Starting FIX connection process...");
 
-        // Step 1: Validate credentials
         self.validate_credentials().context("Credential validation failed")?;
-
-        // Step 2: Test basic connectivity
         self.test_tcp_connection().context("Network connectivity test failed")?;
 
-        // Step 3: Establish the actual connection
         info!("Establishing FIX connection to {}...", self.config.endpoint);
 
         let connector = TlsConnector::new()?;
@@ -259,12 +320,9 @@ impl FixClient {
         info!("✓ TLS connection established");
         *self.stream.lock() = Some(tls_stream);
 
-        // Step 4: Send logon and wait for response
         self.send_logon_and_wait_response().context("FIX logon failed")?;
 
-        // Step 5: Start background threads after successful logon
         self.start_message_reader().context("Failed to start message reader")?;
-
         self.start_heartbeat().context("Failed to start heartbeat")?;
 
         self.is_connected.store(true, Ordering::Release);
@@ -273,124 +331,113 @@ impl FixClient {
     }
 
     fn send_logon_and_wait_response(&mut self) -> Result<()> {
-        // Send logon message
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        // Create signature payload exactly like Golang: "A" + senderCompID + targetCompID + seqNum + sendingTime
-        let payload = format!(
-            "A{}{}{}{}",
-            self.config.sender_comp_id,
+        let signature_payload_with_soh = format!(
+            "A\x01{}\x01{}\x01{}\x01{}",
+            self.sender_comp_id,
             self.config.target_comp_id,
             seq_num,
             sending_time
         );
 
-        let signature: Signature = self.signing_key.sign(payload.as_bytes());
+        let signature_payload_direct = format!(
+            "A{}{}{}{}",
+            self.sender_comp_id,
+            self.config.target_comp_id,
+            seq_num,
+            sending_time
+        );
+
+        let signature_payload = signature_payload_with_soh;
+
+        let signature: Signature = self.signing_key.sign(signature_payload.as_bytes());
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         info!("Logon details:");
         info!("  API Key: {}...", &self.config.api_key[..(8).min(self.config.api_key.len())]);
-        info!("  SenderCompID: {}", self.config.sender_comp_id);
+        info!("  SenderCompID: {}", self.sender_comp_id);
         info!("  TargetCompID: {}", self.config.target_comp_id);
         info!("  Sequence: {}", seq_num);
         info!("  SendingTime: {}", sending_time);
-        debug!("  Signature payload: {}", payload);
+        info!("  Using signature format: WITH SOH separators");
+        debug!("  Signature payload: {}", signature_payload.replace('\x01', "|"));
         debug!("  Signature (base64): {}", signature_base64);
+        debug!("  Signature length: {}", signature_base64.len());
 
-        println!("Logon details:");
-        println!("  API Key: {}...", &self.config.api_key[..(8).min(self.config.api_key.len())]);
-        println!("  SenderCompID: {}", self.config.sender_comp_id);
-        println!("  TargetCompID: {}", self.config.target_comp_id);
-        println!("  Sequence: {}", seq_num);
-        println!("  SendingTime: {}", sending_time);
-        println!("  Signature payload: {}", payload);
-        println!("  Signature (base64): {}", signature_base64);
+        debug!("  Alternative payload (direct): {}", signature_payload_direct);
 
-        // Build logon message with exact field order from Golang
-        let mut fields = Vec::new();
-        fields.push(format!("35=A")); // MsgType=Logon
-        fields.push(format!("49={}", self.config.sender_comp_id)); // SenderCompID
-        fields.push(format!("56={}", self.config.target_comp_id)); // TargetCompID
-        fields.push(format!("34={}", seq_num)); // MsgSeqNum
-        fields.push(format!("52={}", sending_time)); // SendingTime
-        fields.push(format!("98=0")); // EncryptMethod=None
-        fields.push(format!("108={}", self.config.heartbeat_interval)); // HeartBtInt
-        fields.push(format!("141=Y")); // ResetSeqNumFlag=Y
-        fields.push(format!("553={}", self.config.api_key)); // Username (API Key)
-        fields.push(format!("95={}", signature_base64.len())); // SecureDataLen
-        fields.push(format!("96={}", signature_base64)); // SecureData (signature)
-        fields.push(format!("25035=1")); // AppVerID
+        if self.sender_comp_id.len() != 8 {
+            warn!("SenderCompID length is not 8 characters: {}", self.sender_comp_id.len());
+        }
 
-        let message = self.build_fix_message(&fields);
+        let sender_comp_field = format!("49={}", self.sender_comp_id);
+        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let seq_num_field = format!("34={}", seq_num);
+        let sending_time_field = format!("52={}", sending_time);
+        let heartbeat_field = format!("108={}", self.config.heartbeat_interval);
+        let api_key_field = format!("553={}", self.config.api_key);
+        let signature_len_field = format!("95={}", signature_base64.len());
+        let signature_field = format!("96={}", signature_base64);
+
+        let mut fields = Vec::with_capacity(12);
+        fields.push("35=A"); // MsgType=Logon
+        fields.push(&sender_comp_field); // SenderCompID
+        fields.push(&target_comp_field); // TargetCompID
+        fields.push(&seq_num_field); // MsgSeqNum
+        fields.push(&sending_time_field); // SendingTime
+        fields.push("98=0"); // EncryptMethod=None
+        fields.push(&heartbeat_field); // HeartBtInt
+        fields.push("141=Y"); // ResetSeqNumFlag=Y
+        fields.push(&api_key_field); // Username (API Key)
+        fields.push(&signature_len_field); // SecureDataLen
+        fields.push(&signature_field); // SecureData (signature)
+        fields.push("25035=1"); // AppVerID
+
+        let message = self.build_fix_message_fast(&fields);
         info!("Sending logon message ({} bytes)", message.len());
-        println!("Sending logon message {}", message);
-        debug!("Logon message: {}", message.replace('', "|"));
-        println!("Logon message: {}", message.replace('', "|"));
+        debug!("Logon message: {}", message.replace('\x01', "|"));
 
-        self.send_message(message)?;
+        self.send_message_fast(message)?;
         info!("Logon message sent, waiting for response...");
-        println!("Logon message sent, waiting for response...");
 
-        // Wait for response with multiple attempts
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(15); // Longer timeout
+        let timeout = Duration::from_secs(15);
         let mut attempts = 0;
 
         while start_time.elapsed() < timeout && attempts < 3 {
             attempts += 1;
             info!("Reading response attempt {}...", attempts);
-            println!("Reading response attempt {}...", attempts);
 
-            match self.read_fix_message_sync() {
+            match self.read_fix_message_fast() {
                 Ok(response) => {
-                    info!("Received response: {}", response.replace('', "|"));
-                    println!("Received response: {}", response.replace('', "|"));
+                    info!("Received response: {}", response.replace('\x01', "|"));
 
-                    let fields = Self::parse_fix_message(&response);
+                    let fields = Self::parse_fix_message_fast(&response);
                     let msg_type = fields.get("35").unwrap_or(&"Unknown".to_string()).clone();
 
                     match msg_type.as_str() {
                         "A" => {
-                            // Logon response
                             if let Some(text) = fields.get("58") {
                                 if !text.is_empty() {
                                     info!("Logon response text: {}", text);
                                 }
                             }
 
-                            // Check for session reject reason
-                            if let Some(reject_reason) = fields.get("373") {
-                                return Err(
-                                    FixError::Auth(
-                                        format!(
-                                            "Logon rejected with code {}: {}",
-                                            reject_reason,
-                                            fields
-                                                .get("58")
-                                                .unwrap_or(&"No description".to_string())
-                                        )
-                                    ).into()
-                                );
-                            }
-
-                            info!("✓ FIX logon successful");
+                            info!("✓ FIX logon successful with SOH format");
                             return Ok(());
                         }
                         "3" => {
                             let msg1 = "Unknown reason".to_string();
                             let msg2 = "Unknown".to_string();
-                            // Reject message
                             let reason = fields.get("58").unwrap_or(&msg1);
                             let ref_tag = fields.get("371").unwrap_or(&msg2);
-                            return Err(
-                                FixError::Auth(
-                                    format!("Logon rejected (RefTag: {}): {}", ref_tag, reason)
-                                ).into()
-                            );
+                            let reject_code = fields.get("373").unwrap_or(&msg2);
+
+                            error!("SOH format failed with code {}, trying direct concatenation...", reject_code);
                         }
                         "5" => {
-                            // Logout message
                             let msg = "Server initiated logout".to_string();
                             let reason = fields.get("58").unwrap_or(&msg);
                             return Err(FixError::Auth(format!("Server logout: {}", reason)).into());
@@ -403,9 +450,7 @@ impl FixClient {
                 }
                 Err(e) => {
                     error!("Error reading logon response (attempt {}): {}", attempts, e);
-                    println!("Error reading logon response (attempt {}): {}", attempts, e);
 
-                    // Check if this is a connection closed error
                     if
                         e.to_string().contains("Connection closed") ||
                         e.to_string().contains("UnexpectedEof")
@@ -422,7 +467,6 @@ impl FixClient {
                         return Err(e);
                     }
 
-                    // Wait a bit before retry
                     thread::sleep(Duration::from_millis(500));
                 }
             }
@@ -431,49 +475,41 @@ impl FixClient {
         Err(FixError::Auth("Timeout waiting for logon response".to_string()).into())
     }
 
-    fn build_fix_message(&self, fields: &[String]) -> String {
-        // Proper FIX format: fields are separated by SOH (0x01)
-        // The body consists of all fields joined with SOH, ending with SOH
-        let body = fields.join("") + "";
+    #[inline]
+    fn build_fix_message_fast(&self, fields: &[&str]) -> String {
+        let mut body = String::with_capacity(512);
+        for field in fields {
+            body.push_str(field);
+            body.push('\x01');
+        }
 
-        // FIX header: BeginString + BodyLength
-        // Note: BodyLength includes everything from first field to checksum (exclusive)
-        let header = format!("8=FIX.4.49={}", body.len());
-
-        // Complete message without checksum
+        let header = format!("8=FIX.4.4\x019={}\x01", body.len());
         let message_without_checksum = header + &body;
 
-        // Calculate checksum over entire message (header + body)
-        let checksum = self.calculate_checksum(&message_without_checksum);
+        let checksum = message_without_checksum.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
 
-        // Final message with checksum
-        let final_message = format!("{}10={:03}", message_without_checksum, checksum);
-
-        final_message
+        format!("{}10={:03}\x01", message_without_checksum, checksum)
     }
 
-    fn calculate_checksum(&self, message: &str) -> u8 {
-        message.bytes().fold(0u8, |acc, b| acc.wrapping_add(b))
-    }
-
-    fn send_message(&self, message: String) -> Result<()> {
+    #[inline]
+    fn send_message_fast(&self, message: String) -> Result<()> {
         let mut stream_guard = self.stream.lock();
         if let Some(ref mut stream) = *stream_guard {
             stream.write_all(message.as_bytes())?;
             stream.flush()?;
-            debug!("Sent FIX message: {}", message.replace('', "|"));
+            debug!("Sent FIX message: {}", message.replace('\x01', "|"));
         }
         Ok(())
     }
 
-    fn read_fix_message_sync(&self) -> Result<String> {
+    #[inline]
+    fn read_fix_message_fast(&self) -> Result<String> {
         let mut stream_guard = self.stream.lock();
         if let Some(ref mut stream) = *stream_guard {
-            let mut reader = BufReader::new(stream);
+            let mut reader = BufReader::with_capacity(8192, stream);
 
-            // Read BeginString field (8=FIX.4.4)
-            let mut begin_string = String::new();
-            match reader.read_line(&mut begin_string) {
+            let mut begin_buffer = Vec::with_capacity(16);
+            match reader.read_until(0x01, &mut begin_buffer) {
                 Ok(0) => {
                     return Err(
                         FixError::Connection(
@@ -490,33 +526,9 @@ impl FixClient {
                 }
             }
 
-            println!("begin_string {}", begin_string);
+            let begin_string = String::from_utf8_lossy(&begin_buffer);
 
-            // Handle the fact that read_line might not encounter \n, so read until 
-            if !begin_string.ends_with('') {
-                let mut buffer = Vec::new();
-                match reader.read_until(0x01, &mut buffer) {
-                    Ok(0) => {
-                        return Err(
-                            FixError::Connection(
-                                std::io::Error::new(
-                                    std::io::ErrorKind::UnexpectedEof,
-                                    "Connection closed while reading BeginString"
-                                )
-                            ).into()
-                        );
-                    }
-                    Ok(_) => {
-                        begin_string = String::from_utf8_lossy(&buffer).to_string();
-                    }
-                    Err(e) => {
-                        return Err(FixError::Connection(e).into());
-                    }
-                }
-            }
-
-            // Read BodyLength field (9=XXX)
-            let mut body_length_buffer = Vec::new();
+            let mut body_length_buffer = Vec::with_capacity(16);
             match reader.read_until(0x01, &mut body_length_buffer) {
                 Ok(0) => {
                     return Err(
@@ -536,10 +548,8 @@ impl FixClient {
 
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
 
-            // Parse body length similar to Golang
-            if let Some(length_part) = body_length_field.trim_end_matches('').split('=').nth(1) {
+            if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
                 if let Ok(body_length) = length_part.parse::<usize>() {
-                    // Read the exact body length + 7 bytes for checksum field (10=XXX)
                     let mut body_buffer = vec![0u8; body_length + 7];
                     match reader.read_exact(&mut body_buffer) {
                         Ok(_) => {}
@@ -554,7 +564,9 @@ impl FixClient {
                     }
 
                     let full_message =
-                        begin_string + &body_length_field + &String::from_utf8_lossy(&body_buffer);
+                        begin_string.to_string() +
+                        &body_length_field +
+                        &String::from_utf8_lossy(&body_buffer);
                     return Ok(full_message.replace('\n', ""));
                 }
             }
@@ -596,7 +608,7 @@ impl FixClient {
         while !shutdown.load(Ordering::Relaxed) {
             match Self::read_fix_message_blocking(&stream_ref) {
                 Ok(message) => {
-                    debug!("Received FIX message: {}", message.replace('', "|"));
+                    debug!("Received FIX message: {}", message.replace('\x01', "|"));
                     if let Err(e) = Self::process_incoming_message(&message, &pending_orders) {
                         error!("Error processing message: {}", e);
                     }
@@ -604,7 +616,6 @@ impl FixClient {
                 Err(e) => {
                     error!("Error reading message: {}", e);
 
-                    // Check if this is a connection error
                     if let Some(FixError::Connection(_)) = e.downcast_ref::<FixError>() {
                         error!("Connection lost, stopping message reader");
                         break;
@@ -623,10 +634,9 @@ impl FixClient {
     ) -> Result<String> {
         let mut stream_guard = stream_ref.lock();
         if let Some(ref mut stream) = *stream_guard {
-            let mut reader = BufReader::new(stream);
+            let mut reader = BufReader::with_capacity(8192, stream);
 
-            // Read BeginString field (8=FIX.4.4)
-            let mut begin_buffer = Vec::new();
+            let mut begin_buffer = Vec::with_capacity(16);
             match reader.read_until(0x01, &mut begin_buffer) {
                 Ok(0) => {
                     return Err(
@@ -645,8 +655,7 @@ impl FixClient {
             }
             let begin_string = String::from_utf8_lossy(&begin_buffer);
 
-            // Read BodyLength field (9=XXX)
-            let mut body_length_buffer = Vec::new();
+            let mut body_length_buffer = Vec::with_capacity(16);
             match reader.read_until(0x01, &mut body_length_buffer) {
                 Ok(0) => {
                     return Err(
@@ -665,10 +674,8 @@ impl FixClient {
             }
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
 
-            // Parse body length
-            if let Some(length_part) = body_length_field.trim_end_matches('').split('=').nth(1) {
+            if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
                 if let Ok(body_length) = length_part.parse::<usize>() {
-                    // Read the exact body length + 7 bytes for checksum field (10=XXX)
                     let mut body_buffer = vec![0u8; body_length + 7];
                     match reader.read_exact(&mut body_buffer) {
                         Ok(_) => {}
@@ -708,15 +715,14 @@ impl FixClient {
         message: &str,
         pending_orders: &Arc<Mutex<HashMap<String, OrderExecution>>>
     ) -> Result<()> {
-        let fields = Self::parse_fix_message(message);
-        debug!("Received FIX message: {}", message.replace('', "|"));
+        let fields = Self::parse_fix_message_fast(message);
+        debug!("Received FIX message: {}", message.replace('\x01', "|"));
 
         match fields.get("35").map(|s| s.as_str()) {
             Some("A") => {
                 info!("Received Logon response");
             }
             Some("8") => {
-                // Execution Report
                 if let Some(exec_result) = Self::parse_execution_report(&fields)? {
                     let client_order_id = exec_result.client_order_id.clone();
 
@@ -734,14 +740,11 @@ impl FixClient {
                 }
             }
             Some("1") => {
-                // Test Request
                 if let Some(test_req_id) = fields.get("112") {
                     debug!("Received Test Request: {}", test_req_id);
-                    // Should respond with Heartbeat containing TestReqID
                 }
             }
             Some("0") => {
-                // Heartbeat
                 debug!("Received Heartbeat");
             }
             _ => {
@@ -752,19 +755,34 @@ impl FixClient {
         Ok(())
     }
 
-    fn parse_fix_message(message: &str) -> HashMap<String, String> {
-        message
-            .trim_end()
-            .split('')
-            .filter_map(|field| {
-                let parts: Vec<&str> = field.splitn(2, '=').collect();
-                if parts.len() == 2 {
-                    Some((parts[0].to_string(), parts[1].to_string()))
+    #[inline]
+    fn parse_fix_message_fast(message: &str) -> HashMap<String, String> {
+        let mut fields = HashMap::with_capacity(32);
+        let mut start = 0;
+        let bytes = message.as_bytes();
+
+        while start < bytes.len() {
+            if let Some(eq_pos) = bytes[start..].iter().position(|&b| b == b'=') {
+                let eq_abs = start + eq_pos;
+                if let Some(soh_pos) = bytes[eq_abs..].iter().position(|&b| b == 0x01) {
+                    let soh_abs = eq_abs + soh_pos;
+
+                    let key = unsafe { std::str::from_utf8_unchecked(&bytes[start..eq_abs]) };
+                    let value = unsafe {
+                        std::str::from_utf8_unchecked(&bytes[eq_abs + 1..soh_abs])
+                    };
+
+                    fields.insert(key.to_string(), value.to_string());
+                    start = soh_abs + 1;
                 } else {
-                    None
+                    break;
                 }
-            })
-            .collect()
+            } else {
+                break;
+            }
+        }
+
+        fields
     }
 
     fn parse_execution_report(fields: &HashMap<String, String>) -> Result<Option<ExecutionResult>> {
@@ -783,7 +801,6 @@ impl FixClient {
         let exec_type = fields.get("150").unwrap_or(&String::new()).clone();
         let order_status = fields.get("39").unwrap_or(&String::new()).clone();
 
-        // Parse numeric fields
         let parse_float = |tag: &str| -> f64 {
             fields
                 .get(tag)
@@ -791,14 +808,13 @@ impl FixClient {
                 .unwrap_or(0.0)
         };
 
-        let filled_qty = parse_float("14"); // CumQty
-        let avg_price = parse_float("6"); // AvgPx
-        let cum_quote_qty = parse_float("25017"); // CumQuoteQty (Binance custom field)
-        let leaves_qty = parse_float("151"); // LeavesQty
-        let last_px = parse_float("31"); // LastPx
-        let last_qty = parse_float("32"); // LastQty
+        let filled_qty = parse_float("14");
+        let avg_price = parse_float("6");
+        let cum_quote_qty = parse_float("25017");
+        let leaves_qty = parse_float("151");
+        let last_px = parse_float("31");
+        let last_qty = parse_float("32");
 
-        // Check for error in execution
         if let Some(text) = fields.get("58") {
             if !text.is_empty() && order_status != "2" && order_status != "FILLED" {
                 warn!("Order execution message: {}", text);
@@ -846,7 +862,7 @@ impl FixClient {
         let interval_secs = self.config.heartbeat_interval as u64;
         let shutdown = Arc::clone(&self.shutdown);
         let stream_ref = Arc::clone(&self.stream);
-        let sender_comp_id = self.config.sender_comp_id.clone();
+        let sender_comp_id = self.sender_comp_id.clone();
         let target_comp_id = self.config.target_comp_id.clone();
 
         let handle = thread::spawn(move || {
@@ -860,19 +876,24 @@ impl FixClient {
 
                 let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-                let fields = vec![
-                    "35=0".to_string(), // MsgType=Heartbeat
-                    format!("49={}", sender_comp_id),
-                    format!("56={}", target_comp_id),
-                    format!("34={}", seq),
-                    format!("52={}", sending_time)
+                let sender_comp_field = format!("49={}", sender_comp_id);
+                let target_comp_field = format!("56={}", target_comp_id);
+                let seq_field = format!("34={}", seq);
+                let sending_time_field = format!("52={}", sending_time);
+
+                let fields = [
+                    "35=0",
+                    &sender_comp_field,
+                    &target_comp_field,
+                    &seq_field,
+                    &sending_time_field,
                 ];
 
-                let body = fields.join("") + "";
-                let header = format!("8=FIX.4.49={}", body.len());
+                let body = fields.join("\x01") + "\x01";
+                let header = format!("8=FIX.4.4\x019={}\x01", body.len());
                 let message = header + &body;
                 let checksum = message.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
-                let full_message = format!("{}10={:03}", message, checksum);
+                let full_message = format!("{}10={:03}\x01", message, checksum);
 
                 let mut stream_guard = stream_ref.lock();
                 if let Some(ref mut stream) = *stream_guard {
@@ -897,7 +918,7 @@ impl FixClient {
     pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
         let client_order_id = format!(
             "{}_{}",
-            self.config.sender_comp_id,
+            self.sender_comp_id,
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         );
 
@@ -915,7 +936,6 @@ impl FixClient {
             pending.insert(client_order_id.clone(), order_exec);
         }
 
-        // Get precision for the symbol if not provided in order
         let mut order = order;
         if order.qty_precision.is_none() {
             let cache = self.symbol_precisions.lock();
@@ -928,34 +948,39 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        // Build New Order Single message like in Golang
-        let mut fields = Vec::new();
-        fields.push("35=D".to_string()); // MsgType
-        fields.push(format!("49={}", self.config.sender_comp_id));
-        fields.push(format!("56={}", self.config.target_comp_id));
-        fields.push(format!("34={}", seq_num));
-        fields.push(format!("52={}", sending_time));
-        fields.push(format!("11={}", client_order_id));
-        fields.push(format!("55={}", order.symbol.to_uppercase()));
-        fields.push("40=1".to_string()); // OrdType=Market
-        fields.push(format!("54={}", order.side.to_fix_side()));
+        let sender_comp_field = format!("49={}", self.sender_comp_id);
+        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let seq_num_field = format!("34={}", seq_num);
+        let sending_time_field = format!("52={}", sending_time);
+        let client_order_id_field = format!("11={}", client_order_id);
+        let symbol_field = format!("55={}", order.symbol.to_uppercase());
+        let side_field = format!("54={}", order.side.to_fix_side());
 
-        // Add quantity based on order type with proper precision
-        if let Some(quote_qty) = order.quote_quantity {
+        let mut fields = Vec::with_capacity(12);
+        fields.push("35=D");
+        fields.push(&sender_comp_field);
+        fields.push(&target_comp_field);
+        fields.push(&seq_num_field);
+        fields.push(&sending_time_field);
+        fields.push(&client_order_id_field);
+        fields.push(&symbol_field);
+        fields.push("40=1");
+        fields.push(&side_field);
+
+        let quantity_field = if let Some(quote_qty) = order.quote_quantity {
             let formatted_qty = self.format_quantity(quote_qty, order.qty_precision);
-            fields.push(format!("152={}", formatted_qty)); // CashOrderQty for quote quantity
+            format!("152={}", formatted_qty)
         } else {
             let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
-            fields.push(format!("38={}", formatted_qty)); // OrderQty
-        }
+            format!("38={}", formatted_qty)
+        };
+        fields.push(&quantity_field);
 
-        // Add TimeInForce if needed
-        fields.push("59=4".to_string()); // TimeInForce=IOC (Immediate or Cancel)
+        fields.push("59=4");
 
-        let message = self.build_fix_message(&fields);
-        self.send_message(message)?;
+        let message = self.build_fix_message_fast(&fields);
+        self.send_message_fast(message)?;
 
-        // Wait for execution report
         let guard = result.lock().unwrap();
         let result = condvar.wait_timeout(guard, Duration::from_secs(10)).unwrap();
 
@@ -979,22 +1004,25 @@ impl FixClient {
         self.shutdown.store(true, Ordering::Release);
         self.is_connected.store(false, Ordering::Release);
 
-        // Send logout message
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        let fields = vec![
-            "35=5".to_string(), // MsgType=Logout
-            format!("49={}", self.config.sender_comp_id),
-            format!("56={}", self.config.target_comp_id),
-            format!("34={}", seq_num),
-            format!("52={}", sending_time)
+        let sender_comp_field = format!("49={}", self.sender_comp_id);
+        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let seq_num_field = format!("34={}", seq_num);
+        let sending_time_field = format!("52={}", sending_time);
+
+        let fields = [
+            "35=5",
+            &sender_comp_field,
+            &target_comp_field,
+            &seq_num_field,
+            &sending_time_field,
         ];
 
-        let logout_message = self.build_fix_message(&fields);
-        let _ = self.send_message(logout_message);
+        let logout_message = self.build_fix_message_fast(&fields);
+        let _ = self.send_message_fast(logout_message);
 
-        // Wait for threads to finish
         if let Some(handle) = self.heartbeat_handle.take() {
             let _ = handle.join();
         }

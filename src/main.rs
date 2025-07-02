@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let config = Config::from_env().context("Failed to load configuration")?;
 
     logging
-        ::init_logging(config.log_level, config.debug, &config.log_config)
+        ::init_logging(config.log_level, &config.log_config)
         .context("Failed to initialize logging")?;
 
     match command {

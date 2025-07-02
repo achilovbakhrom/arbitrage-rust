@@ -22,7 +22,7 @@ struct LogGuards {
 
 static mut LOG_GUARDS: Option<LogGuards> = None;
 
-pub fn init_logging(level: Level, debug: bool, log_config: &LogConfig) -> io::Result<()> {
+pub fn init_logging(level: Level, log_config: &LogConfig) -> io::Result<()> {
     if !log_config.directory.exists() {
         std::fs::create_dir_all(&log_config.directory).map_err(|e| {
             eprintln!("Failed to create log directory: {}", e);
@@ -64,34 +64,23 @@ pub fn init_logging(level: Level, debug: bool, log_config: &LogConfig) -> io::Re
 
     let filter = EnvFilter::from_default_env().add_directive(level_filter.into());
 
-    if debug {
-        let (console_writer, console_guard) = tracing_appender::non_blocking(io::stdout());
+    let (console_writer, console_guard) = tracing_appender::non_blocking(io::stdout());
 
-        let console_layer = fmt
-            ::layer()
-            .with_writer(console_writer)
-            .with_ansi(true)
-            .with_target(true)
-            .with_span_events(FmtSpan::CLOSE)
-            .pretty();
+    let console_layer = fmt
+        ::layer()
+        .with_writer(console_writer)
+        .with_ansi(true)
+        .with_target(true)
+        .with_span_events(FmtSpan::CLOSE)
+        .pretty();
 
-        tracing_subscriber::registry().with(filter).with(file_layer).with(console_layer).init();
+    tracing_subscriber::registry().with(filter).with(file_layer).with(console_layer).init();
 
-        unsafe {
-            LOG_GUARDS = Some(LogGuards {
-                _file_guard: file_guard,
-                _console_guard: Some(console_guard),
-            });
-        }
-    } else {
-        tracing_subscriber::registry().with(filter).with(file_layer).init();
-
-        unsafe {
-            LOG_GUARDS = Some(LogGuards {
-                _file_guard: file_guard,
-                _console_guard: None,
-            });
-        }
+    unsafe {
+        LOG_GUARDS = Some(LogGuards {
+            _file_guard: file_guard,
+            _console_guard: Some(console_guard),
+        });
     }
 
     if let Some(max_files) = log_config.max_files {
