@@ -11,7 +11,6 @@ pub struct Config {
     pub debug: bool,
     pub sbe_api_key: String,
     pub fix_api: String,
-    pub fix_secret: String,
     pub threshold: f64,
     pub depth: usize,
     pub max_triangles: usize,
@@ -32,7 +31,6 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixApiConfig {
     pub private_key_base64: String,
-    pub sender_comp_id: String,
     pub target_comp_id: String,
     pub heartbeat_interval: u32,
     pub endpoint: String,
@@ -42,7 +40,6 @@ impl Default for FixApiConfig {
     fn default() -> Self {
         Self {
             private_key_base64: String::new(),
-            sender_comp_id: "RUST_ARBITRAGE".to_string(),
             target_comp_id: "SPOT".to_string(),
             heartbeat_interval: 30,
             endpoint: "fix-oe.binance.com:9000".to_string(),
@@ -80,10 +77,6 @@ impl Config {
             .context("SBE_API_KEY environment variable not set")?;
 
         let fix_api = env::var("TAA_FIX_API").context("TAA_FIX_API environment variable not set")?;
-
-        let fix_secret = env
-            ::var("TAA_FIX_SECRET")
-            .context("TAA_FIX_SECRET environment variable not set")?;
 
         let threshold = env
             ::var("TAA_THRESHOLD")
@@ -169,10 +162,6 @@ impl Config {
             ::var("TAA_FIX_PRIVATE_KEY_BASE64")
             .unwrap_or_else(|_| String::new());
 
-        let fix_sender_comp_id = env
-            ::var("TAA_FIX_SENDER_COMP_ID")
-            .unwrap_or_else(|_| "RUST_ARBITRAGE".to_string());
-
         let fix_target_comp_id = env
             ::var("TAA_FIX_TARGET_COMP_ID")
             .unwrap_or_else(|_| "SPOT".to_string());
@@ -189,7 +178,6 @@ impl Config {
 
         let fix_config = FixApiConfig {
             private_key_base64: fix_private_key,
-            sender_comp_id: fix_sender_comp_id,
             target_comp_id: fix_target_comp_id,
             heartbeat_interval: fix_heartbeat_interval,
             endpoint: fix_endpoint,
@@ -217,7 +205,6 @@ impl Config {
             debug,
             sbe_api_key,
             fix_api,
-            fix_secret,
             threshold,
             depth,
             max_triangles,
@@ -240,7 +227,6 @@ impl Config {
         crate::exchange::fix_api::FixConfig {
             api_key: self.fix_api.clone(),
             private_key_base64: self.fix_config.private_key_base64.clone(),
-            sender_comp_id: self.fix_config.sender_comp_id.clone(),
             target_comp_id: self.fix_config.target_comp_id.clone(),
             heartbeat_interval: self.fix_config.heartbeat_interval,
             endpoint: self.fix_config.endpoint.clone(),
