@@ -89,3 +89,6 @@ echo
 echo "==================================================="
 echo "  Performance test process completed!"
 echo "==================================================="
+
+# simd optimization
+# rust compiler

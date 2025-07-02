@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
 use tracing::info;
@@ -251,7 +252,7 @@ impl ArbitrageDetector {
             )? as f32;
 
             let mut amount = self.start_amount;
-            if path_data.first_is_base_to_quote() {
+            if path_data.first_is_base_to_quote() { // ask/bid
                 amount *= first_price;
             } else {
                 amount /= first_price;
