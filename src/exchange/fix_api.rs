@@ -322,8 +322,9 @@ impl FixClient {
 
         self.send_logon_and_wait_response().context("FIX logon failed")?;
 
-        self.start_message_reader().context("Failed to start message reader")?;
         self.start_heartbeat().context("Failed to start heartbeat")?;
+
+        self.start_message_reader().context("Failed to start message reader")?;
 
         self.is_connected.store(true, Ordering::Release);
         info!("✓ FIX client connected successfully");
@@ -336,14 +337,6 @@ impl FixClient {
 
         let signature_payload_with_soh = format!(
             "A\x01{}\x01{}\x01{}\x01{}",
-            self.sender_comp_id,
-            self.config.target_comp_id,
-            seq_num,
-            sending_time
-        );
-
-        let signature_payload_direct = format!(
-            "A{}{}{}{}",
             self.sender_comp_id,
             self.config.target_comp_id,
             seq_num,
@@ -366,8 +359,6 @@ impl FixClient {
         debug!("  Signature (base64): {}", signature_base64);
         debug!("  Signature length: {}", signature_base64.len());
 
-        debug!("  Alternative payload (direct): {}", signature_payload_direct);
-
         if self.sender_comp_id.len() != 8 {
             warn!("SenderCompID length is not 8 characters: {}", self.sender_comp_id.len());
         }
@@ -382,18 +373,18 @@ impl FixClient {
         let signature_field = format!("96={}", signature_base64);
 
         let mut fields = Vec::with_capacity(12);
-        fields.push("35=A"); // MsgType=Logon
-        fields.push(&sender_comp_field); // SenderCompID
-        fields.push(&target_comp_field); // TargetCompID
-        fields.push(&seq_num_field); // MsgSeqNum
-        fields.push(&sending_time_field); // SendingTime
-        fields.push("98=0"); // EncryptMethod=None
-        fields.push(&heartbeat_field); // HeartBtInt
-        fields.push("141=Y"); // ResetSeqNumFlag=Y
-        fields.push(&api_key_field); // Username (API Key)
-        fields.push(&signature_len_field); // SecureDataLen
-        fields.push(&signature_field); // SecureData (signature)
-        fields.push("25035=1"); // AppVerID
+        fields.push("35=A");
+        fields.push(&sender_comp_field);
+        fields.push(&target_comp_field);
+        fields.push(&seq_num_field);
+        fields.push(&sending_time_field);
+        fields.push("98=0");
+        fields.push(&heartbeat_field);
+        fields.push("141=Y");
+        fields.push(&api_key_field);
+        fields.push(&signature_len_field);
+        fields.push(&signature_field);
+        fields.push("25035=1");
 
         let message = self.build_fix_message_fast(&fields);
         info!("Sending logon message ({} bytes)", message.len());
@@ -429,12 +420,8 @@ impl FixClient {
                             return Ok(());
                         }
                         "3" => {
-                            let msg1 = "Unknown reason".to_string();
-                            let msg2 = "Unknown".to_string();
-                            let reason = fields.get("58").unwrap_or(&msg1);
-                            let ref_tag = fields.get("371").unwrap_or(&msg2);
-                            let reject_code = fields.get("373").unwrap_or(&msg2);
-
+                            let msg = "Unknown".to_string();
+                            let reject_code = fields.get("373").unwrap_or(&msg);
                             error!("SOH format failed with code {}, trying direct concatenation...", reject_code);
                         }
                         "5" => {
@@ -957,9 +944,11 @@ impl FixClient {
         let side_field = format!("54={}", order.side.to_fix_side());
 
         let quantity_field = if let Some(quote_qty) = order.quote_quantity {
+            // ask
             let formatted_qty = self.format_quantity(quote_qty, order.qty_precision);
             format!("152={}", formatted_qty)
         } else {
+            // bid
             let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
             format!("38={}", formatted_qty)
         };
