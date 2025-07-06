@@ -54,7 +54,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // 1. Create orderbook
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, api_client.clone()));
     global::intern_batch(&unique_symbols);
 
@@ -62,7 +61,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         RwLock::new(FastHashMap::with_capacity(2048))
     );
 
-    // 2.Create detector
     let detector = arbitrage::detector::create_detector(
         Arc::clone(&orderbook_manager),
         triangular_paths.clone(), // this is not Arc

@@ -166,7 +166,6 @@ impl FixClient {
 
             info!("  Extracted base64 content length: {}", base64_content.len());
 
-            // Decode the PEM content
             let pem_bytes = general_purpose::STANDARD
                 .decode(&base64_content)
                 .map_err(|e| FixError::Parse(format!("Failed to decode PEM content: {}", e)))?;
@@ -177,7 +176,6 @@ impl FixClient {
             return Self::extract_ed25519_from_pkcs8(&pem_bytes);
         }
 
-        // Try different key lengths
         if key_bytes.len() == 32 {
             info!("  Trying as raw 32-byte Ed25519 key");
             let key_array: [u8; 32] = key_bytes
@@ -186,7 +184,6 @@ impl FixClient {
             return Ok(SigningKey::from_bytes(&key_array));
         } else if key_bytes.len() == 44 {
             info!("  Trying as 44-byte base64 encoded raw key");
-            // This might be a base64 encoded 32-byte key
             let decoded = general_purpose::STANDARD
                 .decode(key_bytes)
                 .map_err(|e| FixError::Parse(format!("Failed to decode 44-byte key: {}", e)))?;
@@ -209,10 +206,7 @@ impl FixClient {
     fn extract_ed25519_from_pkcs8(pkcs8_bytes: &[u8]) -> Result<SigningKey> {
         info!("  Extracting Ed25519 key from PKCS#8 format");
 
-        // PKCS#8 Ed25519 private key structure:
-        // The actual 32-byte key is typically at the end
         if pkcs8_bytes.len() >= 32 {
-            // Try the last 32 bytes first (most common case)
             let key_start = pkcs8_bytes.len() - 32;
             let key_slice: [u8; 32] = pkcs8_bytes[key_start..]
                 .try_into()
