@@ -157,6 +157,7 @@ fn create_fix_executor(
 
                 let executor_arc = Arc::new(executor);
                 info!("✅ FIX executor connected successfully for test execution");
+
                 Ok(Some(executor_arc))
             }
             Err(e) => {
