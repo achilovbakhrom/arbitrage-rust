@@ -395,12 +395,8 @@ impl FixClient {
 
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
-        let mut attempts = 0;
 
-        while start_time.elapsed() < timeout && attempts < 3 {
-            attempts += 1;
-            info!("Reading response attempt {}...", attempts);
-
+        while start_time.elapsed() < timeout {
             match self.read_fix_message_fast() {
                 Ok(response) => {
                     info!("Received response: {}", response.replace('\x01', "|"));
@@ -436,8 +432,6 @@ impl FixClient {
                     }
                 }
                 Err(e) => {
-                    error!("Error reading logon response (attempt {}): {}", attempts, e);
-
                     if
                         e.to_string().contains("Connection closed") ||
                         e.to_string().contains("UnexpectedEof")
@@ -450,11 +444,7 @@ impl FixClient {
                         );
                     }
 
-                    if attempts >= 3 {
-                        return Err(e);
-                    }
-
-                    thread::sleep(Duration::from_millis(500));
+                    return Err(e);
                 }
             }
         }
@@ -480,8 +470,10 @@ impl FixClient {
 
     #[inline]
     fn send_message_fast(&self, message: String) -> Result<()> {
+        debug!("sending");
         let mut stream_guard = self.stream.lock();
         if let Some(ref mut stream) = *stream_guard {
+            debug!("right before the sending...");
             stream.write_all(message.as_bytes())?;
             stream.flush()?;
             debug!("Sent FIX message: {}", message.replace('\x01', "|"));
@@ -637,6 +629,7 @@ impl FixClient {
                 }
                 Ok(_) => {}
                 Err(e) => {
+                    debug!("error---- {}", e);
                     return Err(FixError::Connection(e).into());
                 }
             }
@@ -703,7 +696,6 @@ impl FixClient {
         pending_orders: &Arc<Mutex<HashMap<String, OrderExecution>>>
     ) -> Result<()> {
         let fields = Self::parse_fix_message_fast(message);
-        debug!("Received FIX message: {}", message.replace('\x01', "|"));
 
         match fields.get("35").map(|s| s.as_str()) {
             Some("A") => {
@@ -803,7 +795,7 @@ impl FixClient {
         let last_qty = parse_float("32");
 
         if let Some(text) = fields.get("58") {
-            if !text.is_empty() && order_status != "2" && order_status != "FILLED" {
+            if !text.is_empty() && order_status != "2" && order_status != "NEW" {
                 warn!("Order execution message: {}", text);
             }
         }
@@ -964,7 +956,6 @@ impl FixClient {
         fields.push("40=1");
         fields.push(&side_field);
         fields.push(&symbol_field);
-        // fields.push("59=4");
 
         let message = self.build_fix_message_fast(&fields);
         self.send_message_fast(message)?;
@@ -972,9 +963,11 @@ impl FixClient {
         let guard = result.lock().unwrap();
         let result = condvar.wait_timeout(guard, Duration::from_secs(10)).unwrap();
 
+        debug!("exec result {:?}", result.0);
+
         match result.0.clone() {
             Some(exec_result) => {
-                if exec_result.order_status == "FILLED" || exec_result.order_status == "2" {
+                if exec_result.order_status == "NEW" || exec_result.order_status == "2" {
                     Ok(exec_result)
                 } else {
                     Err(

@@ -112,7 +112,7 @@ fn create_single_test_opportunity(
     symbol_map: &Arc<crate::models::symbol_map::SymbolMap>,
     config: &Config
 ) -> Result<ArbitrageOpportunity> {
-    let test_path = ("BTCUSDT", "ETHBTC", "ETHUSDT", false, true, true);
+    let test_path = ("BTCUSDT", "ETHBTC", "ETHUSDT", false, false, true);
     let (first_symbol, second_symbol, third_symbol, first_dir, second_dir, third_dir) = test_path;
 
     if
