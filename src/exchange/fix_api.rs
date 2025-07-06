@@ -20,6 +20,9 @@ pub enum FixError {
     #[error("Parse error: {0}")] Parse(String),
     #[error("Authentication error: {0}")] Auth(String),
     #[error("Order execution error: {0}")] Execution(String),
+    #[error("Rate limit exceeded")]
+    RateLimit,
+    #[error("Order rejected: {0}")] OrderRejected(String),
     #[error("Timeout error")]
     Timeout,
 }
@@ -60,6 +63,7 @@ pub struct ExecutionResult {
     pub last_px: f64,
     pub last_qty: f64,
     pub execution_time: Duration,
+    pub reject_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -100,6 +104,29 @@ pub struct SymbolPrecision {
     pub price_precision: u8,
 }
 
+struct RateLimiter {
+    last_request: Instant,
+    min_interval: Duration,
+}
+
+impl RateLimiter {
+    fn new(requests_per_second: f64) -> Self {
+        Self {
+            last_request: Instant::now() - Duration::from_secs(1),
+            min_interval: Duration::from_nanos((1_000_000_000.0 / requests_per_second) as u64),
+        }
+    }
+
+    fn wait_if_needed(&mut self) {
+        let elapsed = self.last_request.elapsed();
+        if elapsed < self.min_interval {
+            let wait_time = self.min_interval - elapsed;
+            thread::sleep(wait_time);
+        }
+        self.last_request = Instant::now();
+    }
+}
+
 pub struct FixClient {
     config: FixConfig,
     sender_comp_id: String,
@@ -112,6 +139,8 @@ pub struct FixClient {
     heartbeat_handle: Option<thread::JoinHandle<()>>,
     symbol_precisions: Arc<Mutex<HashMap<String, SymbolPrecision>>>,
     stream: Arc<Mutex<Option<TlsStream<TcpStream>>>>,
+    rate_limiter: Arc<Mutex<RateLimiter>>,
+    last_test_request_time: Arc<Mutex<Instant>>,
 }
 
 impl FixClient {
@@ -134,6 +163,8 @@ impl FixClient {
             heartbeat_handle: None,
             symbol_precisions: Arc::new(Mutex::new(HashMap::with_capacity(256))),
             stream: Arc::new(Mutex::new(None)),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(2.0))),
+            last_test_request_time: Arc::new(Mutex::new(Instant::now())),
         })
     }
 
@@ -141,7 +172,6 @@ impl FixClient {
     fn parse_ed25519_key(key_bytes: &[u8]) -> Result<SigningKey> {
         info!("Debugging private key format:");
         info!("  Key bytes length: {}", key_bytes.len());
-        info!("  First 16 bytes: {:?}", &key_bytes[..(16).min(key_bytes.len())]);
 
         let key_str = String::from_utf8_lossy(key_bytes);
         if key_str.contains("-----BEGIN PRIVATE KEY-----") {
@@ -164,38 +194,19 @@ impl FixClient {
                 }
             }
 
-            info!("  Extracted base64 content length: {}", base64_content.len());
-
             let pem_bytes = general_purpose::STANDARD
                 .decode(&base64_content)
                 .map_err(|e| FixError::Parse(format!("Failed to decode PEM content: {}", e)))?;
-
-            info!("  PEM decoded bytes length: {}", pem_bytes.len());
-            info!("  PEM decoded first 16 bytes: {:?}", &pem_bytes[..(16).min(pem_bytes.len())]);
 
             return Self::extract_ed25519_from_pkcs8(&pem_bytes);
         }
 
         if key_bytes.len() == 32 {
-            info!("  Trying as raw 32-byte Ed25519 key");
             let key_array: [u8; 32] = key_bytes
                 .try_into()
                 .map_err(|_| FixError::Parse("Invalid 32-byte key".to_string()))?;
             return Ok(SigningKey::from_bytes(&key_array));
-        } else if key_bytes.len() == 44 {
-            info!("  Trying as 44-byte base64 encoded raw key");
-            let decoded = general_purpose::STANDARD
-                .decode(key_bytes)
-                .map_err(|e| FixError::Parse(format!("Failed to decode 44-byte key: {}", e)))?;
-
-            if decoded.len() == 32 {
-                let key_array: [u8; 32] = decoded
-                    .try_into()
-                    .map_err(|_| FixError::Parse("Invalid decoded 32-byte key".to_string()))?;
-                return Ok(SigningKey::from_bytes(&key_array));
-            }
         } else if key_bytes.len() > 32 {
-            info!("  Trying as PKCS#8 format");
             return Self::extract_ed25519_from_pkcs8(key_bytes);
         }
 
@@ -204,16 +215,11 @@ impl FixClient {
 
     #[inline]
     fn extract_ed25519_from_pkcs8(pkcs8_bytes: &[u8]) -> Result<SigningKey> {
-        info!("  Extracting Ed25519 key from PKCS#8 format");
-
         if pkcs8_bytes.len() >= 32 {
             let key_start = pkcs8_bytes.len() - 32;
             let key_slice: [u8; 32] = pkcs8_bytes[key_start..]
                 .try_into()
                 .map_err(|_| FixError::Parse("Invalid PKCS#8 key extraction".to_string()))?;
-
-            info!("  Extracted 32 bytes from position {}", key_start);
-            info!("  Extracted key bytes: {:?}", &key_slice[..8]);
 
             Ok(SigningKey::from_bytes(&key_slice))
         } else {
@@ -238,66 +244,8 @@ impl FixClient {
         }
     }
 
-    pub fn validate_credentials(&self) -> Result<()> {
-        info!("Validating FIX credentials...");
-
-        if self.config.api_key.is_empty() {
-            return Err(FixError::Auth("API key is empty".to_string()).into());
-        }
-
-        if self.config.api_key.len() < 8 {
-            return Err(FixError::Auth("API key appears to be too short".to_string()).into());
-        }
-
-        if self.config.private_key_base64.is_empty() {
-            return Err(FixError::Auth("Private key is empty".to_string()).into());
-        }
-
-        let key_bytes = general_purpose::STANDARD
-            .decode(&self.config.private_key_base64)
-            .map_err(|e| FixError::Auth(format!("Invalid base64 private key: {}", e)))?;
-
-        if key_bytes.len() < 32 {
-            return Err(
-                FixError::Auth(format!("Private key too short: {} bytes", key_bytes.len())).into()
-            );
-        }
-
-        info!("✓ Credentials format validation passed");
-        info!("  API Key: {}... ({} chars)", &self.config.api_key[..8], self.config.api_key.len());
-        info!("  Private Key: {} bytes", key_bytes.len());
-
-        Ok(())
-    }
-
-    pub fn test_tcp_connection(&self) -> Result<()> {
-        info!("Testing TCP connection to {}...", self.config.endpoint);
-
-        let tcp_stream = TcpStream::connect(&self.config.endpoint).context(
-            "Failed to establish TCP connection"
-        )?;
-
-        tcp_stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        tcp_stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-
-        info!("✓ TCP connection successful");
-
-        info!("Testing TLS handshake...");
-        let connector = TlsConnector::new()?;
-        let domain = self.config.endpoint.split(':').next().unwrap();
-        let _tls_stream = connector.connect(domain, tcp_stream).context("TLS handshake failed")?;
-
-        info!("✓ TLS handshake successful");
-        Ok(())
-    }
-
     pub fn connect(&mut self) -> Result<()> {
         info!("Starting FIX connection process...");
-
-        self.validate_credentials().context("Credential validation failed")?;
-        self.test_tcp_connection().context("Network connectivity test failed")?;
-
-        info!("Establishing FIX connection to {}...", self.config.endpoint);
 
         let connector = TlsConnector::new()?;
         let tcp_stream = TcpStream::connect(&self.config.endpoint).context(
@@ -314,11 +262,9 @@ impl FixClient {
         info!("✓ TLS connection established");
         *self.stream.lock() = Some(tls_stream);
 
-        self.send_logon_and_wait_response().context("FIX logon failed")?;
-
-        self.start_heartbeat().context("Failed to start heartbeat")?;
-
-        self.start_message_reader().context("Failed to start message reader")?;
+        self.send_logon_and_wait_response()?;
+        self.start_heartbeat()?;
+        self.start_message_reader()?;
 
         self.is_connected.store(true, Ordering::Release);
         info!("✓ FIX client connected successfully");
@@ -329,7 +275,7 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        let signature_payload_with_soh = format!(
+        let signature_payload = format!(
             "A\x01{}\x01{}\x01{}\x01{}",
             self.sender_comp_id,
             self.config.target_comp_id,
@@ -337,25 +283,8 @@ impl FixClient {
             sending_time
         );
 
-        let signature_payload = signature_payload_with_soh;
-
         let signature: Signature = self.signing_key.sign(signature_payload.as_bytes());
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
-
-        info!("Logon details:");
-        info!("  API Key: {}...", &self.config.api_key[..(8).min(self.config.api_key.len())]);
-        info!("  SenderCompID: {}", self.sender_comp_id);
-        info!("  TargetCompID: {}", self.config.target_comp_id);
-        info!("  Sequence: {}", seq_num);
-        info!("  SendingTime: {}", sending_time);
-        info!("  Using signature format: WITH SOH separators");
-        debug!("  Signature payload: {}", signature_payload.replace('\x01', "|"));
-        debug!("  Signature (base64): {}", signature_base64);
-        debug!("  Signature length: {}", signature_base64.len());
-
-        if self.sender_comp_id.len() != 8 {
-            warn!("SenderCompID length is not 8 characters: {}", self.sender_comp_id.len());
-        }
 
         let sender_comp_field = format!("49={}", self.sender_comp_id);
         let target_comp_field = format!("56={}", self.config.target_comp_id);
@@ -381,11 +310,7 @@ impl FixClient {
         fields.push("25035=1");
 
         let message = self.build_fix_message_fast(&fields);
-        info!("Sending logon message ({} bytes)", message.len());
-        debug!("Logon message: {}", message.replace('\x01', "|"));
-
         self.send_message_fast(message)?;
-        info!("Logon message sent, waiting for response...");
 
         let start_time = Instant::now();
         let timeout = Duration::from_secs(15);
@@ -393,26 +318,20 @@ impl FixClient {
         while start_time.elapsed() < timeout {
             match self.read_fix_message_fast() {
                 Ok(response) => {
-                    info!("Received response: {}", response.replace('\x01', "|"));
-
                     let fields = Self::parse_fix_message_fast(&response);
                     let msg_type = fields.get("35").unwrap_or(&"Unknown".to_string()).clone();
 
                     match msg_type.as_str() {
                         "A" => {
-                            if let Some(text) = fields.get("58") {
-                                if !text.is_empty() {
-                                    info!("Logon response text: {}", text);
-                                }
-                            }
-
-                            info!("✓ FIX logon successful with SOH format");
+                            info!("✓ FIX logon successful");
                             return Ok(());
                         }
                         "3" => {
                             let msg = "Unknown".to_string();
                             let reject_code = fields.get("373").unwrap_or(&msg);
-                            error!("SOH format failed with code {}, trying direct concatenation...", reject_code);
+                            return Err(
+                                FixError::Auth(format!("Logon rejected: {}", reject_code)).into()
+                            );
                         }
                         "5" => {
                             let msg = "Server initiated logout".to_string();
@@ -420,30 +339,138 @@ impl FixClient {
                             return Err(FixError::Auth(format!("Server logout: {}", reason)).into());
                         }
                         _ => {
-                            warn!("Received unexpected message type {} during logon", msg_type);
                             continue;
                         }
                     }
                 }
-                Err(e) => {
-                    if
-                        e.to_string().contains("Connection closed") ||
-                        e.to_string().contains("UnexpectedEof")
-                    {
-                        return Err(
-                            FixError::Auth(
-                                "Server closed connection during logon - possible authentication failure, \
-                             IP not whitelisted, or insufficient API permissions".to_string()
-                            ).into()
-                        );
-                    }
-
-                    return Err(e);
-                }
+                Err(_) => thread::sleep(Duration::from_millis(100)),
             }
         }
 
         Err(FixError::Auth("Timeout waiting for logon response".to_string()).into())
+    }
+
+    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
+        {
+            let mut rate_limiter = self.rate_limiter.lock();
+            rate_limiter.wait_if_needed();
+        }
+
+        let client_order_id = format!(
+            "{}_{}",
+            self.sender_comp_id,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        );
+
+        let result = Arc::new(StdMutex::new(None));
+        let condvar = Arc::new(Condvar::new());
+
+        let order_exec = OrderExecution {
+            result: result.clone(),
+            condvar: condvar.clone(),
+            start_time: Instant::now(),
+        };
+
+        {
+            let mut pending = self.pending_orders.lock();
+            pending.insert(client_order_id.clone(), order_exec);
+        }
+
+        let mut order = order;
+        if order.qty_precision.is_none() {
+            let cache = self.symbol_precisions.lock();
+            if let Some(precision_info) = cache.get(&order.symbol) {
+                order.qty_precision = Some(precision_info.qty_precision);
+                order.price_precision = Some(precision_info.price_precision);
+            }
+        }
+
+        let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
+        let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
+
+        let seq_num_field = format!("34={}", seq_num);
+        let sender_comp_field = format!("49={}", self.sender_comp_id);
+        let sending_time_field = format!("52={}", sending_time);
+        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let client_order_id_field = format!("11={}", client_order_id);
+        let symbol_field = format!("55={}", order.symbol.to_uppercase());
+        let side_field = format!("54={}", order.side.to_fix_side());
+
+        let quantity_field = if let Some(quote_qty) = order.quote_quantity {
+            let formatted_qty = self.format_quantity(quote_qty, order.price_precision);
+            format!("152={}", formatted_qty)
+        } else {
+            let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
+            format!("38={}", formatted_qty)
+        };
+
+        let mut fields = Vec::with_capacity(10);
+        fields.push("35=D");
+        fields.push(&seq_num_field);
+        fields.push(&sender_comp_field);
+        fields.push(&sending_time_field);
+        fields.push(&target_comp_field);
+        fields.push(&client_order_id_field);
+        fields.push(&quantity_field);
+        fields.push("40=1");
+        fields.push(&side_field);
+        fields.push(&symbol_field);
+
+        let message = self.build_fix_message_fast(&fields);
+        info!("Sending order: {} {} {}", order.side.to_fix_side(), order.symbol, if
+            order.quote_quantity.is_some()
+        {
+            order.quote_quantity.unwrap()
+        } else {
+            order.quantity
+        });
+
+        self.send_message_fast(message)?;
+
+        let guard = result.lock().unwrap();
+        let (result_guard, timeout_result) = condvar
+            .wait_timeout(guard, Duration::from_secs(30))
+            .unwrap();
+
+        if timeout_result.timed_out() {
+            self.pending_orders.lock().remove(&client_order_id);
+            return Err(FixError::Timeout.into());
+        }
+
+        match result_guard.clone() {
+            Some(exec_result) => {
+                if exec_result.reject_reason.is_some() {
+                    return Err(
+                        FixError::OrderRejected(
+                            exec_result.reject_reason.unwrap_or_default()
+                        ).into()
+                    );
+                }
+
+                if exec_result.order_status == "NEW" || exec_result.order_status == "2" {
+                    info!(
+                        "Order is completed: {} {} @ {:.8}",
+                        exec_result.symbol,
+                        exec_result.filled_qty,
+                        exec_result.avg_price
+                    );
+                    Ok(exec_result)
+                } else if exec_result.order_status == "REJECTED" || exec_result.order_status == "8" {
+                    Err(
+                        FixError::OrderRejected(
+                            format!("Order rejected: {}", exec_result.order_status)
+                        ).into()
+                    )
+                } else {
+                    Err(
+                        FixError::Execution(
+                            format!("Order not filled: {}", exec_result.order_status)
+                        ).into()
+                    )
+                }
+            }
+            None => Err(FixError::Timeout.into()),
+        }
     }
 
     #[inline]
@@ -458,16 +485,13 @@ impl FixClient {
         let message_without_checksum = header + &body;
 
         let checksum = message_without_checksum.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
-
         format!("{}10={:03}\x01", message_without_checksum, checksum)
     }
 
     #[inline]
     fn send_message_fast(&self, message: String) -> Result<()> {
-        debug!("sending");
         let mut stream_guard = self.stream.lock();
         if let Some(ref mut stream) = *stream_guard {
-            debug!("right before the sending...");
             stream.write_all(message.as_bytes())?;
             stream.flush()?;
             debug!("Sent FIX message: {}", message.replace('\x01', "|"));
@@ -488,15 +512,15 @@ impl FixClient {
                         FixError::Connection(
                             std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,
-                                "Connection closed while reading BeginString"
+                                "Connection closed"
                             )
                         ).into()
                     );
                 }
-                Ok(_) => {}
                 Err(e) => {
                     return Err(FixError::Connection(e).into());
                 }
+                _ => {}
             }
 
             let begin_string = String::from_utf8_lossy(&begin_buffer);
@@ -508,15 +532,15 @@ impl FixClient {
                         FixError::Connection(
                             std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,
-                                "Connection closed while reading BodyLength"
+                                "Connection closed"
                             )
                         ).into()
                     );
                 }
-                Ok(_) => {}
                 Err(e) => {
                     return Err(FixError::Connection(e).into());
                 }
+                _ => {}
             }
 
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
@@ -524,31 +548,17 @@ impl FixClient {
             if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
                 if let Ok(body_length) = length_part.parse::<usize>() {
                     let mut body_buffer = vec![0u8; body_length + 7];
-                    match reader.read_exact(&mut body_buffer) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!(
-                                "Failed to read message body: expected {} bytes, error: {}",
-                                body_length + 7,
-                                e
-                            );
-                            return Err(FixError::Connection(e).into());
-                        }
-                    }
+                    reader.read_exact(&mut body_buffer)?;
 
                     let full_message =
                         begin_string.to_string() +
                         &body_length_field +
                         &String::from_utf8_lossy(&body_buffer);
-                    return Ok(full_message.replace('\n', ""));
+                    return Ok(full_message);
                 }
             }
 
-            Err(
-                FixError::Parse(
-                    format!("Could not parse BodyLength from: {}", body_length_field)
-                ).into()
-            )
+            Err(FixError::Parse("Could not parse message".to_string()).into())
         } else {
             Err(
                 FixError::Connection(
@@ -588,12 +598,6 @@ impl FixClient {
                 }
                 Err(e) => {
                     error!("Error reading message: {}", e);
-
-                    if let Some(FixError::Connection(_)) = e.downcast_ref::<FixError>() {
-                        error!("Connection lost, stopping message reader");
-                        break;
-                    }
-
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -610,58 +614,17 @@ impl FixClient {
             let mut reader = BufReader::with_capacity(8192, stream);
 
             let mut begin_buffer = Vec::with_capacity(16);
-            match reader.read_until(0x01, &mut begin_buffer) {
-                Ok(0) => {
-                    return Err(
-                        FixError::Connection(
-                            std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Connection closed while reading BeginString"
-                            )
-                        ).into()
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    debug!("error---- {}", e);
-                    return Err(FixError::Connection(e).into());
-                }
-            }
+            reader.read_until(0x01, &mut begin_buffer)?;
             let begin_string = String::from_utf8_lossy(&begin_buffer);
 
             let mut body_length_buffer = Vec::with_capacity(16);
-            match reader.read_until(0x01, &mut body_length_buffer) {
-                Ok(0) => {
-                    return Err(
-                        FixError::Connection(
-                            std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Connection closed while reading BodyLength"
-                            )
-                        ).into()
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(FixError::Connection(e).into());
-                }
-            }
+            reader.read_until(0x01, &mut body_length_buffer)?;
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
 
             if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
                 if let Ok(body_length) = length_part.parse::<usize>() {
                     let mut body_buffer = vec![0u8; body_length + 7];
-                    match reader.read_exact(&mut body_buffer) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!(
-                                "Failed to read message body: expected {} bytes, error: {}",
-                                body_length + 7,
-                                e
-                            );
-                            return Err(FixError::Connection(e).into());
-                        }
-                    }
+                    reader.read_exact(&mut body_buffer)?;
 
                     let full_message =
                         begin_string.to_string() +
@@ -671,11 +634,7 @@ impl FixClient {
                 }
             }
 
-            Err(
-                FixError::Parse(
-                    format!("Could not parse BodyLength from: {}", body_length_field)
-                ).into()
-            )
+            Err(FixError::Parse("Could not parse message".to_string()).into())
         } else {
             Err(
                 FixError::Connection(
@@ -712,10 +671,18 @@ impl FixClient {
                     }
                 }
             }
-            Some("1") => {
-                if let Some(test_req_id) = fields.get("112") {
-                    debug!("Received Test Request: {}", test_req_id);
+            Some("9") => {
+                if let Some(reject_reason) = fields.get("58") {
+                    error!("Order Cancel Reject: {}", reject_reason);
                 }
+            }
+            Some("3") => {
+                if let Some(reject_reason) = fields.get("58") {
+                    error!("Session Reject: {}", reject_reason);
+                }
+            }
+            Some("1") => {
+                debug!("Received Test Request");
             }
             Some("0") => {
                 debug!("Received Heartbeat");
@@ -788,11 +755,11 @@ impl FixClient {
         let last_px = parse_float("31");
         let last_qty = parse_float("32");
 
-        if let Some(text) = fields.get("58") {
-            if !text.is_empty() && order_status != "2" && order_status != "NEW" {
-                warn!("Order execution message: {}", text);
-            }
-        }
+        let reject_reason = if order_status == "8" || exec_type == "8" {
+            fields.get("58").cloned()
+        } else {
+            None
+        };
 
         Ok(
             Some(ExecutionResult {
@@ -827,6 +794,7 @@ impl FixClient {
                 last_px,
                 last_qty,
                 execution_time: Duration::ZERO,
+                reject_reason,
             })
         )
     }
@@ -878,7 +846,6 @@ impl FixClient {
                         error!("Failed to flush heartbeat: {}", e);
                         break;
                     }
-                    debug!("Sent heartbeat");
                     seq += 1;
                 }
             }
@@ -888,94 +855,9 @@ impl FixClient {
         Ok(())
     }
 
-    pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
-        let client_order_id = format!(
-            "{}_{}",
-            self.sender_comp_id,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        );
-
-        let result = Arc::new(StdMutex::new(None));
-        let condvar = Arc::new(Condvar::new());
-
-        let order_exec = OrderExecution {
-            result: result.clone(),
-            condvar: condvar.clone(),
-            start_time: Instant::now(),
-        };
-
-        {
-            let mut pending = self.pending_orders.lock();
-            pending.insert(client_order_id.clone(), order_exec);
-        }
-
-        let mut order = order;
-        if order.qty_precision.is_none() {
-            let cache = self.symbol_precisions.lock();
-            if let Some(precision_info) = cache.get(&order.symbol) {
-                order.qty_precision = Some(precision_info.qty_precision);
-                order.price_precision = Some(precision_info.price_precision);
-            }
-        }
-
-        let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
-        let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
-
-        let seq_num_field = format!("34={}", seq_num);
-        let sender_comp_field = format!("49={}", self.sender_comp_id);
-        let sending_time_field = format!("52={}", sending_time);
-        let target_comp_field = format!("56={}", self.config.target_comp_id);
-        let client_order_id_field = format!("11={}", client_order_id);
-        let symbol_field = format!("55={}", order.symbol.to_uppercase());
-        let side_field = format!("54={}", order.side.to_fix_side());
-
-        let quantity_field = if let Some(quote_qty) = order.quote_quantity {
-            // ask
-            let formatted_qty = self.format_quantity(quote_qty, order.qty_precision);
-            format!("152={}", formatted_qty)
-        } else {
-            // bid
-            let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
-            format!("38={}", formatted_qty)
-        };
-
-        let mut fields = Vec::with_capacity(10);
-        fields.push("35=D");
-        fields.push(&seq_num_field);
-        fields.push(&sender_comp_field);
-        fields.push(&sending_time_field);
-        fields.push(&target_comp_field);
-        fields.push(&client_order_id_field);
-        fields.push(&quantity_field);
-        fields.push("40=1");
-        fields.push(&side_field);
-        fields.push(&symbol_field);
-
-        let message = self.build_fix_message_fast(&fields);
-        self.send_message_fast(message)?;
-
-        let guard = result.lock().unwrap();
-        let result = condvar.wait_timeout(guard, Duration::from_secs(10)).unwrap();
-
-        debug!("exec result {:?}", result.0);
-
-        match result.0.clone() {
-            Some(exec_result) => {
-                if exec_result.order_status == "NEW" || exec_result.order_status == "2" {
-                    Ok(exec_result)
-                } else {
-                    Err(
-                        FixError::Execution(
-                            format!("Order not filled: {}", exec_result.order_status)
-                        ).into()
-                    )
-                }
-            }
-            None => Err(FixError::Timeout.into()),
-        }
-    }
-
     pub fn disconnect(&mut self) -> Result<()> {
+        info!("Initiating graceful FIX disconnect...");
+
         self.shutdown.store(true, Ordering::Release);
         self.is_connected.store(false, Ordering::Release);
 
@@ -996,7 +878,13 @@ impl FixClient {
         ];
 
         let logout_message = self.build_fix_message_fast(&fields);
-        let _ = self.send_message_fast(logout_message);
+        if let Err(e) = self.send_message_fast(logout_message) {
+            warn!("Failed to send logout message: {}", e);
+        } else {
+            info!("Logout message sent");
+        }
+
+        thread::sleep(Duration::from_millis(500));
 
         if let Some(handle) = self.heartbeat_handle.take() {
             let _ = handle.join();
@@ -1005,7 +893,18 @@ impl FixClient {
             let _ = handle.join();
         }
 
-        info!("FIX client disconnected");
+        {
+            let mut stream_guard = self.stream.lock();
+            if let Some(stream) = stream_guard.take() {
+                drop(stream);
+            }
+        }
+
+        info!("FIX client disconnected gracefully");
         Ok(())
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.is_connected.load(Ordering::Relaxed)
     }
 }

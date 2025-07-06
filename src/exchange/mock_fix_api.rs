@@ -119,6 +119,7 @@ impl MockFixClient {
             last_px: avg_price,
             last_qty: filled_qty,
             execution_time: start_time.elapsed(),
+            reject_reason: Some("".to_string()),
         })
     }
 }
