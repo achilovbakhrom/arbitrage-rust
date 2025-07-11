@@ -38,7 +38,7 @@ pub fn deserialize_level<'de, D>(deserializer: D) -> Result<Level, D::Error>
                 "info" => Ok(Level::INFO),
                 "warn" => Ok(Level::WARN),
                 "error" => Ok(Level::ERROR),
-                _ => Err(E::custom(format!("unknown log level: {}", value))),
+                _ => Err(E::custom(format!("unknown log level: {value}"))),
             }
         }
     }

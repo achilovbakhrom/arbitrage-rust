@@ -707,10 +707,8 @@ impl FixClient {
                 }
                 Err(e) => {
                     error!("Error reading message: {}", e);
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(100));
+
+                    break;
                 }
             }
         }

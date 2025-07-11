@@ -25,7 +25,7 @@ static mut LOG_GUARDS: Option<LogGuards> = None;
 pub fn init_logging(level: Level, log_config: &LogConfig) -> io::Result<()> {
     if !log_config.directory.exists() {
         std::fs::create_dir_all(&log_config.directory).map_err(|e| {
-            eprintln!("Failed to create log directory: {}", e);
+            eprintln!("Failed to create log directory: {e}");
             e
         })?;
     }
@@ -91,7 +91,7 @@ pub fn init_logging(level: Level, log_config: &LogConfig) -> io::Result<()> {
                 max_files
             )
         {
-            eprintln!("Failed to clean up old log files: {}", e);
+            eprintln!("Failed to clean up old log files: {e}");
         }
     }
 
