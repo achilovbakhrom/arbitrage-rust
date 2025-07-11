@@ -96,6 +96,7 @@ struct OrderExecution {
     result: Arc<StdMutex<Option<ExecutionResult>>>,
     condvar: Arc<Condvar>,
     start_time: Instant,
+    completed: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,12 +175,12 @@ impl FixClient {
 
     #[inline]
     fn parse_ed25519_key(key_bytes: &[u8]) -> Result<SigningKey> {
-        info!("Debugging private key format:");
-        info!("  Key bytes length: {}", key_bytes.len());
+        debug!("Parsing private key format:");
+        debug!("  Key bytes length: {}", key_bytes.len());
 
         let key_str = String::from_utf8_lossy(key_bytes);
         if key_str.contains("-----BEGIN PRIVATE KEY-----") {
-            info!("  Detected PEM format, extracting key data...");
+            debug!("  Detected PEM format, extracting key data...");
 
             let lines: Vec<&str> = key_str.lines().collect();
             let mut base64_content = String::new();
@@ -257,7 +258,7 @@ impl FixClient {
         )?;
 
         tcp_stream.set_nodelay(true)?;
-        tcp_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        tcp_stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         tcp_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
         let domain = self.config.endpoint.split(':').next().unwrap();
@@ -368,11 +369,13 @@ impl FixClient {
 
         let result = Arc::new(StdMutex::new(None));
         let condvar = Arc::new(Condvar::new());
+        let completed = Arc::new(AtomicBool::new(false));
 
         let order_exec = OrderExecution {
             result: result.clone(),
             condvar: condvar.clone(),
             start_time: Instant::now(),
+            completed: completed.clone(),
         };
 
         {
@@ -431,120 +434,62 @@ impl FixClient {
 
         self.send_message_fast(message)?;
 
-        // Wait for order completion in a loop
         let timeout = Duration::from_secs(30);
         let start_time = Instant::now();
 
-        loop {
-            let guard = result.lock().unwrap();
-            let (result_guard, timeout_result) = condvar
-                .wait_timeout(guard, Duration::from_secs(5))
-                .unwrap();
+        info!("⏳ Waiting for order placement confirmation...");
 
-            // Check for overall timeout
+        loop {
             if start_time.elapsed() > timeout {
                 self.pending_orders.lock().remove(&client_order_id);
                 return Err(FixError::Timeout.into());
             }
 
-            if timeout_result.timed_out() {
-                continue; // Keep waiting, no execution report received yet
+            if completed.load(Ordering::Relaxed) {
+                let guard = result.lock().unwrap();
+                if let Some(exec_result) = guard.clone() {
+                    return Ok(exec_result);
+                }
             }
 
-            match result_guard.clone() {
-                Some(exec_result) => {
-                    info!(
-                        "Received ExecutionReport: Status={}, ExecType={}, FilledQty={}, LeavesQty={}",
-                        exec_result.order_status,
-                        exec_result.exec_type,
-                        exec_result.filled_qty,
-                        exec_result.leaves_qty
+            let guard = result.lock().unwrap();
+            let (result_guard, timeout_result) = condvar
+                .wait_timeout(guard, Duration::from_secs(2))
+                .unwrap();
+
+            if timeout_result.timed_out() {
+                continue;
+            }
+
+            if let Some(exec_result) = result_guard.clone() {
+                info!(
+                    "📨 Received ExecutionReport: Status={}, ExecType={}",
+                    exec_result.order_status,
+                    exec_result.exec_type
+                );
+
+                if exec_result.order_status == "REJECTED" || exec_result.exec_type == "REJECTED" {
+                    self.pending_orders.lock().remove(&client_order_id);
+                    return Err(
+                        FixError::OrderRejected(
+                            exec_result.reject_reason.unwrap_or("Order rejected".to_string())
+                        ).into()
                     );
-
-                    // Check for rejection first
-                    if
-                        exec_result.order_status == "REJECTED" ||
-                        exec_result.exec_type == "REJECTED"
-                    {
-                        return Err(
-                            FixError::OrderRejected(
-                                exec_result.reject_reason.unwrap_or("Order rejected".to_string())
-                            ).into()
-                        );
-                    }
-
-                    // Wait for FILLED status or check if fully filled
-                    if
-                        exec_result.order_status == "FILLED" ||
-                        (exec_result.leaves_qty == 0.0 && exec_result.filled_qty > 0.0)
-                    {
-                        info!(
-                            "✅ Order completed: {} {} @ {:.8} (Total: {:.8})",
-                            exec_result.symbol,
-                            exec_result.filled_qty,
-                            exec_result.avg_price,
-                            exec_result.cum_quote_qty
-                        );
-                        return Ok(exec_result);
-                    }
-
-                    // For NEW or PARTIALLY_FILLED, continue waiting
-                    if exec_result.order_status == "NEW" {
-                        info!("📝 Order accepted, waiting for fills...");
-                        // Reset the result and continue waiting
-                        {
-                            let mut guard = result.lock().unwrap();
-                            *guard = None;
-                        }
-                        continue;
-                    }
-
-                    if exec_result.order_status == "PARTIALLY_FILLED" {
-                        info!(
-                            "🔄 Partial fill: {}/{} filled",
-                            exec_result.filled_qty,
-                            exec_result.filled_qty + exec_result.leaves_qty
-                        );
-                        // Reset the result and continue waiting
-                        {
-                            let mut guard = result.lock().unwrap();
-                            *guard = None;
-                        }
-                        continue;
-                    }
-
-                    // Handle other statuses
-                    if exec_result.order_status == "CANCELED" {
-                        return Err(
-                            FixError::OrderRejected("Order was canceled".to_string()).into()
-                        );
-                    }
-
-                    if exec_result.order_status == "EXPIRED" {
-                        if exec_result.filled_qty > 0.0 {
-                            info!(
-                                "⚠️ Order expired with partial fill: {} filled",
-                                exec_result.filled_qty
-                            );
-                            return Ok(exec_result);
-                        } else {
-                            return Err(
-                                FixError::OrderRejected(
-                                    "Order expired without fill".to_string()
-                                ).into()
-                            );
-                        }
-                    }
-
-                    // Reset result and continue waiting for other statuses
-                    {
-                        let mut guard = result.lock().unwrap();
-                        *guard = None;
-                    }
                 }
-                None => {
-                    // Continue waiting
-                    continue;
+
+                if exec_result.order_status == "NEW" {
+                    self.pending_orders.lock().remove(&client_order_id);
+                    info!("✅ Market order placed successfully! (Order accepted by exchange)");
+                    return Ok(exec_result);
+                }
+
+                if exec_result.order_status == "CANCELED" || exec_result.order_status == "EXPIRED" {
+                    self.pending_orders.lock().remove(&client_order_id);
+                    return Err(
+                        FixError::OrderRejected(
+                            format!("Order {}", exec_result.order_status.to_lowercase())
+                        ).into()
+                    );
                 }
             }
         }
@@ -645,20 +590,6 @@ impl FixClient {
         }
     }
 
-    // fn start_message_reader(&mut self) -> Result<()> {
-    //     let pending_orders = Arc::clone(&self.pending_orders);
-    //     let shutdown = Arc::clone(&self.shutdown);
-    //     let stream_ref = Arc::clone(&self.stream);
-
-    //     let handle = thread::spawn(move || {
-    //         Self::message_reader_thread(stream_ref, pending_orders, shutdown);
-    //     });
-
-    //     self.connection_handle = Some(handle);
-    //     Ok(())
-    // }
-
-    // Replace your start_message_reader function with this one
     fn start_message_reader(&mut self) -> Result<()> {
         let pending_orders = Arc::clone(&self.pending_orders);
         let shutdown = Arc::clone(&self.shutdown);
@@ -680,7 +611,6 @@ impl FixClient {
         Ok(())
     }
 
-    // Replace your message_reader_thread function with this one
     fn message_reader_thread(
         stream_ref: Arc<Mutex<Option<TlsStream<TcpStream>>>>,
         pending_orders: Arc<Mutex<HashMap<String, OrderExecution>>>,
@@ -706,9 +636,20 @@ impl FixClient {
                     }
                 }
                 Err(e) => {
-                    error!("Error reading message: {}", e);
-
-                    break;
+                    if
+                        e.to_string().contains("Resource temporarily unavailable") ||
+                        e.to_string().contains("timed out")
+                    {
+                        if shutdown.load(Ordering::Relaxed) {
+                            debug!("Read timeout during shutdown, stopping message reader");
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    } else {
+                        error!("Error reading message: {}", e);
+                        break;
+                    }
                 }
             }
         }
@@ -783,8 +724,7 @@ impl FixClient {
                         let mut result = exec_result;
                         result.execution_time = order_exec.start_time.elapsed();
 
-                        // Only remove from pending orders if it's a final status
-                        let is_final_status =
+                        let is_final =
                             matches!(
                                 result.order_status.as_str(),
                                 "FILLED" | "REJECTED" | "CANCELED" | "EXPIRED"
@@ -794,12 +734,12 @@ impl FixClient {
                             let mut guard = order_exec.result.lock().unwrap();
                             *guard = Some(result);
                         }
-                        order_exec.condvar.notify_one();
 
-                        // Remove from pending only if final
-                        if is_final_status {
-                            orders.remove(&client_order_id);
+                        if is_final {
+                            order_exec.completed.store(true, Ordering::Relaxed);
                         }
+
+                        order_exec.condvar.notify_one();
                     }
                 }
             }
@@ -987,19 +927,15 @@ impl FixClient {
         Ok(())
     }
 
-    // Replace your disconnect function with this one
     pub fn disconnect(&mut self) -> Result<()> {
         info!("Initiating graceful FIX disconnect...");
 
-        // Reset logout state
         self.logout_received.store(false, Ordering::Release);
         {
             let (lock, _) = &*self.logout_condvar;
             let mut logout_flag = lock.lock().unwrap();
             *logout_flag = false;
         }
-
-        self.is_connected.store(false, Ordering::Release);
 
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
@@ -1024,7 +960,6 @@ impl FixClient {
         } else {
             info!("Logout message sent, waiting for server response...");
 
-            // Wait for logout response with timeout
             let (lock, cvar) = &*self.logout_condvar;
             let mut logout_flag = lock.lock().unwrap();
 
@@ -1043,10 +978,9 @@ impl FixClient {
             }
         }
 
-        // Now signal shutdown to threads
         self.shutdown.store(true, Ordering::Release);
+        self.is_connected.store(false, Ordering::Release);
 
-        // Wait for threads to finish
         if let Some(handle) = self.heartbeat_handle.take() {
             let _ = handle.join();
         }
@@ -1054,7 +988,6 @@ impl FixClient {
             let _ = handle.join();
         }
 
-        // Close the stream
         {
             let mut stream_guard = self.stream.lock();
             if let Some(stream) = stream_guard.take() {
@@ -1066,7 +999,6 @@ impl FixClient {
         Ok(())
     }
 
-    // Optional: Add force disconnect for emergency cases
     pub fn force_disconnect(&mut self) -> Result<()> {
         warn!("Force disconnecting FIX client...");
 

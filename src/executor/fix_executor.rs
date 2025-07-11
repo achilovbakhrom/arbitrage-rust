@@ -361,8 +361,6 @@ impl FixArbitrageExecutor {
         Ok(all_trades_successful)
     }
 
-    // pub fn place_single_order()
-
     fn execute_real_triangular_trades_safe(
         opportunity: &ArbitrageOpportunity,
         client: &mut FixClient,

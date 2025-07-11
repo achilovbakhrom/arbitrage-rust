@@ -77,7 +77,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         detection_times.clone()
     );
 
-    // 3. Create executor
     let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
     print_executor_info(fix_executor.is_some(), config.debug, config.threshold);
     let execution_handler = start_execution_thread(Arc::clone(&detector), Arc::clone(&shutdown));
@@ -109,7 +108,6 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         error!("Error joining execution thread: {:?}", e);
     }
 
-    // On finish
     match test_result {
         Ok(_) => {
             info!("Performance test completed successfully!");
@@ -192,7 +190,6 @@ fn start_execution_thread(
         .expect("Failed to spawn execution thread")
 }
 
-/// -------------- HELPERS ----------------------
 fn create_fix_executor(
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
     config: &Config

@@ -1,16 +1,17 @@
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
+use std::sync::atomic::{ AtomicBool, Ordering };
 use crate::{
-    arbitrage::detector::ArbitrageOpportunity,
     config::Config,
-    exchange::{ binance::BinanceClient, client::ExchangeClient, fix_api::MarketOrder },
-    executor::fix_executor::FixArbitrageExecutor,
-    models::triangular_path::TriangularPath,
+    exchange::{
+        binance::BinanceClient,
+        client::ExchangeClient,
+        fix_api::{ FixClient, MarketOrder, OrderSide },
+    },
+    exchange::mock_fix_api::MockFixClient,
     utils::{
         console::print_config,
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
-        symbol_interner::global,
     },
 };
 use anyhow::{ anyhow, Context, Result };
@@ -18,13 +19,23 @@ use tracing::{ error, info, warn };
 
 pub fn run_test_execution(config: Config) -> Result<()> {
     print_config(&config);
-    info!("🧪 Starting enhanced test execution mode - Single Path Test");
+    info!("🧪 Starting enhanced test execution mode - Single Order Test");
 
     if !config.should_enable_real_trading() && !config.should_enable_mock_trading() {
         error!("❌ Trading must be enabled for test execution");
         error!("   Set TAA_ENABLE_TRADING=true in your .env file");
         return Err(anyhow!("Trading not enabled in configuration"));
     }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+
+    ctrlc
+        ::set_handler(move || {
+            info!("🛑 Received Ctrl+C, stopping test execution...");
+            shutdown_clone.store(true, Ordering::Relaxed);
+        })
+        .context("Error setting Ctrl-C handler")?;
 
     let api_client = Arc::new(
         BinanceClient::new(config.fix_api.clone(), config.debug).context(
@@ -48,232 +59,175 @@ pub fn run_test_execution(config: Config) -> Result<()> {
 
     let symbol_map = build_symbol_map(symbols.clone(), &config)?;
 
-    info!("🔧 Creating FIX executor...");
-    let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
-
-    if let Some(executor) = fix_executor {
-        info!("🚀 Starting triangular arbitrage test execution...");
-
-        if !executor.is_healthy() {
-            warn!("⚠️  Connection health check failed, attempting to reset...");
-            executor.reset_connection_health();
-        }
-
-        let test_opportunities = create_test_opportunities(&symbol_map, &config)?;
-
-        if test_opportunities.is_empty() {
-            error!("❌ No test opportunities could be created");
-            return Err(anyhow!("No suitable trading pairs found for test"));
-        }
-
-        info!("📋 Created {} test opportunities", test_opportunities.len());
-
-        let mut successful_tests = 0;
-        let mut failed_tests = 0;
-
-        // for (i, test_opportunity) in test_opportunities.iter().enumerate() {
-        //     info!("");
-        //     info!("🎯 Test {}/{}: {}", i + 1, test_opportunities.len(), test_opportunity.display());
-
-        //     info!("   💰 Expected profit: {:.4}%", test_opportunity.profit_percentage());
-        //     info!("   💵 Start amount: {:.8} {}", test_opportunity.start_amount, config.base_asset);
-
-        //     let success = executor.force_execute_opportunity(test_opportunity.clone());
-
-        //     if success {
-        //         successful_tests += 1;
-        //         info!("✅ Test {}/{} completed successfully!", i + 1, test_opportunities.len());
-        //     } else {
-        //         failed_tests += 1;
-        //         error!("❌ Test {}/{} failed", i + 1, test_opportunities.len());
-        //     }
-
-        //     if i < test_opportunities.len() - 1 {
-        //         info!("⏳ Waiting 10 seconds before next test to respect rate limits...");
-        //         thread::sleep(Duration::from_secs(10));
-        //     }
-        // }
-
-        let symbol = "BTCUSDT".to_string();
-
-        let precision_info = symbol_map.get(&symbol);
-
-        let (qty_precision, price_precision) = if let Some(info) = precision_info {
-            (info.qty_precision, info.price_precision)
-        } else {
-            (8, 8)
-        };
-
-        executor.place_single_order(MarketOrder {
-            symbol: symbol,
-            side: crate::exchange::fix_api::OrderSide::Buy,
-            quantity: 0.0,
-            quote_quantity: Some(10.0),
-            qty_precision: Some(qty_precision),
-            price_precision: Some(price_precision),
-        });
-
-        info!("");
-        info!("📊 Test Execution Summary:");
-        info!("   ✅ Successful tests: {}", successful_tests);
-        info!("   ❌ Failed tests: {}", failed_tests);
-        info!(
-            "   📈 Success rate: {:.1}%",
-            ((successful_tests as f64) / (test_opportunities.len() as f64)) * 100.0
-        );
-
-        let stats = executor.get_execution_stats();
-        info!("📈 Detailed Statistics: {}", stats);
-
-        if let Err(e) = executor.disconnect() {
-            error!("Error disconnecting FIX executor: {}", e);
-        } else {
-            info!("✅ FIX executor disconnected successfully");
-        }
-
-        if successful_tests > 0 {
-            info!("🎉 Test execution completed successfully!");
-            info!("   Your FIX API configuration is working correctly");
-            info!("   You can now run the full arbitrage system");
-        } else {
-            error!("💥 All tests failed!");
-            error!("   Please check your FIX API configuration");
-            error!("   Common issues:");
-            error!("   - Incorrect API key or private key");
-            error!("   - IP not whitelisted on Binance");
-            error!("   - Insufficient account permissions");
-            error!("   - Rate limits exceeded");
-        }
-
-        Ok(())
+    if config.debug {
+        info!("🔧 Creating Mock FIX client for testing...");
+        run_mock_test(&config, &symbol_map, &shutdown)
     } else {
-        error!("❌ No FIX executor available for testing");
-        Err(anyhow!("FIX executor not configured"))
+        info!("🔧 Creating Real FIX client for testing...");
+        run_real_test(&config, &symbol_map, &shutdown)
     }
 }
 
-fn create_fix_executor(
-    symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
-    config: &Config
-) -> Result<Option<Arc<FixArbitrageExecutor>>> {
-    if config.should_enable_real_trading() || config.should_enable_mock_trading() {
-        let mode = if config.debug { "Mock" } else { "Real" };
-        info!("🔧 Creating FIX executor ({}) for test execution", mode);
-
-        let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
-
-        match FixArbitrageExecutor::new(config.debug, fix_config, symbol_map.clone()) {
-            Ok(executor) => {
-                info!("🔗 Connecting to FIX API...");
-                if let Err(e) = executor.connect() {
-                    error!("❌ Failed to connect FIX executor: {}", e);
-                    error!("   Please check your FIX API configuration:");
-                    error!("   - TAA_FIX_API (your API key)");
-                    error!("   - TAA_FIX_PRIVATE_KEY_BASE64 (your base64 encoded private key)");
-                    error!("   - TAA_FIX_ENDPOINT (should be fix-oe.binance.com:9000)");
-                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
-                }
-
-                let executor_arc = Arc::new(executor);
-                info!("✅ FIX executor connected successfully for test execution");
-
-                Ok(Some(executor_arc))
-            }
-            Err(e) => {
-                error!("❌ Failed to create FIX executor: {}", e);
-                Err(anyhow!("Failed to create FIX executor: {}", e))
-            }
-        }
-    } else {
-        error!("❌ Trading must be enabled for test execution");
-        error!("   Set TAA_ENABLE_TRADING=true in your .env file");
-        Err(anyhow!("Trading not enabled in configuration"))
-    }
-}
-
-fn create_test_opportunities(
+fn run_mock_test(
+    config: &Config,
     symbol_map: &Arc<crate::models::symbol_map::SymbolMap>,
-    config: &Config
-) -> Result<Vec<ArbitrageOpportunity>> {
-    let mut opportunities = Vec::new();
+    shutdown: &Arc<AtomicBool>
+) -> Result<()> {
+    let mut mock_client = MockFixClient::new();
 
-    let test_paths = [("BTCUSDT", "ETHBTC", "ETHUSDT", false, false, true)];
+    info!("🔗 Connecting to Mock FIX API...");
+    mock_client.connect()?;
+    info!("✅ Mock FIX client connected successfully");
 
-    info!("🔍 Creating test opportunities from predefined paths...");
-
-    for (
-        i,
-        &(first_symbol, second_symbol, third_symbol, first_dir, second_dir, third_dir),
-    ) in test_paths.iter().enumerate() {
-        let first_exists = symbol_map.get(first_symbol).is_some();
-        let second_exists = symbol_map.get(second_symbol).is_some();
-        let third_exists = symbol_map.get(third_symbol).is_some();
-
-        if !first_exists || !second_exists || !third_exists {
-            warn!(
-                "⚠️  Skipping test path {}: {} → {} → {} (some symbols not available)",
-                i + 1,
-                first_symbol,
-                second_symbol,
-                third_symbol
-            );
-            continue;
+    let test_order = create_simple_test_order(config, symbol_map)?;
+    info!(
+        "📋 Created test order: {} {} {}",
+        match test_order.side {
+            OrderSide::Buy => "BUY",
+            OrderSide::Sell => "SELL",
+        },
+        test_order.symbol,
+        if test_order.quote_quantity.is_some() {
+            format!("quote_qty: {:.8}", test_order.quote_quantity.unwrap())
+        } else {
+            format!("qty: {:.8}", test_order.quantity)
         }
+    );
 
-        let path = TriangularPath {
-            first_symbol: first_symbol.into(),
-            second_symbol: second_symbol.into(),
-            third_symbol: third_symbol.into(),
-            first_is_base_to_quote: first_dir,
-            second_is_base_to_quote: second_dir,
-            third_is_base_to_quote: third_dir,
-            start_asset: config.base_asset.clone().into(),
-            end_asset: config.base_asset.clone().into(),
-        };
+    if shutdown.load(Ordering::Relaxed) {
+        info!("🛑 Test cancelled by user");
+        mock_client.disconnect()?;
+        return Ok(());
+    }
 
-        let first_symbol_id = global::intern(first_symbol);
-        let second_symbol_id = global::intern(second_symbol);
-        let third_symbol_id = global::intern(third_symbol);
+    info!("🚀 Placing test order...");
+    match mock_client.place_market_order(test_order) {
+        Ok(result) => {
+            info!("✅ Test order executed successfully!");
+            info!("   Order ID: {}", result.order_id);
+            info!("   Filled Quantity: {:.8}", result.filled_qty);
+            info!("   Average Price: {:.8}", result.avg_price);
+            info!("   Total Value: {:.8}", result.cum_quote_qty);
+            info!("   Execution Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
 
-        let test_amount = (config.trade_amount * 0.1).max(10.0); // 10% of normal amount, minimum $10
+            info!("🎉 Mock test completed successfully!");
+            info!("   Your configuration is working correctly");
+        }
+        Err(e) => {
+            error!("❌ Test order failed: {}", e);
+            mock_client.disconnect()?;
+            return Err(anyhow!("Test order execution failed: {}", e));
+        }
+    }
 
-        let opportunity = ArbitrageOpportunity {
-            path: Arc::new(path),
-            profit_ratio: 1.005, // Simulate 0.5% profit for testing
-            start_amount: test_amount,
-            symbols_involved: [first_symbol_id, second_symbol_id, third_symbol_id],
-        };
+    info!("🔌 Disconnecting FIX client...");
+    std::thread::sleep(Duration::from_millis(200));
+    mock_client.disconnect()?;
+    info!("✅ Mock FIX client disconnected successfully");
 
-        info!(
-            "✅ Created test opportunity {}: {} → {} → {} (amount: {:.8})",
-            i + 1,
-            first_symbol,
-            second_symbol,
-            third_symbol,
-            test_amount
+    Ok(())
+}
+
+fn run_real_test(
+    config: &Config,
+    symbol_map: &Arc<crate::models::symbol_map::SymbolMap>,
+    shutdown: &Arc<AtomicBool>
+) -> Result<()> {
+    let fix_config = config.get_fix_client_config();
+    let mut fix_client = FixClient::new(fix_config).context("Failed to create FIX client")?;
+
+    for symbol in symbol_map.get_all_symbols() {
+        fix_client.update_symbol_precision(
+            &symbol.symbol,
+            symbol.qty_precision,
+            symbol.price_precision
         );
-
-        opportunities.push(opportunity);
     }
 
-    if opportunities.is_empty() {
-        error!("❌ Could not create any test opportunities");
-        error!("   Available symbols might not include the required trading pairs");
-        error!("   Check if your account has access to spot trading");
+    info!("🔗 Connecting to Real FIX API...");
+    fix_client.connect()?;
+    info!("✅ Real FIX client connected successfully");
 
-        let all_symbols = symbol_map.get_all_symbols();
+    let test_order = create_simple_test_order(config, symbol_map)?;
+    info!(
+        "📋 Created test order: {} {} {}",
+        match test_order.side {
+            OrderSide::Buy => "BUY",
+            OrderSide::Sell => "SELL",
+        },
+        test_order.symbol,
+        if test_order.quote_quantity.is_some() {
+            format!("quote_qty: {:.8}", test_order.quote_quantity.unwrap())
+        } else {
+            format!("qty: {:.8}", test_order.quantity)
+        }
+    );
 
-        let available_usdt_pairs: Vec<_> = all_symbols
-            .iter()
-            .filter(|s| s.symbol.ends_with("USDT") && s.is_trading)
-            .take(10)
-            .map(|s| s.symbol.as_ref())
-            .collect();
+    if shutdown.load(Ordering::Relaxed) {
+        info!("🛑 Test cancelled by user");
+        fix_client.disconnect()?;
+        return Ok(());
+    }
 
-        if !available_usdt_pairs.is_empty() {
-            info!("💡 Available USDT pairs for reference: {:?}", available_usdt_pairs);
+    info!("🚀 Placing test order...");
+    match fix_client.place_market_order(test_order) {
+        Ok(result) => {
+            info!("✅ Test order placed successfully!");
+            info!("   Order ID: {}", result.order_id);
+            info!("   Symbol: {}", result.symbol);
+            info!("   Side: {}", result.side);
+            info!("   Order Status: {}", result.order_status);
+            info!("   Placement Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
+
+            info!("🎉 Real test completed successfully!");
+            info!("   Your FIX API configuration is working correctly");
+            info!("   Market order was accepted by the exchange");
+            info!("   You can now run the full arbitrage system");
+        }
+        Err(e) => {
+            error!("❌ Test order failed: {}", e);
+            info!("🔌 Disconnecting FIX client...");
+            fix_client.disconnect()?;
+            return Err(anyhow!("Test order execution failed: {}", e));
         }
     }
 
-    Ok(opportunities)
+    info!("🔌 Disconnecting FIX client...");
+    std::thread::sleep(Duration::from_millis(200));
+    fix_client.disconnect()?;
+
+    info!("✅ Real FIX client disconnected successfully");
+
+    Ok(())
+}
+
+fn create_simple_test_order(
+    config: &Config,
+    symbol_map: &Arc<crate::models::symbol_map::SymbolMap>
+) -> Result<MarketOrder> {
+    let test_symbol = "BTCUSDT";
+
+    let symbol_info = symbol_map
+        .get(test_symbol)
+        .ok_or_else(|| anyhow!("Test symbol {} not found", test_symbol))?;
+
+    let test_amount = (config.trade_amount * 0.01).max(10.0); // 1% of normal amount, minimum $10
+
+    let order = MarketOrder {
+        symbol: test_symbol.to_string(),
+        side: OrderSide::Buy, // Buy a small amount of BTC with USDT
+        quantity: 0.0, // Will be calculated from quote_quantity
+        quote_quantity: Some(test_amount), // Buy $10-$100 worth
+        qty_precision: Some(symbol_info.qty_precision),
+        price_precision: Some(symbol_info.price_precision),
+    };
+
+    info!("📝 Test order details:");
+    info!("   Symbol: {}", order.symbol);
+    info!("   Side: BUY");
+    info!("   Quote Amount: ${:.2}", test_amount);
+    info!("   Quantity Precision: {}", symbol_info.qty_precision);
+    info!("   Price Precision: {}", symbol_info.price_precision);
+
+    Ok(order)
 }

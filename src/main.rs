@@ -16,6 +16,9 @@ use config::Config;
 use anyhow::{ Context, Result };
 use utils::logging;
 use crate::{ models::command::Command, utils::helpers::get_run_command };
+use std::sync::atomic::{ AtomicBool, Ordering };
+use std::sync::Arc;
+use tracing::{ info, error };
 
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBSOCKET_BUFFER_SIZE: usize = 100;
@@ -28,11 +31,41 @@ fn main() -> Result<()> {
         ::init_logging(config.log_level, &config.log_config)
         .context("Failed to initialize logging")?;
 
-    match command {
-        Command::Run => app::normal_mode::run_normal_mode(config)?,
-        Command::PerformanceTest => app::perf_mode::run_performance_test(config)?,
-        Command::TestExecution => app::test_execution::run_test_execution(config)?,
-    }
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown_flag.clone();
 
-    Ok(())
+    let result = match command {
+        Command::Run => {
+            ctrlc
+                ::set_handler(move || {
+                    info!("Received Ctrl+C signal, initiating graceful shutdown...");
+                    shutdown_clone.store(true, Ordering::Relaxed);
+                })
+                .context("Failed to set Ctrl+C handler")?;
+
+            app::normal_mode::run_normal_mode(config)
+        }
+        Command::PerformanceTest => {
+            ctrlc
+                ::set_handler(move || {
+                    info!("Received Ctrl+C signal, stopping performance test...");
+                    shutdown_clone.store(true, Ordering::Relaxed);
+                })
+                .context("Failed to set Ctrl+C handler")?;
+
+            app::perf_mode::run_performance_test(config)
+        }
+        Command::TestExecution => { app::test_execution::run_test_execution(config) }
+    };
+
+    match result {
+        Ok(_) => {
+            info!("Application completed successfully");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            error!("Application failed: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
