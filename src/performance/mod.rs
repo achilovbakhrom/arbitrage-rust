@@ -303,7 +303,7 @@ pub fn start_websocket_thread(
                     }
                 }
             };
-            let channels = vec!["depth".to_string()];
+            let channels = ["depth".to_string()];
 
             match client.subscribe(&mut ws_stream, &symbols, channels.iter().as_slice()) {
                 Ok(_) => info!("Successfully subscribed to {} symbols", symbols.len()),

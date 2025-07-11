@@ -94,12 +94,12 @@ pub fn build_symbol_map(
 
 pub fn create_output_file() -> anyhow::Result<String> {
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let output_dir = format!("./performance_results/{}", timestamp);
+    let output_dir = format!("./performance_results/{timestamp}");
     std::fs
         ::create_dir_all(&output_dir)
-        .context(format!("Failed to create output directory: {}", output_dir))?;
+        .context(format!("Failed to create output directory: {output_dir}"))?;
 
-    let output_file = format!("{}/performance_results.csv", output_dir);
+    let output_file = format!("{output_dir}/performance_results.csv");
     info!("Results will be saved to: {}", output_file);
 
     Ok(output_file)

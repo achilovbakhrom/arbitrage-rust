@@ -170,7 +170,7 @@ fn start_websocket_thread(
 
             info!("Connected to Binance SBE WebSocket");
 
-            let channels = vec!["depth".to_string()];
+            let channels = ["depth".to_string()];
             let subscription_symbols = symbol_mappings
                 .iter()
                 .take(WEBSOCKET_BUFFER_SIZE)

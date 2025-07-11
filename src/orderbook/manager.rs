@@ -309,7 +309,6 @@ impl OrderBookManager {
         }
     }
 
-
     pub async fn fetch_snapshot(
         &self,
         symbol: &str
@@ -320,7 +319,7 @@ impl OrderBookManager {
 
         let depth_response = self.exchange_client
             .fetch_depth(symbol, self.default_depth).await
-            .context(format!("Failed to fetch orderbook snapshot for {}", symbol))?;
+            .context(format!("Failed to fetch orderbook snapshot for {symbol}"))?;
 
         let bids = depth_response.bids
             .iter()
