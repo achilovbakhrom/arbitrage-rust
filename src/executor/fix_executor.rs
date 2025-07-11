@@ -361,6 +361,8 @@ impl FixArbitrageExecutor {
         Ok(all_trades_successful)
     }
 
+    // pub fn place_single_order()
+
     fn execute_real_triangular_trades_safe(
         opportunity: &ArbitrageOpportunity,
         client: &mut FixClient,
@@ -574,6 +576,16 @@ impl FixArbitrageExecutor {
 
         info!("FIX arbitrage executor disconnected gracefully");
         Ok(())
+    }
+
+    pub fn place_single_order(&self, order: MarketOrder) -> bool {
+        if let Some(real_client) = &self.real_fix_client {
+            let mut client = real_client.lock().unwrap();
+            let result = client.place_market_order(order).unwrap();
+            info!("result: {:?}", result);
+            return true;
+        }
+        return false;
     }
 
     pub fn force_execute_opportunity(&self, opportunity: ArbitrageOpportunity) -> bool {

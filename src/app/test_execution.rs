@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use crate::{
+    arbitrage::detector::ArbitrageOpportunity,
     config::Config,
-    exchange::{ binance::BinanceClient, client::ExchangeClient },
+    exchange::{ binance::BinanceClient, client::ExchangeClient, fix_api::MarketOrder },
     executor::fix_executor::FixArbitrageExecutor,
     models::triangular_path::TriangularPath,
     utils::{
@@ -11,7 +12,6 @@ use crate::{
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
         symbol_interner::global,
     },
-    arbitrage::detector::ArbitrageOpportunity,
 };
 use anyhow::{ anyhow, Context, Result };
 use tracing::{ error, info, warn };
@@ -71,28 +71,47 @@ pub fn run_test_execution(config: Config) -> Result<()> {
         let mut successful_tests = 0;
         let mut failed_tests = 0;
 
-        for (i, test_opportunity) in test_opportunities.iter().enumerate() {
-            info!("");
-            info!("🎯 Test {}/{}: {}", i + 1, test_opportunities.len(), test_opportunity.display());
+        // for (i, test_opportunity) in test_opportunities.iter().enumerate() {
+        //     info!("");
+        //     info!("🎯 Test {}/{}: {}", i + 1, test_opportunities.len(), test_opportunity.display());
 
-            info!("   💰 Expected profit: {:.4}%", test_opportunity.profit_percentage());
-            info!("   💵 Start amount: {:.8} {}", test_opportunity.start_amount, config.base_asset);
+        //     info!("   💰 Expected profit: {:.4}%", test_opportunity.profit_percentage());
+        //     info!("   💵 Start amount: {:.8} {}", test_opportunity.start_amount, config.base_asset);
 
-            let success = executor.force_execute_opportunity(test_opportunity.clone());
+        //     let success = executor.force_execute_opportunity(test_opportunity.clone());
 
-            if success {
-                successful_tests += 1;
-                info!("✅ Test {}/{} completed successfully!", i + 1, test_opportunities.len());
-            } else {
-                failed_tests += 1;
-                error!("❌ Test {}/{} failed", i + 1, test_opportunities.len());
-            }
+        //     if success {
+        //         successful_tests += 1;
+        //         info!("✅ Test {}/{} completed successfully!", i + 1, test_opportunities.len());
+        //     } else {
+        //         failed_tests += 1;
+        //         error!("❌ Test {}/{} failed", i + 1, test_opportunities.len());
+        //     }
 
-            if i < test_opportunities.len() - 1 {
-                info!("⏳ Waiting 10 seconds before next test to respect rate limits...");
-                thread::sleep(Duration::from_secs(10));
-            }
-        }
+        //     if i < test_opportunities.len() - 1 {
+        //         info!("⏳ Waiting 10 seconds before next test to respect rate limits...");
+        //         thread::sleep(Duration::from_secs(10));
+        //     }
+        // }
+
+        let symbol = "BTCUSDT".to_string();
+
+        let precision_info = symbol_map.get(&symbol);
+
+        let (qty_precision, price_precision) = if let Some(info) = precision_info {
+            (info.qty_precision, info.price_precision)
+        } else {
+            (8, 8)
+        };
+
+        executor.place_single_order(MarketOrder {
+            symbol: symbol,
+            side: crate::exchange::fix_api::OrderSide::Buy,
+            quantity: 0.0,
+            quote_quantity: Some(10.0),
+            qty_precision: Some(qty_precision),
+            price_precision: Some(price_precision),
+        });
 
         info!("");
         info!("📊 Test Execution Summary:");
