@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{ AtomicBool, Ordering };
 use crate::{
+    arbitrage::detector::ArbitrageOpportunity,
     config::Config,
     exchange::{
         binance::BinanceClient,
@@ -19,7 +20,7 @@ use tracing::{ error, info, warn };
 
 pub fn run_test_execution(config: Config) -> Result<()> {
     print_config(&config);
-    info!("🧪 Starting enhanced test execution mode - Single Order Test");
+    info!("🧪 Starting triangular arbitrage test execution");
 
     if !config.should_enable_real_trading() && !config.should_enable_mock_trading() {
         error!("❌ Trading must be enabled for test execution");
@@ -79,20 +80,9 @@ fn run_mock_test(
     mock_client.connect()?;
     info!("✅ Mock FIX client connected successfully");
 
-    let test_order = create_simple_test_order(config, symbol_map)?;
-    info!(
-        "📋 Created test order: {} {} {}",
-        match test_order.side {
-            OrderSide::Buy => "BUY",
-            OrderSide::Sell => "SELL",
-        },
-        test_order.symbol,
-        if test_order.quote_quantity.is_some() {
-            format!("quote_qty: {:.8}", test_order.quote_quantity.unwrap())
-        } else {
-            format!("qty: {:.8}", test_order.quantity)
-        }
-    );
+    let opportunity = create_test_opportunity(config, symbol_map)?;
+    info!("📋 Created test triangular arbitrage:");
+    info!("   Path: {}", opportunity.display());
 
     if shutdown.load(Ordering::Relaxed) {
         info!("🛑 Test cancelled by user");
@@ -100,28 +90,17 @@ fn run_mock_test(
         return Ok(());
     }
 
-    info!("🚀 Placing test order...");
-    match mock_client.place_market_order(test_order) {
-        Ok(result) => {
-            info!("✅ Test order executed successfully!");
-            info!("   Order ID: {}", result.order_id);
-            info!("   Filled Quantity: {:.8}", result.filled_qty);
-            info!("   Average Price: {:.8}", result.avg_price);
-            info!("   Total Value: {:.8}", result.cum_quote_qty);
-            info!("   Execution Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
+    info!("🚀 Executing triangular arbitrage...");
+    let success = execute_mock_triangular(&opportunity, &mut mock_client, symbol_map)?;
 
-            info!("🎉 Mock test completed successfully!");
-            info!("   Your configuration is working correctly");
-        }
-        Err(e) => {
-            error!("❌ Test order failed: {}", e);
-            mock_client.disconnect()?;
-            return Err(anyhow!("Test order execution failed: {}", e));
-        }
+    if success {
+        info!("🎉 Mock triangular arbitrage completed successfully!");
+        info!("   All three orders executed correctly");
+    } else {
+        warn!("⚠️  Mock triangular arbitrage partially failed");
     }
 
-    info!("🔌 Disconnecting FIX client...");
-    std::thread::sleep(Duration::from_millis(200));
+    info!("🔌 Disconnecting Mock FIX client...");
     mock_client.disconnect()?;
     info!("✅ Mock FIX client disconnected successfully");
 
@@ -148,20 +127,9 @@ fn run_real_test(
     fix_client.connect()?;
     info!("✅ Real FIX client connected successfully");
 
-    let test_order = create_simple_test_order(config, symbol_map)?;
-    info!(
-        "📋 Created test order: {} {} {}",
-        match test_order.side {
-            OrderSide::Buy => "BUY",
-            OrderSide::Sell => "SELL",
-        },
-        test_order.symbol,
-        if test_order.quote_quantity.is_some() {
-            format!("quote_qty: {:.8}", test_order.quote_quantity.unwrap())
-        } else {
-            format!("qty: {:.8}", test_order.quantity)
-        }
-    );
+    let opportunity = create_test_opportunity(config, symbol_map)?;
+    info!("📋 Created test triangular arbitrage:");
+    info!("   Path: {}", opportunity.display());
 
     if shutdown.load(Ordering::Relaxed) {
         info!("🛑 Test cancelled by user");
@@ -169,88 +137,224 @@ fn run_real_test(
         return Ok(());
     }
 
-    info!("🚀 Placing test order...");
-    match fix_client.place_market_order(test_order.clone()) {
-        Ok(result) => {
-            info!("✅ Test order placed successfully!");
-            info!("   Order ID: {}", result.order_id);
-            info!("   Symbol: {}", result.symbol);
-            info!("   Side: {}", result.side);
-            info!("   Order Status: {}", result.order_status);
-            info!("   Placement Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
+    warn!("⚠️  REAL MONEY WARNING: This will execute actual trades!");
+    info!("🚀 Executing triangular arbitrage...");
+    let success = execute_real_triangular(&opportunity, &mut fix_client, symbol_map)?;
 
-            info!("🎉 Real test completed successfully!");
-            info!("   Your FIX API configuration is working correctly");
-            info!("   Market order was accepted by the exchange");
-            info!("   You can now run the full arbitrage system");
-        }
-        Err(e) => {
-            error!("❌ Test order failed: {}", e);
-            info!("🔌 Disconnecting FIX client...");
-            fix_client.disconnect()?;
-            return Err(anyhow!("Test order execution failed: {}", e));
-        }
-    }
-
-    info!("🚀 Placing test order 2...");
-    match fix_client.place_market_order(test_order) {
-        Ok(result) => {
-            info!("✅ Test order placed successfully!");
-            info!("   Order ID: {}", result.order_id);
-            info!("   Symbol: {}", result.symbol);
-            info!("   Side: {}", result.side);
-            info!("   Order Status: {}", result.order_status);
-            info!("   Placement Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
-
-            info!("🎉 Real test completed successfully!");
-            info!("   Your FIX API configuration is working correctly");
-            info!("   Market order was accepted by the exchange");
-            info!("   You can now run the full arbitrage system");
-        }
-        Err(e) => {
-            error!("❌ Test order failed: {}", e);
-            info!("🔌 Disconnecting FIX client...");
-            fix_client.disconnect()?;
-            return Err(anyhow!("Test order execution failed: {}", e));
-        }
+    if success {
+        info!("🎉 Real triangular arbitrage completed successfully!");
+        info!("   All three orders executed correctly");
+        info!("   Your FIX API is working for triangular arbitrage");
+    } else {
+        warn!("⚠️  Real triangular arbitrage partially failed");
     }
 
     info!("🔌 Disconnecting FIX client...");
-    std::thread::sleep(Duration::from_millis(200));
     fix_client.disconnect()?;
-
     info!("✅ Real FIX client disconnected successfully");
 
     Ok(())
 }
 
-fn create_simple_test_order(
+fn create_test_opportunity(
     config: &Config,
     symbol_map: &Arc<crate::models::symbol_map::SymbolMap>
-) -> Result<MarketOrder> {
-    let test_symbol = "BTCUSDT";
+) -> Result<ArbitrageOpportunity> {
+    let paths = symbol_map.get_triangular_paths();
+    if paths.is_empty() {
+        return Err(anyhow!("No triangular paths available for testing"));
+    }
 
-    let symbol_info = symbol_map
-        .get(test_symbol)
-        .ok_or_else(|| anyhow!("Test symbol {} not found", test_symbol))?;
+    let test_path = &paths[0];
+    let test_amount = (config.trade_amount * 0.01).max(10.0);
 
-    let test_amount = (config.trade_amount * 0.01).max(10.0); // 1% of normal amount, minimum $10
+    info!("📝 Test details:");
+    info!(
+        "   Path: {} → {} → {}",
+        test_path.first_symbol,
+        test_path.second_symbol,
+        test_path.third_symbol
+    );
+    info!("   Amount: ${:.2}", test_amount);
 
-    let order = MarketOrder {
-        symbol: test_symbol.to_string(),
-        side: OrderSide::Buy, // Buy a small amount of BTC with USDT
-        quantity: 0.0, // Will be calculated from quote_quantity
-        quote_quantity: Some(test_amount), // Buy $10-$100 worth
-        qty_precision: Some(symbol_info.qty_precision),
-        price_precision: Some(symbol_info.price_precision),
+    let opportunity = ArbitrageOpportunity {
+        path: Arc::new(test_path.clone()),
+        profit_ratio: 1.005,
+        start_amount: test_amount,
+        symbols_involved: [0, 1, 2],
     };
 
-    info!("📝 Test order details:");
-    info!("   Symbol: {}", order.symbol);
-    info!("   Side: BUY");
-    info!("   Quote Amount: ${:.2}", test_amount);
-    info!("   Quantity Precision: {}", symbol_info.qty_precision);
-    info!("   Price Precision: {}", symbol_info.price_precision);
+    Ok(opportunity)
+}
 
-    Ok(order)
+fn execute_mock_triangular(
+    opportunity: &ArbitrageOpportunity,
+    client: &mut MockFixClient,
+    symbol_map: &Arc<crate::models::symbol_map::SymbolMap>
+) -> Result<bool> {
+    let path = &opportunity.path;
+    let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
+    let directions = [
+        path.first_is_base_to_quote,
+        path.second_is_base_to_quote,
+        path.third_is_base_to_quote,
+    ];
+
+    let mut current_amount = opportunity.start_amount;
+    info!("🔄 Starting with {:.6} {}", current_amount, path.start_asset);
+
+    for (i, &symbol) in symbols.iter().enumerate() {
+        let precision_info = symbol_map.get(symbol);
+        let (qty_precision, price_precision) = if let Some(info) = precision_info {
+            (info.qty_precision, info.price_precision)
+        } else {
+            (8, 8)
+        };
+
+        let order = create_order(
+            symbol.to_string(),
+            directions[i],
+            current_amount,
+            qty_precision,
+            price_precision
+        );
+
+        info!(
+            "📋 Trade {}/{}: {} {} (amount: {:.8})",
+            i + 1,
+            symbols.len(),
+            match order.side {
+                OrderSide::Buy => "BUY",
+                OrderSide::Sell => "SELL",
+            },
+            symbol,
+            current_amount
+        );
+
+        let result = client.place_market_order(order)?;
+
+        info!("✅ Trade {}/{} executed:", i + 1, symbols.len());
+        info!("   Filled: {:.8} @ {:.8}", result.filled_qty, result.avg_price);
+        info!("   Total: {:.8}", result.cum_quote_qty);
+
+        if i < symbols.len() - 1 {
+            current_amount = if directions[i] { result.cum_quote_qty } else { result.filled_qty };
+            info!("💱 Next amount: {:.8}", current_amount);
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let final_amount = current_amount;
+    let profit = final_amount - opportunity.start_amount;
+    let profit_pct = (profit / opportunity.start_amount) * 100.0;
+
+    info!("🎯 Result:");
+    info!("   Start: {:.6} {}", opportunity.start_amount, path.start_asset);
+    info!("   End: {:.6} {}", final_amount, path.end_asset);
+    info!("   Profit: {:.6} ({:.4}%)", profit, profit_pct);
+
+    Ok(true)
+}
+
+fn execute_real_triangular(
+    opportunity: &ArbitrageOpportunity,
+    client: &mut FixClient,
+    symbol_map: &Arc<crate::models::symbol_map::SymbolMap>
+) -> Result<bool> {
+    let path = &opportunity.path;
+    let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
+    let directions = [
+        path.first_is_base_to_quote,
+        path.second_is_base_to_quote,
+        path.third_is_base_to_quote,
+    ];
+
+    let mut current_amount = opportunity.start_amount;
+    info!("🔄 Starting REAL triangular execution with {:.6} {}", current_amount, path.start_asset);
+
+    for (i, &symbol) in symbols.iter().enumerate() {
+        if !client.is_connected() {
+            return Err(anyhow!("FIX client disconnected"));
+        }
+
+        let precision_info = symbol_map.get(symbol);
+        let (qty_precision, price_precision) = if let Some(info) = precision_info {
+            (info.qty_precision, info.price_precision)
+        } else {
+            (8, 8)
+        };
+
+        let order = create_order(
+            symbol.to_string(),
+            directions[i],
+            current_amount,
+            qty_precision,
+            price_precision
+        );
+
+        info!(
+            "📋 REAL Trade {}/{}: {} {} (amount: {:.8})",
+            i + 1,
+            symbols.len(),
+            match order.side {
+                OrderSide::Buy => "BUY",
+                OrderSide::Sell => "SELL",
+            },
+            symbol,
+            current_amount
+        );
+
+        let result = client.place_market_order(order)?;
+
+        info!("✅ REAL Trade {}/{} placed:", i + 1, symbols.len());
+        info!("   Order ID: {}", result.order_id);
+        info!("   Status: {}", result.order_status);
+        info!("   Leaves Qty: {:.8}", result.leaves_qty);
+        info!("   Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
+
+        if result.order_status == "REJECTED" {
+            return Err(anyhow!("Order rejected: {:?}", result.reject_reason));
+        }
+
+        if i < symbols.len() - 1 {
+            current_amount = result.leaves_qty;
+            info!("💱 Next amount from leaves_qty: {:.8}", current_amount);
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    info!("🎯 REAL triangular arbitrage sequence completed");
+    info!("   All orders placed successfully using leaves_qty flow");
+
+    Ok(true)
+}
+
+fn create_order(
+    symbol: String,
+    is_base_to_quote: bool,
+    amount: f64,
+    qty_precision: u8,
+    price_precision: u8
+) -> MarketOrder {
+    if is_base_to_quote {
+        MarketOrder {
+            symbol,
+            side: OrderSide::Sell,
+            quantity: amount,
+            quote_quantity: None,
+            qty_precision: Some(qty_precision),
+            price_precision: Some(price_precision),
+        }
+    } else {
+        MarketOrder {
+            symbol,
+            side: OrderSide::Buy,
+            quantity: 0.0,
+            quote_quantity: Some(amount),
+            qty_precision: Some(qty_precision),
+            price_precision: Some(price_precision),
+        }
+    }
 }
