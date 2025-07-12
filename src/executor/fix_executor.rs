@@ -268,99 +268,6 @@ impl FixArbitrageExecutor {
         }
     }
 
-    fn execute_mock_triangular_trades_safe(
-        opportunity: &ArbitrageOpportunity,
-        client: &mut MockFixClient,
-        symbol_map: &Arc<SymbolMap>
-    ) -> Result<bool> {
-        let path = &opportunity.path;
-        let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
-        let is_base_to_quote = [
-            path.first_is_base_to_quote,
-            path.second_is_base_to_quote,
-            path.third_is_base_to_quote,
-        ];
-
-        let mut current_amount = opportunity.start_amount;
-        let mut all_trades_successful = true;
-
-        for (i, &symbol) in symbols.iter().enumerate() {
-            let precision_info = symbol_map.get(symbol);
-            let (qty_precision, price_precision) = if let Some(info) = precision_info {
-                (info.qty_precision, info.price_precision)
-            } else {
-                (8, 8)
-            };
-
-            let order = MarketOrder {
-                symbol: symbol.to_string(),
-                side: if is_base_to_quote[i] {
-                    OrderSide::Sell
-                } else {
-                    OrderSide::Buy
-                },
-                quantity: if is_base_to_quote[i] {
-                    current_amount
-                } else {
-                    0.0
-                },
-                quote_quantity: if is_base_to_quote[i] {
-                    None
-                } else {
-                    Some(current_amount)
-                },
-                qty_precision: Some(qty_precision),
-                price_precision: Some(price_precision),
-            };
-
-            info!(
-                "📋 Mock Trade {}/{}: {} {} {} (amount: {:.8})",
-                i + 1,
-                symbols.len(),
-                match order.side {
-                    OrderSide::Buy => "BUY",
-                    OrderSide::Sell => "SELL",
-                },
-                symbol,
-                if order.quote_quantity.is_some() {
-                    format!("quote_qty: {:.8}", order.quote_quantity.unwrap())
-                } else {
-                    format!("qty: {:.8}", order.quantity)
-                },
-                current_amount
-            );
-
-            match client.place_market_order(order) {
-                Ok(result) => {
-                    info!(
-                        "✅ Mock Trade {}/{} executed: {} @ {:.8}",
-                        i + 1,
-                        symbols.len(),
-                        result.filled_qty,
-                        result.avg_price
-                    );
-
-                    if i < symbols.len() - 1 {
-                        current_amount = if result.side == "BUY" {
-                            result.filled_qty
-                        } else {
-                            result.cum_quote_qty
-                        };
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Mock Trade {}/{} failed: {}", i + 1, symbols.len(), e);
-                    all_trades_successful = false;
-                    break;
-                }
-            }
-
-            thread::sleep(Duration::from_millis(100));
-        }
-
-        Ok(all_trades_successful)
-    }
-
     fn execute_real_triangular_trades_safe(
         opportunity: &ArbitrageOpportunity,
         client: &mut FixClient,
@@ -373,21 +280,20 @@ impl FixArbitrageExecutor {
 
         let path = &opportunity.path;
         let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
-        let is_base_to_quote = [
+        let directions = [
             path.first_is_base_to_quote,
             path.second_is_base_to_quote,
             path.third_is_base_to_quote,
         ];
 
         let mut current_amount = opportunity.start_amount;
-        let mut all_trades_successful = true;
-        let mut trade_results = Vec::with_capacity(3);
+        let mut all_successful = true;
 
         for (i, &symbol) in symbols.iter().enumerate() {
             if !client.is_connected() {
-                error!("🔴 FIX client disconnected during execution");
+                error!("FIX client disconnected during execution");
                 connection_health.store(false, Ordering::Relaxed);
-                return Err(anyhow::anyhow!("FIX client disconnected during execution"));
+                return Err(anyhow::anyhow!("FIX client disconnected"));
             }
 
             let precision_info = symbol_map.get(symbol);
@@ -397,143 +303,145 @@ impl FixArbitrageExecutor {
                 (8, 8)
             };
 
-            let order = MarketOrder {
-                symbol: symbol.to_string(),
-                side: if is_base_to_quote[i] {
-                    OrderSide::Sell
-                } else {
-                    OrderSide::Buy
-                },
-                quantity: if is_base_to_quote[i] {
-                    current_amount
-                } else {
-                    0.0
-                },
-                quote_quantity: if is_base_to_quote[i] {
-                    None
-                } else {
-                    Some(current_amount)
-                },
-                qty_precision: Some(qty_precision),
-                price_precision: Some(price_precision),
+            let order = if directions[i] {
+                MarketOrder {
+                    symbol: symbol.to_string(),
+                    side: OrderSide::Sell,
+                    quantity: current_amount,
+                    quote_quantity: None,
+                    qty_precision: Some(qty_precision),
+                    price_precision: Some(price_precision),
+                }
+            } else {
+                MarketOrder {
+                    symbol: symbol.to_string(),
+                    side: OrderSide::Buy,
+                    quantity: 0.0,
+                    quote_quantity: Some(current_amount),
+                    qty_precision: Some(qty_precision),
+                    price_precision: Some(price_precision),
+                }
             };
-
-            info!(
-                "📋 Real Trade {}/{}: {} {} {} (amount: {:.8})",
-                i + 1,
-                symbols.len(),
-                match order.side {
-                    OrderSide::Buy => "BUY",
-                    OrderSide::Sell => "SELL",
-                },
-                symbol,
-                if order.quote_quantity.is_some() {
-                    format!("quote_qty: {:.8}", order.quote_quantity.unwrap())
-                } else {
-                    format!("qty: {:.8}", order.quantity)
-                },
-                current_amount
-            );
 
             let trade_start = Instant::now();
 
             match client.place_market_order(order) {
                 Ok(result) => {
                     let trade_time = trade_start.elapsed();
-                    info!(
-                        "✅ Real Trade {}/{} executed in {:.2}ms: {} @ {:.8} (filled: {:.8})",
+
+                    if result.order_status == "REJECTED" || result.exec_type == "REJECTED" {
+                        error!("Order rejected: {:?}", result.reject_reason);
+                        all_successful = false;
+                        break;
+                    }
+
+                    debug!(
+                        "Trade {}/{} placed: {} {} leaves_qty={:.8} in {:.2}ms",
                         i + 1,
                         symbols.len(),
-                        trade_time.as_secs_f64() * 1000.0,
-                        result.filled_qty,
-                        result.avg_price,
-                        result.filled_qty
+                        result.side,
+                        symbol,
+                        result.leaves_qty,
+                        trade_time.as_secs_f64() * 1000.0
                     );
 
-                    trade_results.push(TradeResult {
-                        success: true,
-                        filled_qty: result.filled_qty,
-                        avg_price: result.avg_price,
-                        cum_quote_qty: result.cum_quote_qty,
-                        error_message: None,
-                    });
-
                     if i < symbols.len() - 1 {
-                        current_amount = if result.side == "BUY" {
-                            result.filled_qty
-                        } else {
-                            result.cum_quote_qty
-                        };
-
+                        current_amount = result.leaves_qty;
                         if current_amount <= 0.0 {
-                            error!("❌ Invalid amount for next trade: {}", current_amount);
-                            all_trades_successful = false;
+                            error!("Invalid leaves_qty for next trade: {:.8}", current_amount);
+                            all_successful = false;
                             break;
                         }
                     }
                 }
                 Err(e) => {
-                    let trade_time = trade_start.elapsed();
-                    error!(
-                        "❌ Real Trade {}/{} failed in {:.2}ms: {}",
-                        i + 1,
-                        symbols.len(),
-                        trade_time.as_secs_f64() * 1000.0,
-                        e
-                    );
-
-                    trade_results.push(TradeResult {
-                        success: false,
-                        filled_qty: 0.0,
-                        avg_price: 0.0,
-                        cum_quote_qty: 0.0,
-                        error_message: Some(e.to_string()),
-                    });
-
-                    match e.downcast_ref::<FixError>() {
-                        Some(FixError::RateLimit) => {
-                            warn!("⏰ Rate limit hit, will wait longer before next execution");
-                            thread::sleep(Duration::from_secs(10));
-                        }
-                        Some(FixError::Connection(_)) | Some(FixError::Tls(_)) => {
-                            error!("🔴 Connection error detected, marking connection as unhealthy");
-                            connection_health.store(false, Ordering::Relaxed);
-                        }
-                        Some(FixError::OrderRejected(reason)) => {
-                            warn!("🚫 Order rejected: {}", reason);
-                        }
-                        _ => {
-                            warn!("⚠️  Unknown error type: {}", e);
-                        }
-                    }
-
-                    all_trades_successful = false;
+                    error!("Trade {}/{} failed: {}", i + 1, symbols.len(), e);
+                    all_successful = false;
                     break;
                 }
             }
 
             if i < symbols.len() - 1 {
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(100));
             }
         }
 
-        if all_trades_successful {
-            info!(
-                "🎯 Triangular arbitrage completed successfully - all {} trades executed",
-                symbols.len()
-            );
-        } else {
-            warn!(
-                "⚠️  Triangular arbitrage partially completed - {} out of {} trades successful",
-                trade_results
-                    .iter()
-                    .filter(|r| r.success)
-                    .count(),
-                symbols.len()
-            );
+        Ok(all_successful)
+    }
+
+    fn execute_mock_triangular_trades_safe(
+        opportunity: &ArbitrageOpportunity,
+        client: &mut MockFixClient,
+        symbol_map: &Arc<SymbolMap>
+    ) -> Result<bool> {
+        let path = &opportunity.path;
+        let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
+        let directions = [
+            path.first_is_base_to_quote,
+            path.second_is_base_to_quote,
+            path.third_is_base_to_quote,
+        ];
+
+        let mut current_amount = opportunity.start_amount;
+        let mut all_successful = true;
+
+        for (i, &symbol) in symbols.iter().enumerate() {
+            let precision_info = symbol_map.get(symbol);
+            let (qty_precision, price_precision) = if let Some(info) = precision_info {
+                (info.qty_precision, info.price_precision)
+            } else {
+                (8, 8)
+            };
+
+            let order = if directions[i] {
+                MarketOrder {
+                    symbol: symbol.to_string(),
+                    side: OrderSide::Sell,
+                    quantity: current_amount,
+                    quote_quantity: None,
+                    qty_precision: Some(qty_precision),
+                    price_precision: Some(price_precision),
+                }
+            } else {
+                MarketOrder {
+                    symbol: symbol.to_string(),
+                    side: OrderSide::Buy,
+                    quantity: 0.0,
+                    quote_quantity: Some(current_amount),
+                    qty_precision: Some(qty_precision),
+                    price_precision: Some(price_precision),
+                }
+            };
+
+            match client.place_market_order(order) {
+                Ok(result) => {
+                    debug!(
+                        "Mock trade {}/{}: {} @ {:.8}",
+                        i + 1,
+                        symbols.len(),
+                        result.filled_qty,
+                        result.avg_price
+                    );
+
+                    if i < symbols.len() - 1 {
+                        current_amount = if directions[i] {
+                            result.cum_quote_qty
+                        } else {
+                            result.filled_qty
+                        };
+                    }
+                }
+                Err(e) => {
+                    error!("Mock trade {}/{} failed: {}", i + 1, symbols.len(), e);
+                    all_successful = false;
+                    break;
+                }
+            }
+
+            thread::sleep(Duration::from_millis(50));
         }
 
-        Ok(all_trades_successful)
+        Ok(all_successful)
     }
 
     pub fn connect(&self) -> Result<()> {
