@@ -170,6 +170,29 @@ fn run_real_test(
     }
 
     info!("🚀 Placing test order...");
+    match fix_client.place_market_order(test_order.clone()) {
+        Ok(result) => {
+            info!("✅ Test order placed successfully!");
+            info!("   Order ID: {}", result.order_id);
+            info!("   Symbol: {}", result.symbol);
+            info!("   Side: {}", result.side);
+            info!("   Order Status: {}", result.order_status);
+            info!("   Placement Time: {:.2}ms", result.execution_time.as_secs_f64() * 1000.0);
+
+            info!("🎉 Real test completed successfully!");
+            info!("   Your FIX API configuration is working correctly");
+            info!("   Market order was accepted by the exchange");
+            info!("   You can now run the full arbitrage system");
+        }
+        Err(e) => {
+            error!("❌ Test order failed: {}", e);
+            info!("🔌 Disconnecting FIX client...");
+            fix_client.disconnect()?;
+            return Err(anyhow!("Test order execution failed: {}", e));
+        }
+    }
+
+    info!("🚀 Placing test order 2...");
     match fix_client.place_market_order(test_order) {
         Ok(result) => {
             info!("✅ Test order placed successfully!");

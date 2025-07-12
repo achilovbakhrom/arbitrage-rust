@@ -43,7 +43,7 @@ impl Default for FixConfig {
             private_key_base64: String::new(),
             target_comp_id: "SPOT".to_string(),
             heartbeat_interval: 30,
-            endpoint: "fix-oe.binance.com:9000".to_string(),
+            endpoint: "fix-dc.binance.com:9000".to_string(),
         }
     }
 }
@@ -313,6 +313,7 @@ impl FixClient {
         fields.push(&signature_len_field);
         fields.push(&signature_field);
         fields.push("25035=1");
+        fields.push("25036=2");
 
         let message = self.build_fix_message_fast(&fields);
         self.send_message_fast(message)?;
@@ -671,7 +672,7 @@ impl FixClient {
             let mut body_length_buffer = Vec::with_capacity(16);
             reader.read_until(0x01, &mut body_length_buffer)?;
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
-
+            info!("parsing body length: {} {}", begin_string, body_length_field);
             if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
                 if let Ok(body_length) = length_part.parse::<usize>() {
                     let mut body_buffer = vec![0u8; body_length + 7];
