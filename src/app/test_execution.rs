@@ -29,7 +29,7 @@ pub fn run_test_execution(config: Config) -> Result<()> {
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
+    let shutdown_clone = Arc::clone(&shutdown);
 
     ctrlc
         ::set_handler(move || {

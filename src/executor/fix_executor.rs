@@ -7,7 +7,7 @@ use std::thread;
 use anyhow::{ Result, Context };
 use tracing::{ info, warn, debug, error };
 use crate::arbitrage::detector::{ ArbitrageOpportunity, ExecutionCallback };
-use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide, FixError };
+use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
 
@@ -34,15 +34,6 @@ impl std::fmt::Display for ExecutionStats {
             self.avg_execution_time_us
         )
     }
-}
-
-#[derive(Debug, Clone)]
-struct TradeResult {
-    success: bool,
-    filled_qty: f64,
-    avg_price: f64,
-    cum_quote_qty: f64,
-    error_message: Option<String>,
 }
 
 pub struct FixArbitrageExecutor {
@@ -72,22 +63,20 @@ impl FixArbitrageExecutor {
         let (real_fix_client, mock_fix_client) = if is_debug_mode {
             let mock_client = MockFixClient::new();
             (None, Some(Arc::new(Mutex::new(mock_client))))
-        } else {
-            if let Some(config) = fix_config {
-                let real_client = FixClient::new(config).context("Failed to create FIX client")?;
+        } else if let Some(config) = fix_config {
+            let real_client = FixClient::new(config).context("Failed to create FIX client")?;
 
-                for symbol in symbol_map.get_all_symbols() {
-                    real_client.update_symbol_precision(
-                        &symbol.symbol,
-                        symbol.qty_precision,
-                        symbol.price_precision
-                    );
-                }
-
-                (Some(Arc::new(Mutex::new(real_client))), None)
-            } else {
-                return Err(anyhow::anyhow!("FIX configuration required for production mode"));
+            for symbol in symbol_map.get_all_symbols() {
+                real_client.update_symbol_precision(
+                    &symbol.symbol,
+                    symbol.qty_precision,
+                    symbol.price_precision
+                );
             }
+
+            (Some(Arc::new(Mutex::new(real_client))), None)
+        } else {
+            return Err(anyhow::anyhow!("FIX configuration required for production mode"));
         };
 
         Ok(Self {
@@ -115,17 +104,17 @@ impl FixArbitrageExecutor {
         let real_client = self.real_fix_client.clone();
         let mock_client = self.mock_fix_client.clone();
         let is_debug = self.is_debug_mode;
-        let symbol_map = self.symbol_map.clone();
-        let executed_counter = self.execution_counter.clone();
-        let successful_counter = self.successful_executions.clone();
-        let failed_counter = self.failed_executions.clone();
-        let rejected_counter = self.rejected_executions.clone();
-        let time_counter = self.total_execution_time_us.clone();
-        let active_symbols = self.active_symbols.clone();
-        let global_lock = self.global_execution_lock.clone();
-        let last_exec_time = self.last_execution_time.clone();
+        let symbol_map = Arc::clone(&self.symbol_map);
+        let executed_counter = Arc::clone(&self.execution_counter);
+        let successful_counter = Arc::clone(&self.successful_executions);
+        let failed_counter = Arc::clone(&self.failed_executions);
+        let rejected_counter = Arc::clone(&self.rejected_executions);
+        let time_counter = Arc::clone(&self.total_execution_time_us);
+        let active_symbols = Arc::clone(&self.active_symbols);
+        let global_lock = Arc::clone(&self.global_execution_lock);
+        let last_exec_time = Arc::clone(&self.last_execution_time);
         let delay_ms = self.execution_delay_ms;
-        let connection_health = self.connection_health.clone();
+        let connection_health = Arc::clone(&self.connection_health);
 
         Arc::new(move |opportunity: ArbitrageOpportunity| {
             if !connection_health.load(Ordering::Relaxed) {
@@ -253,18 +242,16 @@ impl FixArbitrageExecutor {
             } else {
                 Err(anyhow::anyhow!("Mock client not available"))
             }
+        } else if let Some(real_client) = real_fix_client {
+            let mut client = real_client.lock().unwrap();
+            Self::execute_real_triangular_trades_safe(
+                opportunity,
+                &mut client,
+                symbol_map,
+                connection_health
+            )
         } else {
-            if let Some(real_client) = real_fix_client {
-                let mut client = real_client.lock().unwrap();
-                Self::execute_real_triangular_trades_safe(
-                    opportunity,
-                    &mut client,
-                    symbol_map,
-                    connection_health
-                )
-            } else {
-                Err(anyhow::anyhow!("Real client not available"))
-            }
+            Err(anyhow::anyhow!("Real client not available"))
         }
     }
 
@@ -451,13 +438,11 @@ impl FixArbitrageExecutor {
                 client.connect()?;
                 info!("Connected to Mock FIX API for debug mode");
             }
-        } else {
-            if let Some(real_client) = &self.real_fix_client {
-                let mut client = real_client.lock().unwrap();
-                client.connect()?;
-                self.connection_health.store(true, Ordering::Relaxed);
-                info!("Connected to Real FIX API for production trading");
-            }
+        } else if let Some(real_client) = &self.real_fix_client {
+            let mut client = real_client.lock().unwrap();
+            client.connect()?;
+            self.connection_health.store(true, Ordering::Relaxed);
+            info!("Connected to Real FIX API for production trading");
         }
         Ok(())
     }
@@ -473,103 +458,12 @@ impl FixArbitrageExecutor {
                 let mut client = mock_client.lock().unwrap();
                 client.disconnect()?;
             }
-        } else {
-            if let Some(real_client) = &self.real_fix_client {
-                let mut client = real_client.lock().unwrap();
-                client.disconnect()?;
-            }
+        } else if let Some(real_client) = &self.real_fix_client {
+            let mut client = real_client.lock().unwrap();
+            client.disconnect()?;
         }
 
         info!("FIX arbitrage executor disconnected gracefully");
         Ok(())
-    }
-
-    pub fn place_single_order(&self, order: MarketOrder) -> bool {
-        if let Some(real_client) = &self.real_fix_client {
-            let mut client = real_client.lock().unwrap();
-            let result = client.place_market_order(order).unwrap();
-            info!("result: {:?}", result);
-            return true;
-        }
-        return false;
-    }
-
-    pub fn force_execute_opportunity(&self, opportunity: ArbitrageOpportunity) -> bool {
-        if !self.connection_health.load(Ordering::Relaxed) {
-            error!("Cannot execute - connection is unhealthy");
-            return false;
-        }
-
-        if
-            self.global_execution_lock
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-        {
-            warn!("Cannot execute - another execution in progress");
-            return false;
-        }
-
-        let success = if self.is_debug_mode {
-            if let Some(mock_client) = &self.mock_fix_client {
-                let mut client = mock_client.lock().unwrap();
-                Self::execute_mock_triangular_trades_safe(
-                    &opportunity,
-                    &mut client,
-                    &self.symbol_map
-                ).unwrap_or(false)
-            } else {
-                false
-            }
-        } else {
-            if let Some(real_client) = &self.real_fix_client {
-                let mut client = real_client.lock().unwrap();
-                Self::execute_real_triangular_trades_safe(
-                    &opportunity,
-                    &mut client,
-                    &self.symbol_map,
-                    &self.connection_health
-                ).unwrap_or(false)
-            } else {
-                false
-            }
-        };
-
-        {
-            let mut last_time_guard = self.last_execution_time.lock().unwrap();
-            *last_time_guard = Some(Instant::now());
-        }
-
-        self.global_execution_lock.store(false, Ordering::Release);
-        success
-    }
-
-    pub fn get_execution_stats(&self) -> ExecutionStats {
-        let total = self.execution_counter.load(Ordering::Relaxed);
-        let successful = self.successful_executions.load(Ordering::Relaxed);
-        let rejected = self.rejected_executions.load(Ordering::Relaxed);
-        let failed = self.failed_executions.load(Ordering::Relaxed);
-        let total_time = self.total_execution_time_us.load(Ordering::Relaxed);
-
-        let success_rate = if total > 0 { (successful as f64) / (total as f64) } else { 0.0 };
-
-        let avg_time = if total > 0 { total_time / total } else { 0 };
-
-        ExecutionStats {
-            total_executions: total,
-            successful_executions: successful,
-            rejected_executions: rejected,
-            failed_executions: failed,
-            success_rate,
-            avg_execution_time_us: avg_time,
-        }
-    }
-
-    pub fn is_healthy(&self) -> bool {
-        self.connection_health.load(Ordering::Relaxed)
-    }
-
-    pub fn reset_connection_health(&self) {
-        self.connection_health.store(true, Ordering::Relaxed);
-        info!("Connection health reset to healthy");
     }
 }

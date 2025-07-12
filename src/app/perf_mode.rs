@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
     executor::fix_executor::FixArbitrageExecutor,
-    orderbook::manager::OrderBookManager,
+    orderbook_manager::manager::OrderBookManager,
     performance,
     utils::{
         console::print_config,
@@ -54,7 +54,9 @@ pub fn run_performance_test(config: Config) -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, api_client.clone()));
+    let orderbook_manager = Arc::new(
+        OrderBookManager::new(config.depth, Arc::<BinanceClient>::clone(&api_client))
+    );
     global::intern_batch(&unique_symbols);
 
     let detection_times: Arc<RwLock<FastHashMap<u16, Duration>>> = Arc::new(
@@ -74,10 +76,10 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         Arc::clone(&orderbook_manager),
         Arc::clone(&detector),
         Arc::clone(&shutdown),
-        detection_times.clone()
+        Arc::clone(&detection_times)
     );
 
-    let fix_executor = create_fix_executor(symbol_map.clone(), &config)?;
+    let fix_executor = create_fix_executor(Arc::clone(&symbol_map), &config)?;
     print_executor_info(fix_executor.is_some(), config.debug, config.threshold);
     let execution_handler = start_execution_thread(Arc::clone(&detector), Arc::clone(&shutdown));
 
@@ -85,7 +87,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
     let test_result = performance::run_performance_test(
         config.sbe_api_key,
         unique_symbols,
-        orderbook_manager.clone(),
+        Arc::clone(&orderbook_manager),
         120,
         output_file,
         shutdown,
@@ -145,13 +147,15 @@ fn start_detection_thread(
             info!("Performance arbitrage detection thread started");
 
             orderbook_manager.register_update_callback({
-                let detector = detector.clone();
-                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                    let detection_start = Instant::now();
-                    detector.process_symbol_update(symbol_id);
-                    let detection_time = detection_start.elapsed();
-                    detection_times.write().insert(symbol_id, detection_time);
-                })
+                let detector = Arc::clone(&detector);
+                Arc::new(
+                    move |symbol_id: u16, _book: &crate::orderbook_manager::orderbook::OrderBook| {
+                        let detection_start = Instant::now();
+                        detector.process_symbol_update(symbol_id);
+                        let detection_time = detection_start.elapsed();
+                        detection_times.write().insert(symbol_id, detection_time);
+                    }
+                )
             });
 
             println!("orderbook_manager.register_update_callback");
@@ -203,7 +207,7 @@ fn create_fix_executor(
 
         let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
-        match FixArbitrageExecutor::new(config.debug, fix_config, symbol_map.clone()) {
+        match FixArbitrageExecutor::new(config.debug, fix_config, Arc::clone(&symbol_map)) {
             Ok(executor) => {
                 if let Err(e) = executor.connect() {
                     error!("Failed to connect FIX executor: {}", e);

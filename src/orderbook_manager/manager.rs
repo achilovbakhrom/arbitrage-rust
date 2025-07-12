@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use std::thread;
 use crate::models::level::Level;
 use crate::exchange::client::ExchangeClient;
-use crate::orderbook::orderbook::OrderBook;
+use crate::orderbook_manager::orderbook::OrderBook;
 use crate::utils::symbol_interner::{ global, SymbolId };
 
 const MAX_SYMBOLS: usize = 2048;
@@ -97,11 +97,11 @@ impl OrderBookManager {
             let book_option = &mut *books_ptr.add(symbol_id as usize);
 
             if let Some(book) = book_option {
-                return book.clone();
+                return Arc::clone(book);
             }
 
             let book = Arc::new(OrderBook::new(self.default_depth));
-            *book_option = Some(book.clone());
+            *book_option = Some(Arc::clone(&book));
             book
         }
     }
@@ -296,7 +296,7 @@ impl OrderBookManager {
                 }
 
                 self.apply_snapshot(
-                    symbol.clone(),
+                    Arc::clone(&symbol),
                     &snapshot_bids,
                     &snapshot_asks,
                     snapshot_last_id
@@ -363,10 +363,10 @@ impl Clone for OrderBookManager {
         Self {
             books: self.books.clone(),
             default_depth: self.default_depth,
-            exchange_client: self.exchange_client.clone(),
-            recovery_mutex: self.recovery_mutex.clone(),
+            exchange_client: Arc::clone(&self.exchange_client),
+            recovery_mutex: Arc::clone(&self.recovery_mutex),
             last_recovery: new_last_recovery,
-            update_callback: self.update_callback.clone(),
+            update_callback: Arc::clone(&self.update_callback),
             runtime_handle: self.runtime_handle.clone(),
         }
     }

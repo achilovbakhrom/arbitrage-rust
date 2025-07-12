@@ -34,9 +34,9 @@ impl SymbolMap {
 
     #[inline]
     pub fn add_symbol(&mut self, symbol: Symbol) {
-        let base = symbol.base_asset.clone();
-        let quote = symbol.quote_asset.clone();
-        let symbol_str = symbol.symbol.clone();
+        let base = Arc::clone(&symbol.base_asset);
+        let quote = Arc::clone(&symbol.quote_asset);
+        let symbol_str = Arc::clone(&symbol.symbol);
 
         self.by_base
             .write()
@@ -118,9 +118,9 @@ impl SymbolMap {
                 for third_symbol in third_base_symbols {
                     if third_symbol.quote_asset.as_ref() == base_asset {
                         all_paths.push(TriangularPath {
-                            first_symbol: first_symbol.symbol.clone(),
-                            second_symbol: second_symbol.symbol.clone(),
-                            third_symbol: third_symbol.symbol.clone(),
+                            first_symbol: Arc::clone(&first_symbol.symbol),
+                            second_symbol: Arc::clone(&second_symbol.symbol),
+                            third_symbol: Arc::clone(&third_symbol.symbol),
                             first_is_base_to_quote: false,
                             second_is_base_to_quote: true,
                             third_is_base_to_quote: true,
@@ -134,9 +134,9 @@ impl SymbolMap {
                 for third_symbol in third_quote_symbols {
                     if third_symbol.base_asset.as_ref() == base_asset {
                         all_paths.push(TriangularPath {
-                            first_symbol: first_symbol.symbol.clone(),
-                            second_symbol: second_symbol.symbol.clone(),
-                            third_symbol: third_symbol.symbol.clone(),
+                            first_symbol: Arc::clone(&first_symbol.symbol),
+                            second_symbol: Arc::clone(&second_symbol.symbol),
+                            third_symbol: Arc::clone(&third_symbol.symbol),
                             first_is_base_to_quote: false,
                             second_is_base_to_quote: true,
                             third_is_base_to_quote: false,
@@ -159,9 +159,9 @@ impl SymbolMap {
                 for third_symbol in third_base_symbols {
                     if third_symbol.quote_asset.as_ref() == base_asset {
                         all_paths.push(TriangularPath {
-                            first_symbol: first_symbol.symbol.clone(),
-                            second_symbol: second_symbol.symbol.clone(),
-                            third_symbol: third_symbol.symbol.clone(),
+                            first_symbol: Arc::clone(&first_symbol.symbol),
+                            second_symbol: Arc::clone(&second_symbol.symbol),
+                            third_symbol: Arc::clone(&third_symbol.symbol),
                             first_is_base_to_quote: false,
                             second_is_base_to_quote: false,
                             third_is_base_to_quote: true,
@@ -175,9 +175,9 @@ impl SymbolMap {
                 for third_symbol in third_quote_symbols {
                     if third_symbol.base_asset.as_ref() == base_asset {
                         all_paths.push(TriangularPath {
-                            first_symbol: first_symbol.symbol.clone(),
-                            second_symbol: second_symbol.symbol.clone(),
-                            third_symbol: third_symbol.symbol.clone(),
+                            first_symbol: Arc::clone(&first_symbol.symbol),
+                            second_symbol: Arc::clone(&second_symbol.symbol),
+                            third_symbol: Arc::clone(&third_symbol.symbol),
                             first_is_base_to_quote: false,
                             second_is_base_to_quote: false,
                             third_is_base_to_quote: false,

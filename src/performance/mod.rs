@@ -9,7 +9,7 @@ use std::thread;
 use std::sync::atomic::{ AtomicBool, Ordering };
 use tracing::{ error, info, warn };
 use crate::exchange::sbe_client::BinanceSbeClient;
-use crate::orderbook::manager::OrderBookManager;
+use crate::orderbook_manager::manager::OrderBookManager;
 use crate::utils::types::FastHashMap;
 use crate::utils::symbol_interner::global;
 use parking_lot::RwLock;
@@ -182,24 +182,24 @@ pub fn run_performance_test(
     detection_times: Arc<RwLock<FastHashMap<u16, Duration>>>
 ) -> anyhow::Result<()> {
     let test_state = Arc::new(
-        PerformanceTestState::new(output_file, duration_secs, shutdown.clone())
+        PerformanceTestState::new(output_file, duration_secs, Arc::clone(&shutdown))
     );
 
     info!("Starting performance test for {} seconds", duration_secs);
 
-    let detection_times_for_cb = detection_times.clone();
-    let test_state_for_cb = test_state.clone();
+    let detection_times_for_cb = Arc::clone(&detection_times);
+    let test_state_for_cb = Arc::clone(&test_state);
 
     let ws_handler = start_websocket_thread(
         api_key,
         symbols,
-        orderbook_manager.clone(),
+        Arc::clone(&orderbook_manager),
         shutdown,
         test_state_for_cb,
         detection_times_for_cb
     )?;
 
-    let test_state_for_signal = test_state.clone();
+    let test_state_for_signal = Arc::clone(&test_state);
     ctrlc::set_handler(move || {
         info!("Received Ctrl+C, stopping performance test...");
         test_state_for_signal.stop();
