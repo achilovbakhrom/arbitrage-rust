@@ -7,7 +7,7 @@ mod exchange;
 mod executor;
 mod utils;
 mod models;
-mod orderbook;
+mod orderbook_manager;
 mod arbitrage;
 mod performance;
 
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
         .context("Failed to initialize logging")?;
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown_flag.clone();
+    let shutdown_clone = Arc::clone(&shutdown_flag);
 
     let result = match command {
         Command::Run => {

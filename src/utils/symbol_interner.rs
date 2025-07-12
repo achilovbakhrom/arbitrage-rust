@@ -49,8 +49,8 @@ impl SymbolInterner {
             panic!("Symbol interner capacity exceeded");
         }
 
-        symbol_map.insert(symbol.clone(), id);
-        *self.id_to_symbol[id as usize].write() = Some(symbol.clone());
+        symbol_map.insert(Arc::clone(symbol), id);
+        *self.id_to_symbol[id as usize].write() = Some(Arc::clone(symbol));
 
         let symbol_bytes = symbol.as_bytes().to_vec().into_boxed_slice();
         self.bytes_to_id.write().insert(symbol_bytes, id);
@@ -62,11 +62,6 @@ impl SymbolInterner {
     pub fn get_id(&self, symbol: &str) -> Option<SymbolId> {
         let arc_symbol: Arc<str> = symbol.into();
         self.symbol_to_id.read().get(&arc_symbol).copied()
-    }
-
-    #[inline(always)]
-    pub fn get_id_arc(&self, symbol: &Arc<str>) -> Option<SymbolId> {
-        self.symbol_to_id.read().get(symbol).copied()
     }
 
     #[inline(always)]
@@ -125,11 +120,6 @@ pub mod global {
     use super::*;
 
     #[inline]
-    pub fn intern(symbol: &str) -> SymbolId {
-        GLOBAL_SYMBOL_INTERNER.get_or_intern(symbol)
-    }
-
-    #[inline]
     pub fn intern_arc(symbol: &Arc<str>) -> SymbolId {
         GLOBAL_SYMBOL_INTERNER.get_or_intern_arc(symbol)
     }
@@ -137,11 +127,6 @@ pub mod global {
     #[inline(always)]
     pub fn get_id(symbol: &str) -> Option<SymbolId> {
         GLOBAL_SYMBOL_INTERNER.get_id(symbol)
-    }
-
-    #[inline(always)]
-    pub fn get_id_arc(symbol: &Arc<str>) -> Option<SymbolId> {
-        GLOBAL_SYMBOL_INTERNER.get_id_arc(symbol)
     }
 
     #[inline(always)]

@@ -141,7 +141,6 @@ pub struct FixClient {
     symbol_precisions: Arc<Mutex<HashMap<String, SymbolPrecision>>>,
     stream: Arc<Mutex<Option<TlsStream<TcpStream>>>>,
     rate_limiter: Arc<Mutex<RateLimiter>>,
-    last_test_request_time: Arc<Mutex<Instant>>,
     logout_received: Arc<AtomicBool>,
     logout_condvar: Arc<(StdMutex<bool>, Condvar)>,
 }
@@ -150,7 +149,7 @@ impl FixClient {
     pub fn new(config: FixConfig) -> Result<Self> {
         let key_bytes = general_purpose::STANDARD
             .decode(&config.private_key_base64)
-            .map_err(|e| FixError::Parse(format!("Failed to decode private key: {}", e)))?;
+            .map_err(|e| FixError::Parse(format!("Failed to decode private key: {e}")))?;
 
         let signing_key = Self::parse_ed25519_key(&key_bytes)?;
 
@@ -167,7 +166,6 @@ impl FixClient {
             symbol_precisions: Arc::new(Mutex::new(HashMap::with_capacity(256))),
             stream: Arc::new(Mutex::new(None)),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(2.0))),
-            last_test_request_time: Arc::new(Mutex::new(Instant::now())),
             logout_received: Arc::new(AtomicBool::new(false)),
             logout_condvar: Arc::new((StdMutex::new(false), Condvar::new())),
         })
@@ -201,7 +199,7 @@ impl FixClient {
 
             let pem_bytes = general_purpose::STANDARD
                 .decode(&base64_content)
-                .map_err(|e| FixError::Parse(format!("Failed to decode PEM content: {}", e)))?;
+                .map_err(|e| FixError::Parse(format!("Failed to decode PEM content: {e}")))?;
 
             return Self::extract_ed25519_from_pkcs8(&pem_bytes);
         }
@@ -245,7 +243,7 @@ impl FixClient {
     fn format_quantity(&self, quantity: f64, precision: Option<u8>) -> String {
         match precision {
             Some(p) => format!("{:.prec$}", quantity, prec = p as usize),
-            None => format!("{:.8}", quantity),
+            None => format!("{quantity:.8}"),
         }
     }
 
@@ -293,27 +291,28 @@ impl FixClient {
 
         let sender_comp_field = format!("49={}", self.sender_comp_id);
         let target_comp_field = format!("56={}", self.config.target_comp_id);
-        let seq_num_field = format!("34={}", seq_num);
-        let sending_time_field = format!("52={}", sending_time);
+        let seq_num_field = format!("34={seq_num}");
+        let sending_time_field = format!("52={sending_time}");
         let heartbeat_field = format!("108={}", self.config.heartbeat_interval);
         let api_key_field = format!("553={}", self.config.api_key);
         let signature_len_field = format!("95={}", signature_base64.len());
-        let signature_field = format!("96={}", signature_base64);
+        let signature_field = format!("96={signature_base64}");
 
-        let mut fields = Vec::with_capacity(12);
-        fields.push("35=A");
-        fields.push(&sender_comp_field);
-        fields.push(&target_comp_field);
-        fields.push(&seq_num_field);
-        fields.push(&sending_time_field);
-        fields.push("98=0");
-        fields.push(&heartbeat_field);
-        fields.push("141=Y");
-        fields.push(&api_key_field);
-        fields.push(&signature_len_field);
-        fields.push(&signature_field);
-        fields.push("25035=1");
-        fields.push("25036=2");
+        let fields = vec![
+            "35=A",
+            &sender_comp_field,
+            &target_comp_field,
+            &seq_num_field,
+            &sending_time_field,
+            "98=0",
+            &heartbeat_field,
+            "141=Y",
+            &api_key_field,
+            &signature_len_field,
+            &signature_field,
+            "25035=1",
+            "25036=2"
+        ];
 
         let message = self.build_fix_message_fast(&fields);
         self.send_message_fast(message)?;
@@ -325,7 +324,8 @@ impl FixClient {
             match self.read_fix_message_fast() {
                 Ok(response) => {
                     let fields = Self::parse_fix_message_fast(&response);
-                    let msg_type = fields.get("35").unwrap_or(&"Unknown".to_string()).clone();
+                    let msg = "Unknown".to_string();
+                    let msg_type = fields.get("35").unwrap_or(&msg);
 
                     match msg_type.as_str() {
                         "A" => {
@@ -336,13 +336,13 @@ impl FixClient {
                             let msg = "Unknown".to_string();
                             let reject_code = fields.get("373").unwrap_or(&msg);
                             return Err(
-                                FixError::Auth(format!("Logon rejected: {}", reject_code)).into()
+                                FixError::Auth(format!("Logon rejected: {reject_code}")).into()
                             );
                         }
                         "5" => {
                             let msg = "Server initiated logout".to_string();
                             let reason = fields.get("58").unwrap_or(&msg);
-                            return Err(FixError::Auth(format!("Server logout: {}", reason)).into());
+                            return Err(FixError::Auth(format!("Server logout: {reason}")).into());
                         }
                         _ => {
                             continue;
@@ -373,10 +373,10 @@ impl FixClient {
         let completed = Arc::new(AtomicBool::new(false));
 
         let order_exec = OrderExecution {
-            result: result.clone(),
-            condvar: condvar.clone(),
+            result: Arc::clone(&result),
+            condvar: Arc::clone(&condvar),
             start_time: Instant::now(),
-            completed: completed.clone(),
+            completed: Arc::clone(&completed),
         };
 
         {
@@ -396,33 +396,46 @@ impl FixClient {
         let seq_num = self.seq_num.fetch_add(1, Ordering::Relaxed);
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-        let seq_num_field = format!("34={}", seq_num);
+        let seq_num_field = format!("34={seq_num}");
         let sender_comp_field = format!("49={}", self.sender_comp_id);
-        let sending_time_field = format!("52={}", sending_time);
+        let sending_time_field = format!("52={sending_time}");
         let target_comp_field = format!("56={}", self.config.target_comp_id);
-        let client_order_id_field = format!("11={}", client_order_id);
+        let client_order_id_field = format!("11={client_order_id}");
         let symbol_field = format!("55={}", order.symbol.to_uppercase());
         let side_field = format!("54={}", order.side.to_fix_side());
 
         let quantity_field = if let Some(quote_qty) = order.quote_quantity {
             let formatted_qty = self.format_quantity(quote_qty, order.price_precision);
-            format!("152={}", formatted_qty)
+            format!("152={formatted_qty}")
         } else {
             let formatted_qty = self.format_quantity(order.quantity, order.qty_precision);
-            format!("38={}", formatted_qty)
+            format!("38={formatted_qty}")
         };
 
-        let mut fields = Vec::with_capacity(10);
-        fields.push("35=D");
-        fields.push(&seq_num_field);
-        fields.push(&sender_comp_field);
-        fields.push(&sending_time_field);
-        fields.push(&target_comp_field);
-        fields.push(&client_order_id_field);
-        fields.push(&quantity_field);
-        fields.push("40=1");
-        fields.push(&side_field);
-        fields.push(&symbol_field);
+        // let mut fields = Vec::with_capacity(10);
+        // fields.push("35=D");
+        // fields.push(&seq_num_field);
+        // fields.push(&sender_comp_field);
+        // fields.push(&sending_time_field);
+        // fields.push(&target_comp_field);
+        // fields.push(&client_order_id_field);
+        // fields.push(&quantity_field);
+        // fields.push("40=1");
+        // fields.push(&side_field);
+        // fields.push(&symbol_field);
+
+        let fields = vec![
+            "35=D",
+            &seq_num_field,
+            &sender_comp_field,
+            &sending_time_field,
+            &target_comp_field,
+            &client_order_id_field,
+            &quantity_field,
+            "40=1",
+            &side_field,
+            &symbol_field
+        ];
 
         let message = self.build_fix_message_fast(&fields);
         info!("Sending order: {} {} {}", order.side.to_fix_side(), order.symbol, if
@@ -508,7 +521,7 @@ impl FixClient {
         let message_without_checksum = header + &body;
 
         let checksum = message_without_checksum.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
-        format!("{}10={:03}\x01", message_without_checksum, checksum)
+        format!("{message_without_checksum}10={checksum:03}\x01")
     }
 
     #[inline]
@@ -720,7 +733,7 @@ impl FixClient {
                 if let Some(exec_result) = Self::parse_execution_report(&fields)? {
                     let client_order_id = exec_result.client_order_id.clone();
 
-                    let mut orders = pending_orders.lock();
+                    let orders = pending_orders.lock();
                     if let Some(order_exec) = orders.get(&client_order_id) {
                         let mut result = exec_result;
                         result.execution_time = order_exec.start_time.elapsed();
@@ -890,10 +903,10 @@ impl FixClient {
 
                 let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
-                let sender_comp_field = format!("49={}", sender_comp_id);
-                let target_comp_field = format!("56={}", target_comp_id);
-                let seq_field = format!("34={}", seq);
-                let sending_time_field = format!("52={}", sending_time);
+                let sender_comp_field = format!("49={sender_comp_id}");
+                let target_comp_field = format!("56={target_comp_id}");
+                let seq_field = format!("34={seq}");
+                let sending_time_field = format!("52={sending_time}");
 
                 let fields = [
                     "35=0",
@@ -907,7 +920,7 @@ impl FixClient {
                 let header = format!("8=FIX.4.4\x019={}\x01", body.len());
                 let message = header + &body;
                 let checksum = message.bytes().fold(0u8, |acc, b| acc.wrapping_add(b));
-                let full_message = format!("{}10={:03}\x01", message, checksum);
+                let full_message = format!("{message}10={checksum:03}\x01");
 
                 let mut stream_guard = stream_ref.lock();
                 if let Some(ref mut stream) = *stream_guard {
@@ -943,8 +956,8 @@ impl FixClient {
 
         let sender_comp_field = format!("49={}", self.sender_comp_id);
         let target_comp_field = format!("56={}", self.config.target_comp_id);
-        let seq_num_field = format!("34={}", seq_num);
-        let sending_time_field = format!("52={}", sending_time);
+        let seq_num_field = format!("34={seq_num}");
+        let sending_time_field = format!("52={sending_time}");
 
         let fields = [
             "35=5",
@@ -962,7 +975,7 @@ impl FixClient {
             info!("Logout message sent, waiting for server response...");
 
             let (lock, cvar) = &*self.logout_condvar;
-            let mut logout_flag = lock.lock().unwrap();
+            let logout_flag = lock.lock().unwrap();
 
             let wait_result = cvar
                 .wait_timeout_while(
@@ -997,30 +1010,6 @@ impl FixClient {
         }
 
         info!("FIX client disconnected gracefully");
-        Ok(())
-    }
-
-    pub fn force_disconnect(&mut self) -> Result<()> {
-        warn!("Force disconnecting FIX client...");
-
-        self.shutdown.store(true, Ordering::Release);
-        self.is_connected.store(false, Ordering::Release);
-
-        if let Some(handle) = self.heartbeat_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.connection_handle.take() {
-            let _ = handle.join();
-        }
-
-        {
-            let mut stream_guard = self.stream.lock();
-            if let Some(stream) = stream_guard.take() {
-                drop(stream);
-            }
-        }
-
-        warn!("FIX client force disconnected");
         Ok(())
     }
 

@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient, sbe_client::BinanceSbeClient },
     executor::fix_executor::FixArbitrageExecutor,
-    orderbook::manager::OrderBookManager,
+    orderbook_manager::manager::OrderBookManager,
     utils::{
         console::{ print_app_started, print_app_starting, print_config },
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
@@ -45,9 +45,11 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     global::intern_batch(&unique_symbols);
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
+    let shutdown_clone = Arc::clone(&shutdown);
 
-    let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
+    let orderbook_manager = Arc::new(
+        OrderBookManager::new(config.depth, Arc::<BinanceClient>::clone(&client))
+    );
     global::intern_batch(&unique_symbols);
 
     let detector = arbitrage::detector::create_detector(
@@ -63,7 +65,7 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let detection_handle = start_detection_thread(
         Arc::clone(&detector),
         Arc::clone(&orderbook_manager),
-        shutdown.clone()
+        Arc::clone(&shutdown)
     );
 
     let fix_executor = create_fix_executor(Arc::clone(&symbol_map), &config)?;
@@ -84,9 +86,9 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
     let ws_handle = start_websocket_thread(
         config.sbe_api_key.clone(),
-        symbol_mappings,
-        orderbook_manager.clone(),
-        shutdown.clone()
+        symbol_mappings.clone(),
+        Arc::clone(&orderbook_manager),
+        Arc::clone(&shutdown)
     )?;
 
     print_app_started();
@@ -222,7 +224,7 @@ fn create_fix_executor(
 
         let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
-        match FixArbitrageExecutor::new(config.debug, fix_config, symbol_map.clone()) {
+        match FixArbitrageExecutor::new(config.debug, fix_config, Arc::clone(&symbol_map)) {
             Ok(executor) => {
                 if let Err(e) = executor.connect() {
                     error!("Failed to connect FIX executor: {}", e);
@@ -257,10 +259,12 @@ fn start_detection_thread(
             info!("Arbitrage detection thread started");
 
             let update_callback = {
-                let detector = detector.clone();
-                Arc::new(move |symbol_id: u16, _book: &crate::orderbook::orderbook::OrderBook| {
-                    detector.process_symbol_update(symbol_id);
-                })
+                let detector = Arc::clone(&detector);
+                Arc::new(
+                    move |symbol_id: u16, _book: &crate::orderbook_manager::orderbook::OrderBook| {
+                        detector.process_symbol_update(symbol_id);
+                    }
+                )
             };
 
             orderbook_manager.register_update_callback(update_callback);

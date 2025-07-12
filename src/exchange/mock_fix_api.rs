@@ -40,7 +40,7 @@ impl MockFixClient {
     fn format_quantity(&self, quantity: f64, precision: Option<u8>) -> String {
         match precision {
             Some(p) => format!("{:.prec$}", quantity, prec = p as usize),
-            None => format!("{:.8}", quantity),
+            None => format!("{quantity:.8}"),
         }
     }
 

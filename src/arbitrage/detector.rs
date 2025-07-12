@@ -1,10 +1,9 @@
-
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
 use tracing::info;
 
 use crate::models::triangular_path::TriangularPath;
-use crate::orderbook::manager::OrderBookManager;
+use crate::orderbook_manager::manager::OrderBookManager;
 use crate::utils::symbol_interner::global;
 
 #[derive(Debug, Clone)]
@@ -177,6 +176,7 @@ impl ArbitrageDetector {
 
         Arc::new(ArbitrageDetector {
             orderbook_manager,
+            shutdown,
             all_paths: unwrapped_paths.into_boxed_slice(),
             path_data: path_data.into_boxed_slice(),
             symbol_map,
@@ -184,7 +184,6 @@ impl ArbitrageDetector {
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
             min_profit_for_execution: (1.0 + min_profit_threshold) as f32,
-            shutdown: shutdown,
         })
     }
 
@@ -252,7 +251,8 @@ impl ArbitrageDetector {
             )? as f32;
 
             let mut amount = self.start_amount;
-            if path_data.first_is_base_to_quote() { // ask/bid
+            if path_data.first_is_base_to_quote() {
+                // ask/bid
                 amount *= first_price;
             } else {
                 amount /= first_price;

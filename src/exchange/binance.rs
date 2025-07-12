@@ -74,11 +74,7 @@ enum BinanceSymbolFilter {
 
 impl BinanceClient {
     pub fn new(api_key: String, testnet: bool) -> Result<Self> {
-        let base_url = if testnet {
-            Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
-        } else {
-            Url::parse("https://api.binance.com/api/").context("Invalid API URL")?
-        };
+        let base_url = Url::parse("https://api.binance.com/api/").context("Invalid API URL")?;
 
         Ok(Self {
             base_url,
@@ -215,23 +211,6 @@ impl ExchangeClient for BinanceClient {
         Ok(spot_symbols)
     }
 
-    async fn get_symbol(&self, symbol: &str) -> Result<Symbol> {
-        if self.is_cache_valid().await {
-            if let Some(symbols) = self.symbols_cache.read().await.as_ref() {
-                if let Some(found) = symbols.iter().find(|s| s.symbol.as_ref() == symbol) {
-                    return Ok(found.clone());
-                }
-            }
-        }
-
-        let all_symbols = self.get_all_symbols().await?;
-
-        all_symbols
-            .into_iter()
-            .find(|s| s.symbol.as_ref() == symbol)
-            .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", symbol))
-    }
-
     async fn is_operational(&self) -> Result<bool> {
         let url = self.base_url.join("v3/ping").context("Failed to build URL")?;
 
@@ -249,7 +228,7 @@ impl ExchangeClient for BinanceClient {
         }
 
         let url = self.base_url
-            .join(&format!("v3/depth?symbol={}&limit={}", symbol, limit))
+            .join(&format!("v3/depth?symbol={symbol}&limit={limit}"))
             .context("Failed to build depth API URL")?;
 
         debug!(symbol = %symbol, limit = limit, url = %url.as_str(), "Fetching orderbook depth");
@@ -260,18 +239,18 @@ impl ExchangeClient for BinanceClient {
             .header("X-MBX-APIKEY", self.api_key.as_ref())
             .timeout(Duration::from_secs(5))
             .send().await
-            .context(format!("Failed to fetch depth from Binance for symbol {}", symbol))?;
+            .context(format!("Failed to fetch depth from Binance for symbol {symbol}"))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             error!(symbol = %symbol, status = %status, response = %text, "Binance depth API error");
-            anyhow::bail!("Binance depth API error for {}: {} - {}", symbol, status, text);
+            anyhow::bail!("Binance depth API error for {symbol}: {status} - {text}");
         }
 
         let depth: BinanceDepthResponse = response
             .json().await
-            .context(format!("Failed to parse Binance depth response for {}", symbol))?;
+            .context(format!("Failed to parse Binance depth response for {symbol}"))?;
 
         let bids = depth.bids
             .iter()
