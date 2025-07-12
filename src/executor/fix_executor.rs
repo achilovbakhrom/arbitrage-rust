@@ -576,6 +576,16 @@ impl FixArbitrageExecutor {
         Ok(())
     }
 
+    pub fn place_single_order(&self, order: MarketOrder) -> bool {
+        if let Some(real_client) = &self.real_fix_client {
+            let mut client = real_client.lock().unwrap();
+            let result = client.place_market_order(order).unwrap();
+            info!("result: {:?}", result);
+            return true;
+        }
+        return false;
+    }
+
     pub fn force_execute_opportunity(&self, opportunity: ArbitrageOpportunity) -> bool {
         if !self.connection_health.load(Ordering::Relaxed) {
             error!("Cannot execute - connection is unhealthy");

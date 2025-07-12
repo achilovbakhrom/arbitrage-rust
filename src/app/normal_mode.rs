@@ -1,4 +1,4 @@
-use std::{ ops::Deref, sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
+use std::{ sync::{ atomic::{ AtomicBool, Ordering }, Arc }, thread, time::Duration };
 use crate::{
     arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
@@ -47,11 +47,9 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
-    // 1. Create Orderbook Manager
     let orderbook_manager = Arc::new(OrderBookManager::new(config.depth, client.clone()));
     global::intern_batch(&unique_symbols);
 
-    // 2. Create Detector
     let detector = arbitrage::detector::create_detector(
         Arc::clone(&orderbook_manager),
         triangular_paths,
@@ -67,8 +65,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         Arc::clone(&orderbook_manager),
         shutdown.clone()
     );
-
-    // ----- Detecrtor end ------
 
     let fix_executor = create_fix_executor(Arc::clone(&symbol_map), &config)?;
 
@@ -86,7 +82,6 @@ pub fn run_normal_mode(config: Config) -> Result<()> {
         .context("Error setting Ctrl-C handler")?;
 
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
-    // ----- Start sbe socket update -------
     let ws_handle = start_websocket_thread(
         config.sbe_api_key.clone(),
         symbol_mappings,
