@@ -26,6 +26,7 @@ pub struct Config {
     pub enable_trading: bool,
     pub max_slippage_percentage: f64,
     pub min_execution_profit_threshold: f64,
+    pub performance_test_duration_secs: u64, // Add this new field
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +202,12 @@ impl Config {
             .parse::<f64>()
             .unwrap_or(0.1);
 
+        let performance_test_duration_secs = env
+            ::var("TAA_PERFORMANCE_TEST_DURATION")
+            .unwrap_or_else(|_| "300".to_string())
+            .parse::<u64>()
+            .context("Failed to parse TAA_PERFORMANCE_TEST_DURATION")?;
+
         Ok(Config {
             debug,
             sbe_api_key,
@@ -219,6 +226,7 @@ impl Config {
             enable_trading,
             max_slippage_percentage,
             min_execution_profit_threshold,
+            performance_test_duration_secs,
         })
     }
 

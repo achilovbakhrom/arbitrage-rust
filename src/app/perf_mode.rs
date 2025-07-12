@@ -88,7 +88,7 @@ pub fn run_performance_test(config: Config) -> Result<()> {
         config.sbe_api_key,
         unique_symbols,
         Arc::clone(&orderbook_manager),
-        120,
+        config.performance_test_duration_secs, // Use config value instead of hardcoded 120
         output_file,
         shutdown,
         detection_times
