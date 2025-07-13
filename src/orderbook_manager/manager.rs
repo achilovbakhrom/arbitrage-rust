@@ -1,6 +1,8 @@
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tracing::{ debug, error, info, warn };
+use tokio::sync::Semaphore;
 use anyhow::{ Result, Context };
 use std::time::Duration;
 use parking_lot::RwLock;
@@ -11,6 +13,15 @@ use crate::orderbook_manager::orderbook::OrderBook;
 use crate::utils::symbol_interner::{ global, SymbolId };
 
 const MAX_SYMBOLS: usize = 2048;
+static LAST_REQUEST_TIME: AtomicU64 = AtomicU64::new(0);
+const MIN_REQUEST_INTERVAL_MS: u64 = 100; // 10 requests per second max
+const MAX_CONCURRENT_SNAPSHOTS: usize = 3;
+
+lazy_static::lazy_static! {
+    static ref SNAPSHOT_SEMAPHORE: Arc<Semaphore> = Arc::new(
+        Semaphore::new(MAX_CONCURRENT_SNAPSHOTS)
+    );
+}
 
 pub type OrderbookUpdateCallback = Arc<dyn Fn(SymbolId, &OrderBook) + Send + Sync>;
 
@@ -183,11 +194,11 @@ impl OrderBookManager {
             return;
         }
 
-        let now = std::time::SystemTime
+        let now_ms = std::time::SystemTime
             ::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         let last_time = unsafe {
             self.last_recovery
@@ -195,14 +206,15 @@ impl OrderBookManager {
                 .load(std::sync::atomic::Ordering::Relaxed)
         };
 
-        if now < last_time + 3 {
+        // Don't recover same symbol within 5 seconds
+        if now_ms < last_time + 5000 {
             return;
         }
 
         unsafe {
             self.last_recovery
                 .get_unchecked(symbol_id as usize)
-                .store(now, std::sync::atomic::Ordering::Relaxed);
+                .store(now_ms, std::sync::atomic::Ordering::Relaxed);
         }
 
         let symbol = if let Some(sym) = global::get_symbol(symbol_id) {
@@ -213,19 +225,64 @@ impl OrderBookManager {
 
         let manager = self.clone();
         self.runtime_handle.spawn(async move {
-            manager.recovery_task(symbol).await;
+            manager.recovery_task_rate_limited(symbol, symbol_id).await;
         });
     }
 
-    pub fn apply_snapshot(
-        &self,
-        symbol: Arc<str>,
-        bids: &[(f64, f64)],
-        asks: &[(f64, f64)],
-        last_update_id: u64
-    ) {
-        let symbol_id = global::intern_arc(&symbol);
-        self.apply_snapshot_by_id(symbol_id, bids, asks, last_update_id);
+    async fn recovery_task_rate_limited(&self, symbol: Arc<str>, symbol_id: SymbolId) {
+        // Acquire semaphore to limit concurrent snapshots
+        let _permit = match SNAPSHOT_SEMAPHORE.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // Too many concurrent recoveries, skip this one
+                return;
+            }
+        };
+
+        // Rate limit: ensure minimum interval between requests
+        let now_ms = std::time::SystemTime
+            ::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let last_request = LAST_REQUEST_TIME.load(Ordering::Relaxed);
+        if now_ms < last_request + MIN_REQUEST_INTERVAL_MS {
+            let wait_time = last_request + MIN_REQUEST_INTERVAL_MS - now_ms;
+            tokio::time::sleep(Duration::from_millis(wait_time)).await;
+        }
+
+        LAST_REQUEST_TIME.store(
+            std::time::SystemTime
+                ::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            Ordering::Relaxed
+        );
+
+        // Add random jitter to prevent thundering herd
+        let jitter = rand::random::<u64>() % 200;
+        tokio::time::sleep(Duration::from_millis(jitter)).await;
+
+        match self.fetch_snapshot(symbol.as_ref()).await {
+            Ok((snapshot_bids, snapshot_asks, snapshot_last_id)) => {
+                if !snapshot_bids.is_empty() && !snapshot_asks.is_empty() {
+                    self.apply_snapshot_by_id(
+                        symbol_id,
+                        &snapshot_bids,
+                        &snapshot_asks,
+                        snapshot_last_id
+                    );
+                }
+            }
+            Err(e) => {
+                // If rate limited, back off longer
+                if e.to_string().contains("429") || e.to_string().contains("418") {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        }
     }
 
     pub fn apply_snapshot_by_id(
@@ -256,57 +313,6 @@ impl OrderBookManager {
         }
 
         self.trigger_arbitrage_detection(symbol_id);
-
-        if let Some(symbol) = global::get_symbol(symbol_id) {
-            debug!(
-                symbol = %symbol,
-                update_id = last_update_id,
-                bid_count = bids.len(),
-                ask_count = asks.len(),
-                "Applied orderbook snapshot"
-            );
-        }
-    }
-
-    async fn recovery_task(&self, symbol: Arc<str>) {
-        let jitter = rand::random::<u64>() % 200;
-        tokio::time::sleep(Duration::from_millis(jitter)).await;
-
-        let can_proceed = {
-            match self.recovery_mutex.try_lock() {
-                Ok(_lock) => true,
-                Err(_) => {
-                    debug!(symbol = %symbol, "Recovery already in progress, skipping");
-                    false
-                }
-            }
-        };
-
-        if !can_proceed {
-            return;
-        }
-
-        info!(symbol = %symbol, "Starting orderbook recovery process");
-
-        match self.fetch_snapshot(symbol.as_ref()).await {
-            Ok((snapshot_bids, snapshot_asks, snapshot_last_id)) => {
-                if snapshot_bids.is_empty() || snapshot_asks.is_empty() {
-                    warn!(symbol = %symbol, "Empty orderbook snapshot received");
-                    return;
-                }
-
-                self.apply_snapshot(
-                    Arc::clone(&symbol),
-                    &snapshot_bids,
-                    &snapshot_asks,
-                    snapshot_last_id
-                );
-                info!(symbol = %symbol, "Orderbook recovery completed successfully");
-            }
-            Err(e) => {
-                error!(symbol = %symbol, error = %e, "Failed to fetch orderbook snapshot");
-            }
-        }
     }
 
     pub async fn fetch_snapshot(
@@ -317,8 +323,9 @@ impl OrderBookManager {
             return Err(anyhow::anyhow!("Cannot fetch snapshot for empty symbol"));
         }
 
+        // Use smaller depth to reduce weight
         let depth_response = self.exchange_client
-            .fetch_depth(symbol, self.default_depth).await
+            .fetch_depth(symbol, 20).await
             .context(format!("Failed to fetch orderbook snapshot for {symbol}"))?;
 
         let bids = depth_response.bids
