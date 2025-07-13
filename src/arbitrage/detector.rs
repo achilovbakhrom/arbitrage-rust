@@ -206,7 +206,7 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path_internal(&self, path_idx: u16) -> Option<f32> {
+    fn calculate_portfolio(&self, path_idx: u16) -> Option<f32> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
@@ -327,7 +327,7 @@ impl ArbitrageDetector {
             for i in 0..max_paths_to_check {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
-                if let Some(profit_ratio) = self.check_path_internal(path_idx) {
+                if let Some(profit_ratio) = self.calculate_portfolio(path_idx) {
                     if let Some(opportunity) = self.check_path(path_idx, profit_ratio as f64) {
                         self.trigger_execution_callbacks(opportunity);
                     }
