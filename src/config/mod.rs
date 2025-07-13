@@ -26,7 +26,7 @@ pub struct Config {
     pub enable_trading: bool,
     pub max_slippage_percentage: f64,
     pub min_execution_profit_threshold: f64,
-    pub performance_test_duration_secs: u64, // Add this new field
+    pub performance_test_duration_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
