@@ -47,7 +47,6 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
     let orderbook_manager = Arc::new(
         OrderBookManager::new(config.depth, Arc::<BinanceClient>::clone(&client))
     );
-    global::intern_batch(&unique_symbols);
 
     let detector = arbitrage::detector::create_detector(
         Arc::clone(&orderbook_manager),
