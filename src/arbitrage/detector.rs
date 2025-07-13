@@ -252,7 +252,6 @@ impl ArbitrageDetector {
 
             let mut amount = self.start_amount;
             if path_data.first_is_base_to_quote() {
-                // ask/bid
                 amount *= first_price;
             } else {
                 amount /= first_price;

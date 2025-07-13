@@ -412,18 +412,6 @@ impl FixClient {
             format!("38={formatted_qty}")
         };
 
-        // let mut fields = Vec::with_capacity(10);
-        // fields.push("35=D");
-        // fields.push(&seq_num_field);
-        // fields.push(&sender_comp_field);
-        // fields.push(&sending_time_field);
-        // fields.push(&target_comp_field);
-        // fields.push(&client_order_id_field);
-        // fields.push(&quantity_field);
-        // fields.push("40=1");
-        // fields.push(&side_field);
-        // fields.push(&symbol_field);
-
         let fields = vec![
             "35=D",
             &seq_num_field,
