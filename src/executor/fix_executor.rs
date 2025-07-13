@@ -347,10 +347,6 @@ impl FixArbitrageExecutor {
                     break;
                 }
             }
-
-            if i < symbols.len() - 1 {
-                thread::sleep(Duration::from_millis(100));
-            }
         }
 
         Ok(all_successful)
