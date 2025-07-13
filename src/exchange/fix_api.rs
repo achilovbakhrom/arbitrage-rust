@@ -131,7 +131,7 @@ impl RateLimiter {
 pub struct FixClient {
     config: FixConfig,
     sender_comp_id: String,
-    seq_num: AtomicU32,
+    seq_num: Arc<AtomicU32>,
     pending_orders: Arc<Mutex<HashMap<String, OrderExecution>>>,
     signing_key: SigningKey,
     is_connected: AtomicBool,
@@ -156,7 +156,7 @@ impl FixClient {
         Ok(Self {
             config: config.clone(),
             sender_comp_id: config.api_key[..8].to_string(),
-            seq_num: AtomicU32::new(1),
+            seq_num: Arc::new(AtomicU32::new(1)),
             pending_orders: Arc::new(Mutex::new(HashMap::with_capacity(64))),
             signing_key,
             is_connected: AtomicBool::new(false),
@@ -673,7 +673,7 @@ impl FixClient {
             let mut body_length_buffer = Vec::with_capacity(16);
             reader.read_until(0x01, &mut body_length_buffer)?;
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
-            info!("parsing body length: {} {}", begin_string, body_length_field);
+
             if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
                 if let Ok(body_length) = length_part.parse::<usize>() {
                     let mut body_buffer = vec![0u8; body_length + 7];
@@ -879,9 +879,9 @@ impl FixClient {
         let stream_ref = Arc::clone(&self.stream);
         let sender_comp_id = self.sender_comp_id.clone();
         let target_comp_id = self.config.target_comp_id.clone();
+        let seq_num = Arc::clone(&self.seq_num);
 
         let handle = thread::spawn(move || {
-            let mut seq = 1u32;
             while !shutdown.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_secs(interval_secs));
 
@@ -889,6 +889,7 @@ impl FixClient {
                     break;
                 }
 
+                let seq = seq_num.fetch_add(1, Ordering::Relaxed);
                 let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
                 let sender_comp_field = format!("49={sender_comp_id}");
@@ -920,7 +921,6 @@ impl FixClient {
                         error!("Failed to flush heartbeat: {}", e);
                         break;
                     }
-                    seq += 1;
                 }
             }
         });

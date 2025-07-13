@@ -81,7 +81,6 @@ pub struct ArbitrageDetector {
     execution_callbacks: parking_lot::RwLock<Vec<ExecutionCallback>>,
     start_amount: f32,
     min_volume_multiplier: f32,
-    min_profit_for_execution: f32,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -183,7 +182,6 @@ impl ArbitrageDetector {
             execution_callbacks: parking_lot::RwLock::new(Vec::with_capacity(4)),
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
-            min_profit_for_execution: (1.0 + min_profit_threshold) as f32,
         })
     }
 
@@ -291,15 +289,13 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path(&self, path_idx: u16) -> Option<ArbitrageOpportunity> {
-        let profit_ratio = self.check_path_internal(path_idx)?;
-
+    fn check_path(&self, path_idx: u16, ratio: f64) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path = self.all_paths.get_unchecked(path_idx as usize);
             let path_data = self.path_data.get_unchecked(path_idx as usize);
             let opp = ArbitrageOpportunity {
                 path: Arc::new(path.clone()),
-                profit_ratio: profit_ratio as f64,
+                profit_ratio: ratio,
                 start_amount: self.start_amount as f64,
                 symbols_involved: [
                     path_data.first_symbol_id,
@@ -332,10 +328,8 @@ impl ArbitrageDetector {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
                 if let Some(profit_ratio) = self.check_path_internal(path_idx) {
-                    if profit_ratio >= self.min_profit_for_execution {
-                        if let Some(opportunity) = self.check_path(path_idx) {
-                            self.trigger_execution_callbacks(opportunity);
-                        }
+                    if let Some(opportunity) = self.check_path(path_idx, profit_ratio as f64) {
+                        self.trigger_execution_callbacks(opportunity);
                     }
                 }
             }
