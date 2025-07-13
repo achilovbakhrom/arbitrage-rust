@@ -119,11 +119,6 @@ lazy_static::lazy_static! {
 pub mod global {
     use super::*;
 
-    #[inline]
-    pub fn intern_arc(symbol: &Arc<str>) -> SymbolId {
-        GLOBAL_SYMBOL_INTERNER.get_or_intern_arc(symbol)
-    }
-
     #[inline(always)]
     pub fn get_id(symbol: &str) -> Option<SymbolId> {
         GLOBAL_SYMBOL_INTERNER.get_id(symbol)
