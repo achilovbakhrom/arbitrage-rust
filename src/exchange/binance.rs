@@ -231,10 +231,6 @@ impl ExchangeClient for BinanceClient {
             .join(&format!("v3/depth?symbol={symbol}&limit={limit}"))
             .context("Failed to build depth API URL")?;
 
-        debug!(symbol = %symbol, limit = limit, url = %url.as_str(), "Fetching orderbook depth");
-
-        let start = Instant::now();
-
         let response = HTTP_CLIENT.get(url.clone())
             .header("X-MBX-APIKEY", self.api_key.as_ref())
             .timeout(Duration::from_secs(5))
@@ -277,17 +273,6 @@ impl ExchangeClient for BinanceClient {
                 }
             })
             .collect::<Vec<Level>>();
-
-        let elapsed = start.elapsed();
-
-        debug!(
-            symbol = %symbol,
-            last_update_id = depth.last_update_id,
-            bid_count = bids.len(),
-            ask_count = asks.len(),
-            elapsed_ms = %elapsed.as_millis(),
-            "Successfully fetched orderbook depth"
-        );
 
         Ok(DepthResponse {
             bids,
