@@ -352,10 +352,6 @@ impl ArbitrageDetector {
         }
     }
 
-    pub fn get_fix_execution_stats(&self) -> Option<crate::executor::fix_executor::ExecutionStats> {
-        None
-    }
-
     #[inline]
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Relaxed)

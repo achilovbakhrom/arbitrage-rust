@@ -74,6 +74,7 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
     );
 
     let symbol_mappings = orderbook_manager.get_symbol_mappings();
+
     let ws_handle = start_websocket_thread(
         config.sbe_api_key.clone(),
         symbol_mappings.clone(),
@@ -98,6 +99,8 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
     }
+
+    info!("Shutting down triangular arbitrage system...");
 
     if let Some(fix_exec) = fix_executor {
         if let Err(e) = fix_exec.disconnect() {
@@ -279,6 +282,7 @@ fn start_execution_thread(
         .spawn(move || {
             if let Some(executor) = fix_executor {
                 let callback = executor.get_callback();
+
                 detector.register_execution_callback(
                     Arc::new(move |opportunity: arbitrage::detector::ArbitrageOpportunity| {
                         info!(

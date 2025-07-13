@@ -25,6 +25,7 @@ const WEBSOCKET_BUFFER_SIZE: usize = 100;
 
 fn main() -> Result<()> {
     let command = get_run_command();
+
     let config = Config::from_env().context("Failed to load configuration")?;
 
     logging

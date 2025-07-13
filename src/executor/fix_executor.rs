@@ -1,6 +1,6 @@
 use std::sync::{ Arc, Mutex };
 use std::time::{ Instant, Duration };
-use std::sync::atomic::{ AtomicU64, AtomicBool, Ordering };
+use std::sync::atomic::{ AtomicBool, Ordering };
 use std::collections::HashSet;
 use std::thread;
 
@@ -11,41 +11,11 @@ use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
 
-#[derive(Debug)]
-pub struct ExecutionStats {
-    pub total_executions: u64,
-    pub successful_executions: u64,
-    pub rejected_executions: u64,
-    pub failed_executions: u64,
-    pub success_rate: f64,
-    pub avg_execution_time_us: u64,
-}
-
-impl std::fmt::Display for ExecutionStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "FIX Executions: {} total, {} successful, {} rejected, {} failed, Success Rate: {:.2}%, Avg Time: {}μs",
-            self.total_executions,
-            self.successful_executions,
-            self.rejected_executions,
-            self.failed_executions,
-            self.success_rate * 100.0,
-            self.avg_execution_time_us
-        )
-    }
-}
-
 pub struct FixArbitrageExecutor {
     real_fix_client: Option<Arc<Mutex<FixClient>>>,
     mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
     symbol_map: Arc<SymbolMap>,
     is_debug_mode: bool,
-    execution_counter: Arc<AtomicU64>,
-    successful_executions: Arc<AtomicU64>,
-    failed_executions: Arc<AtomicU64>,
-    rejected_executions: Arc<AtomicU64>,
-    total_execution_time_us: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
     active_symbols: Arc<Mutex<HashSet<u16>>>,
     global_execution_lock: Arc<AtomicBool>,
@@ -84,11 +54,6 @@ impl FixArbitrageExecutor {
             mock_fix_client,
             symbol_map,
             is_debug_mode,
-            execution_counter: Arc::new(AtomicU64::new(0)),
-            successful_executions: Arc::new(AtomicU64::new(0)),
-            failed_executions: Arc::new(AtomicU64::new(0)),
-            rejected_executions: Arc::new(AtomicU64::new(0)),
-            total_execution_time_us: Arc::new(AtomicU64::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
             active_symbols: Arc::new(Mutex::new(HashSet::with_capacity(100))),
             global_execution_lock: Arc::new(AtomicBool::new(false)),
@@ -105,11 +70,6 @@ impl FixArbitrageExecutor {
         let mock_client = self.mock_fix_client.clone();
         let is_debug = self.is_debug_mode;
         let symbol_map = Arc::clone(&self.symbol_map);
-        let executed_counter = Arc::clone(&self.execution_counter);
-        let successful_counter = Arc::clone(&self.successful_executions);
-        let failed_counter = Arc::clone(&self.failed_executions);
-        let rejected_counter = Arc::clone(&self.rejected_executions);
-        let time_counter = Arc::clone(&self.total_execution_time_us);
         let active_symbols = Arc::clone(&self.active_symbols);
         let global_lock = Arc::clone(&self.global_execution_lock);
         let last_exec_time = Arc::clone(&self.last_execution_time);
@@ -127,7 +87,6 @@ impl FixArbitrageExecutor {
                     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                     .is_err()
             {
-                rejected_counter.fetch_add(1, Ordering::Relaxed);
                 debug!("Rejected opportunity due to global execution lock");
                 return;
             }
@@ -159,7 +118,6 @@ impl FixArbitrageExecutor {
 
             if has_conflict {
                 global_lock.store(false, Ordering::Release);
-                rejected_counter.fetch_add(1, Ordering::Relaxed);
                 debug!("Rejected opportunity due to symbol conflict: {:?}", symbols);
                 return;
             }
@@ -198,12 +156,8 @@ impl FixArbitrageExecutor {
 
             global_lock.store(false, Ordering::Release);
 
-            executed_counter.fetch_add(1, Ordering::Relaxed);
-            time_counter.fetch_add(execution_time, Ordering::Relaxed);
-
             match success {
                 Ok(true) => {
-                    successful_counter.fetch_add(1, Ordering::Relaxed);
                     info!(
                         "✅ FIX triangular arbitrage completed: {:.4}% profit in {:.2}ms",
                         opportunity.profit_percentage(),
@@ -211,11 +165,9 @@ impl FixArbitrageExecutor {
                     );
                 }
                 Ok(false) => {
-                    failed_counter.fetch_add(1, Ordering::Relaxed);
                     warn!("⚠️  FIX execution partially failed: {}", opportunity.display());
                 }
                 Err(e) => {
-                    failed_counter.fetch_add(1, Ordering::Relaxed);
                     error!("❌ FIX execution failed: {} - Error: {}", opportunity.display(), e);
 
                     if e.to_string().contains("Connection") || e.to_string().contains("TLS") {

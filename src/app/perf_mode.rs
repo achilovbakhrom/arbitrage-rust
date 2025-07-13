@@ -119,17 +119,12 @@ pub fn run_performance_test(config: Config, shutdown: Arc<AtomicBool>) -> Result
     match test_result {
         Ok(_) => {
             info!("Performance test completed successfully!");
-
             let final_opt_stats = orderbook_manager.get_optimization_stats();
             info!(
                 "Final optimization stats: {} books, {} hash cache",
                 final_opt_stats.total_books,
                 final_opt_stats.symbol_hash_cache_size
             );
-
-            if let Some(fix_stats) = detector.get_fix_execution_stats() {
-                info!("Final FIX Execution Stats: {}", fix_stats);
-            }
         }
         Err(e) => {
             error!("Performance test failed: {}", e);
@@ -159,6 +154,7 @@ fn start_detection_thread(
                         let detection_start = Instant::now();
                         detector.process_symbol_update(symbol_id);
                         let detection_time = detection_start.elapsed();
+
                         detection_times.write().insert(symbol_id, detection_time);
                     }
                 )
