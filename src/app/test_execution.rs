@@ -313,8 +313,6 @@ fn execute_real_triangular(
             current_amount = result.leaves_qty;
             info!("💱 Next amount from leaves_qty: {:.8}", current_amount);
         }
-
-        std::thread::sleep(Duration::from_millis(500));
     }
 
     info!("🎯 REAL triangular arbitrage sequence completed");
