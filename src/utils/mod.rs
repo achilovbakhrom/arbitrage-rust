@@ -1,6 +1,11 @@
 pub mod logging;
+pub mod fix_ops;
 pub mod serde_helpers;
 pub mod console;
 pub mod helpers;
+pub mod order_ops;
 pub mod symbol_interner;
+pub mod thread_ops;
 pub mod types;
+pub mod websocket_ops;
+pub mod validation;

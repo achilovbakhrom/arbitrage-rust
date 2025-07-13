@@ -3,19 +3,18 @@ use std::time::{ Instant, Duration };
 use std::sync::atomic::{ AtomicBool, Ordering };
 use std::collections::HashSet;
 use std::thread;
-
-use anyhow::{ Result, Context };
+use anyhow::Result;
 use tracing::{ info, warn, debug, error };
 use crate::arbitrage::detector::{ ArbitrageOpportunity, ExecutionCallback };
-use crate::exchange::fix_api::{ FixClient, MarketOrder, OrderSide };
-use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
+use crate::utils::{
+    fix_ops::{ create_fix_client, execute_triangular_trades, FixClientType },
+    order_ops::TriangularTradeData,
+};
 
 pub struct FixArbitrageExecutor {
-    real_fix_client: Option<Arc<Mutex<FixClient>>>,
-    mock_fix_client: Option<Arc<Mutex<MockFixClient>>>,
+    fix_client: FixClientType,
     symbol_map: Arc<SymbolMap>,
-    is_debug_mode: bool,
     shutdown: Arc<AtomicBool>,
     active_symbols: Arc<Mutex<HashSet<u16>>>,
     global_execution_lock: Arc<AtomicBool>,
@@ -30,30 +29,13 @@ impl FixArbitrageExecutor {
         fix_config: Option<crate::exchange::fix_api::FixConfig>,
         symbol_map: Arc<SymbolMap>
     ) -> Result<Self> {
-        let (real_fix_client, mock_fix_client) = if is_debug_mode {
-            let mock_client = MockFixClient::new();
-            (None, Some(Arc::new(Mutex::new(mock_client))))
-        } else if let Some(config) = fix_config {
-            let real_client = FixClient::new(config).context("Failed to create FIX client")?;
-
-            for symbol in symbol_map.get_all_symbols() {
-                real_client.update_symbol_precision(
-                    &symbol.symbol,
-                    symbol.qty_precision,
-                    symbol.price_precision
-                );
-            }
-
-            (Some(Arc::new(Mutex::new(real_client))), None)
-        } else {
-            return Err(anyhow::anyhow!("FIX configuration required for production mode"));
-        };
+        let fix_client = create_fix_client(is_debug_mode, fix_config, &symbol_map)?.ok_or_else(||
+            anyhow::anyhow!("Failed to create FIX client")
+        )?;
 
         Ok(Self {
-            real_fix_client,
-            mock_fix_client,
+            fix_client,
             symbol_map,
-            is_debug_mode,
             shutdown: Arc::new(AtomicBool::new(false)),
             active_symbols: Arc::new(Mutex::new(HashSet::with_capacity(100))),
             global_execution_lock: Arc::new(AtomicBool::new(false)),
@@ -66,9 +48,7 @@ impl FixArbitrageExecutor {
     pub fn get_callback(&self) -> ExecutionCallback {
         info!("Enabled callback-based execution with enhanced throttling and error handling");
 
-        let real_client = self.real_fix_client.clone();
-        let mock_client = self.mock_fix_client.clone();
-        let is_debug = self.is_debug_mode;
+        let fix_client = self.fix_client.clone();
         let symbol_map = Arc::clone(&self.symbol_map);
         let active_symbols = Arc::clone(&self.active_symbols);
         let global_lock = Arc::clone(&self.global_execution_lock);
@@ -131,14 +111,8 @@ impl FixArbitrageExecutor {
 
             info!("🔄 Starting triangular arbitrage execution: {}", opportunity.display());
 
-            let success = Self::execute_triangular_arbitrage_safe(
-                &opportunity,
-                &real_client,
-                &mock_client,
-                is_debug,
-                &symbol_map,
-                &connection_health
-            );
+            let trade_data = TriangularTradeData::from_opportunity(&opportunity);
+            let success = execute_triangular_trades(&trade_data, &fix_client, &symbol_map);
 
             let execution_time = execution_start.elapsed().as_micros() as u64;
 
@@ -179,238 +153,17 @@ impl FixArbitrageExecutor {
         })
     }
 
-    fn execute_triangular_arbitrage_safe(
-        opportunity: &ArbitrageOpportunity,
-        real_fix_client: &Option<Arc<Mutex<FixClient>>>,
-        mock_fix_client: &Option<Arc<Mutex<MockFixClient>>>,
-        is_debug_mode: bool,
-        symbol_map: &Arc<SymbolMap>,
-        connection_health: &Arc<AtomicBool>
-    ) -> Result<bool> {
-        if is_debug_mode {
-            if let Some(mock_client) = mock_fix_client {
-                let mut client = mock_client.lock().unwrap();
-                Self::execute_mock_triangular_trades_safe(opportunity, &mut client, symbol_map)
-            } else {
-                Err(anyhow::anyhow!("Mock client not available"))
-            }
-        } else if let Some(real_client) = real_fix_client {
-            let mut client = real_client.lock().unwrap();
-            Self::execute_real_triangular_trades_safe(
-                opportunity,
-                &mut client,
-                symbol_map,
-                connection_health
-            )
-        } else {
-            Err(anyhow::anyhow!("Real client not available"))
-        }
-    }
-
-    fn execute_real_triangular_trades_safe(
-        opportunity: &ArbitrageOpportunity,
-        client: &mut FixClient,
-        symbol_map: &Arc<SymbolMap>,
-        connection_health: &Arc<AtomicBool>
-    ) -> Result<bool> {
-        if !client.is_connected() {
-            return Err(anyhow::anyhow!("FIX client is not connected"));
-        }
-
-        let path = &opportunity.path;
-        let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
-        let directions = [
-            path.first_is_base_to_quote,
-            path.second_is_base_to_quote,
-            path.third_is_base_to_quote,
-        ];
-
-        let mut current_amount = opportunity.start_amount;
-        let mut all_successful = true;
-
-        for (i, &symbol) in symbols.iter().enumerate() {
-            if !client.is_connected() {
-                error!("FIX client disconnected during execution");
-                connection_health.store(false, Ordering::Relaxed);
-                return Err(anyhow::anyhow!("FIX client disconnected"));
-            }
-
-            let precision_info = symbol_map.get(symbol);
-            let (qty_precision, price_precision) = if let Some(info) = precision_info {
-                (info.qty_precision, info.price_precision)
-            } else {
-                (8, 8)
-            };
-
-            let order = if directions[i] {
-                MarketOrder {
-                    symbol: symbol.to_string(),
-                    side: OrderSide::Sell,
-                    quantity: current_amount,
-                    quote_quantity: None,
-                    qty_precision: Some(qty_precision),
-                    price_precision: Some(price_precision),
-                }
-            } else {
-                MarketOrder {
-                    symbol: symbol.to_string(),
-                    side: OrderSide::Buy,
-                    quantity: 0.0,
-                    quote_quantity: Some(current_amount),
-                    qty_precision: Some(qty_precision),
-                    price_precision: Some(price_precision),
-                }
-            };
-
-            let trade_start = Instant::now();
-
-            match client.place_market_order(order) {
-                Ok(result) => {
-                    let trade_time = trade_start.elapsed();
-
-                    if result.order_status == "REJECTED" || result.exec_type == "REJECTED" {
-                        error!("Order rejected: {:?}", result.reject_reason);
-                        all_successful = false;
-                        break;
-                    }
-
-                    debug!(
-                        "Trade {}/{} placed: {} {} leaves_qty={:.8} in {:.2}ms",
-                        i + 1,
-                        symbols.len(),
-                        result.side,
-                        symbol,
-                        result.leaves_qty,
-                        trade_time.as_secs_f64() * 1000.0
-                    );
-
-                    if i < symbols.len() - 1 {
-                        current_amount = result.leaves_qty;
-                        if current_amount <= 0.0 {
-                            error!("Invalid leaves_qty for next trade: {:.8}", current_amount);
-                            all_successful = false;
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Trade {}/{} failed: {}", i + 1, symbols.len(), e);
-                    all_successful = false;
-                    break;
-                }
-            }
-        }
-
-        Ok(all_successful)
-    }
-
-    fn execute_mock_triangular_trades_safe(
-        opportunity: &ArbitrageOpportunity,
-        client: &mut MockFixClient,
-        symbol_map: &Arc<SymbolMap>
-    ) -> Result<bool> {
-        let path = &opportunity.path;
-        let symbols = [&path.first_symbol, &path.second_symbol, &path.third_symbol];
-        let directions = [
-            path.first_is_base_to_quote,
-            path.second_is_base_to_quote,
-            path.third_is_base_to_quote,
-        ];
-
-        let mut current_amount = opportunity.start_amount;
-        let mut all_successful = true;
-
-        for (i, &symbol) in symbols.iter().enumerate() {
-            let precision_info = symbol_map.get(symbol);
-            let (qty_precision, price_precision) = if let Some(info) = precision_info {
-                (info.qty_precision, info.price_precision)
-            } else {
-                (8, 8)
-            };
-
-            let order = if directions[i] {
-                MarketOrder {
-                    symbol: symbol.to_string(),
-                    side: OrderSide::Sell,
-                    quantity: current_amount,
-                    quote_quantity: None,
-                    qty_precision: Some(qty_precision),
-                    price_precision: Some(price_precision),
-                }
-            } else {
-                MarketOrder {
-                    symbol: symbol.to_string(),
-                    side: OrderSide::Buy,
-                    quantity: 0.0,
-                    quote_quantity: Some(current_amount),
-                    qty_precision: Some(qty_precision),
-                    price_precision: Some(price_precision),
-                }
-            };
-
-            match client.place_market_order(order) {
-                Ok(result) => {
-                    debug!(
-                        "Mock trade {}/{}: {} @ {:.8}",
-                        i + 1,
-                        symbols.len(),
-                        result.filled_qty,
-                        result.avg_price
-                    );
-
-                    if i < symbols.len() - 1 {
-                        current_amount = if directions[i] {
-                            result.cum_quote_qty
-                        } else {
-                            result.filled_qty
-                        };
-                    }
-                }
-                Err(e) => {
-                    error!("Mock trade {}/{} failed: {}", i + 1, symbols.len(), e);
-                    all_successful = false;
-                    break;
-                }
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        Ok(all_successful)
-    }
-
     pub fn connect(&self) -> Result<()> {
-        if self.is_debug_mode {
-            if let Some(mock_client) = &self.mock_fix_client {
-                let mut client = mock_client.lock().unwrap();
-                client.connect()?;
-                info!("Connected to Mock FIX API for debug mode");
-            }
-        } else if let Some(real_client) = &self.real_fix_client {
-            let mut client = real_client.lock().unwrap();
-            client.connect()?;
-            self.connection_health.store(true, Ordering::Relaxed);
-            info!("Connected to Real FIX API for production trading");
-        }
+        self.fix_client.connect()?;
+        self.connection_health.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     pub fn disconnect(&self) -> Result<()> {
         info!("Disconnecting FIX arbitrage executor...");
-
         self.shutdown.store(true, Ordering::Relaxed);
         self.connection_health.store(false, Ordering::Relaxed);
-
-        if self.is_debug_mode {
-            if let Some(mock_client) = &self.mock_fix_client {
-                let mut client = mock_client.lock().unwrap();
-                client.disconnect()?;
-            }
-        } else if let Some(real_client) = &self.real_fix_client {
-            let mut client = real_client.lock().unwrap();
-            client.disconnect()?;
-        }
-
+        self.fix_client.disconnect()?;
         info!("FIX arbitrage executor disconnected gracefully");
         Ok(())
     }

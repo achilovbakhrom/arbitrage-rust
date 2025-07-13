@@ -14,7 +14,7 @@ use crate::utils::symbol_interner::{ global, SymbolId };
 
 const MAX_SYMBOLS: usize = 2048;
 static LAST_REQUEST_TIME: AtomicU64 = AtomicU64::new(0);
-const MIN_REQUEST_INTERVAL_MS: u64 = 100; // 10 requests per second max
+const MIN_REQUEST_INTERVAL_MS: u64 = 100;
 const MAX_CONCURRENT_SNAPSHOTS: usize = 3;
 
 lazy_static::lazy_static! {
@@ -206,8 +206,7 @@ impl OrderBookManager {
                 .load(std::sync::atomic::Ordering::Relaxed)
         };
 
-        // Don't recover same symbol within 5 seconds
-        if now_ms < last_time + 5000 {
+        if now_ms < last_time + 1000 {
             return;
         }
 
@@ -230,16 +229,13 @@ impl OrderBookManager {
     }
 
     async fn recovery_task_rate_limited(&self, symbol: Arc<str>, symbol_id: SymbolId) {
-        // Acquire semaphore to limit concurrent snapshots
         let _permit = match SNAPSHOT_SEMAPHORE.try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
-                // Too many concurrent recoveries, skip this one
                 return;
             }
         };
 
-        // Rate limit: ensure minimum interval between requests
         let now_ms = std::time::SystemTime
             ::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -261,7 +257,6 @@ impl OrderBookManager {
             Ordering::Relaxed
         );
 
-        // Add random jitter to prevent thundering herd
         let jitter = rand::random::<u64>() % 200;
         tokio::time::sleep(Duration::from_millis(jitter)).await;
 
@@ -277,7 +272,6 @@ impl OrderBookManager {
                 }
             }
             Err(e) => {
-                // If rate limited, back off longer
                 if e.to_string().contains("429") || e.to_string().contains("418") {
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 }
@@ -323,7 +317,6 @@ impl OrderBookManager {
             return Err(anyhow::anyhow!("Cannot fetch snapshot for empty symbol"));
         }
 
-        // Use smaller depth to reduce weight
         let depth_response = self.exchange_client
             .fetch_depth(symbol, 20).await
             .context(format!("Failed to fetch orderbook snapshot for {symbol}"))?;
