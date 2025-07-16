@@ -68,7 +68,8 @@ pub fn run_performance_test(config: Config, shutdown: Arc<AtomicBool>) -> Result
         config.fee,
         config.threshold,
         config.trade_amount,
-        config.min_volume_multiplier
+        config.min_volume_multiplier,
+        &symbol_map
     );
 
     let detection_handle = start_detection_thread(

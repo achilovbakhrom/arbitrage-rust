@@ -61,7 +61,8 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
         config.fee,
         config.threshold,
         config.trade_amount,
-        config.min_volume_multiplier
+        config.min_volume_multiplier,
+        &symbol_map
     );
 
     let fix_client = create_fix_executor(Arc::clone(&symbol_map), &config)?;

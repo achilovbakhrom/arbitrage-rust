@@ -132,6 +132,7 @@ fn create_test_opportunity(
         profit_ratio: 1.005,
         start_amount: test_amount,
         symbols_involved: [0, 1, 2],
+        estimated_slippage: 0.002,
     };
 
     Ok(opportunity)
