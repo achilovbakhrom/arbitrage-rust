@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
-use tracing::info;
 
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook_manager::manager::OrderBookManager;
@@ -42,7 +41,7 @@ struct PathData {
     directions: u8,
     fee_multiplier_cubed: f32,
     min_threshold: f32,
-    volume_multiplier: f32,
+    _padding: [u8; 2],
 }
 
 impl PathData {
@@ -62,7 +61,7 @@ impl PathData {
     }
 }
 
-const MAX_PATHS_PER_SYMBOL: usize = 16;
+const MAX_PATHS_PER_SYMBOL: usize = 12;
 const MAX_SYMBOLS: usize = 2048;
 
 #[repr(C, align(64))]
@@ -70,7 +69,7 @@ const MAX_SYMBOLS: usize = 2048;
 struct SymbolPaths {
     count: u8,
     indices: [u16; MAX_PATHS_PER_SYMBOL],
-    _padding: [u8; 15],
+    _padding: [u8; 7],
 }
 
 pub struct ArbitrageDetector {
@@ -94,9 +93,10 @@ impl ArbitrageDetector {
         start_amount: f64,
         min_volume_multiplier: f64
     ) -> Arc<Self> {
+        let path_count = paths.len();
         let unwrapped_paths: Vec<TriangularPath> = paths
-            .iter()
-            .map(|arc_path| (**arc_path).clone())
+            .into_iter()
+            .map(|arc_path| (*arc_path).clone())
             .collect();
 
         let all_symbols: Vec<String> = unwrapped_paths
@@ -110,20 +110,22 @@ impl ArbitrageDetector {
 
         global::intern_batch(&all_symbols);
 
-        let mut path_data = Vec::with_capacity(unwrapped_paths.len());
+        let mut path_data = Vec::with_capacity(path_count);
         let mut symbol_map = Box::new(
             [
                 const {
                     SymbolPaths {
                         count: 0,
                         indices: [0; MAX_PATHS_PER_SYMBOL],
-                        _padding: [0; 15],
+                        _padding: [0; 7],
                     }
                 };
                 MAX_SYMBOLS
             ]
         );
-        let mut symbols_cache = Box::new([[0u16; 3]; MAX_SYMBOLS]);
+
+        let fee_multiplier_cubed = ((1.0 - fee_rate) as f32).powi(3);
+        let min_threshold = (1.0 + min_profit_threshold) as f32;
 
         for (i, path) in unwrapped_paths.iter().enumerate() {
             let first_symbol_id = global::get_id(&path.first_symbol).unwrap();
@@ -140,37 +142,15 @@ impl ArbitrageDetector {
                 second_symbol_id,
                 third_symbol_id,
                 directions,
-                fee_multiplier_cubed: ((1.0 - fee_rate) as f32).powi(3),
-                min_threshold: (1.0 + min_profit_threshold) as f32,
-                volume_multiplier: min_volume_multiplier as f32,
+                fee_multiplier_cubed,
+                min_threshold,
+                _padding: [0; 2],
             });
 
             let path_idx = i as u16;
             Self::add_path_to_symbol(&mut symbol_map, first_symbol_id, path_idx);
             Self::add_path_to_symbol(&mut symbol_map, second_symbol_id, path_idx);
             Self::add_path_to_symbol(&mut symbol_map, third_symbol_id, path_idx);
-
-            if (first_symbol_id as usize) < MAX_SYMBOLS {
-                symbols_cache[first_symbol_id as usize] = [
-                    first_symbol_id,
-                    second_symbol_id,
-                    third_symbol_id,
-                ];
-            }
-            if (second_symbol_id as usize) < MAX_SYMBOLS {
-                symbols_cache[second_symbol_id as usize] = [
-                    first_symbol_id,
-                    second_symbol_id,
-                    third_symbol_id,
-                ];
-            }
-            if (third_symbol_id as usize) < MAX_SYMBOLS {
-                symbols_cache[third_symbol_id as usize] = [
-                    first_symbol_id,
-                    second_symbol_id,
-                    third_symbol_id,
-                ];
-            }
         }
 
         Arc::new(ArbitrageDetector {
@@ -179,7 +159,7 @@ impl ArbitrageDetector {
             all_paths: unwrapped_paths.into_boxed_slice(),
             path_data: path_data.into_boxed_slice(),
             symbol_map,
-            execution_callbacks: parking_lot::RwLock::new(Vec::with_capacity(4)),
+            execution_callbacks: parking_lot::RwLock::new(Vec::with_capacity(2)),
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
         })
@@ -225,18 +205,19 @@ impl ArbitrageDetector {
             }
 
             let min_vol = self.start_amount * self.min_volume_multiplier;
+            let min_vol_f64 = min_vol as f64;
 
             if
                 !first_book.has_sufficient_liquidity(
-                    min_vol as f64,
+                    min_vol_f64,
                     path_data.first_is_base_to_quote()
                 ) ||
                 !second_book.has_sufficient_liquidity(
-                    min_vol as f64,
+                    min_vol_f64,
                     path_data.second_is_base_to_quote()
                 ) ||
                 !third_book.has_sufficient_liquidity(
-                    min_vol as f64,
+                    min_vol_f64,
                     path_data.third_is_base_to_quote()
                 )
             {
@@ -249,33 +230,33 @@ impl ArbitrageDetector {
             )? as f32;
 
             let mut amount = self.start_amount;
-            if path_data.first_is_base_to_quote() {
-                amount *= first_price;
+            amount = if path_data.first_is_base_to_quote() {
+                amount * first_price
             } else {
-                amount /= first_price;
-            }
+                amount / first_price
+            };
 
             let second_price = second_book.get_effective_price(
                 amount as f64,
                 path_data.second_is_base_to_quote()
             )? as f32;
 
-            if path_data.second_is_base_to_quote() {
-                amount *= second_price;
+            amount = if path_data.second_is_base_to_quote() {
+                amount * second_price
             } else {
-                amount /= second_price;
-            }
+                amount / second_price
+            };
 
             let third_price = third_book.get_effective_price(
                 amount as f64,
                 path_data.third_is_base_to_quote()
             )? as f32;
 
-            if path_data.third_is_base_to_quote() {
-                amount *= third_price;
+            amount = if path_data.third_is_base_to_quote() {
+                amount * third_price
             } else {
-                amount /= third_price;
-            }
+                amount / third_price
+            };
 
             amount *= path_data.fee_multiplier_cubed;
             let profit_ratio = amount / self.start_amount;
@@ -289,22 +270,21 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path(&self, path_idx: u16, ratio: f64) -> Option<ArbitrageOpportunity> {
+    fn check_path(&self, path_idx: u16, ratio: f32) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path = self.all_paths.get_unchecked(path_idx as usize);
             let path_data = self.path_data.get_unchecked(path_idx as usize);
-            let opp = ArbitrageOpportunity {
+
+            Some(ArbitrageOpportunity {
                 path: Arc::new(path.clone()),
-                profit_ratio: ratio,
+                profit_ratio: ratio as f64,
                 start_amount: self.start_amount as f64,
                 symbols_involved: [
                     path_data.first_symbol_id,
                     path_data.second_symbol_id,
                     path_data.third_symbol_id,
                 ],
-            };
-            info!("Found opportunity: {:?}", opp);
-            Some(opp)
+            })
         }
     }
 
@@ -322,13 +302,13 @@ impl ArbitrageDetector {
                 return;
             }
 
-            let max_paths_to_check = path_count.min(8);
+            let max_paths_to_check = path_count.min(6);
 
             for i in 0..max_paths_to_check {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
                 if let Some(profit_ratio) = self.calculate_portfolio(path_idx) {
-                    if let Some(opportunity) = self.check_path(path_idx, profit_ratio as f64) {
+                    if let Some(opportunity) = self.check_path(path_idx, profit_ratio) {
                         self.trigger_execution_callbacks(opportunity);
                     }
                 }
@@ -339,10 +319,8 @@ impl ArbitrageDetector {
     #[inline]
     fn trigger_execution_callbacks(&self, opportunity: ArbitrageOpportunity) {
         let callbacks = self.execution_callbacks.read();
-        if !callbacks.is_empty() {
-            for callback in callbacks.iter() {
-                callback(opportunity.clone());
-            }
+        for callback in callbacks.iter() {
+            callback(opportunity.clone());
         }
     }
 

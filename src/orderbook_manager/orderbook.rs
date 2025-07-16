@@ -110,16 +110,22 @@ impl OrderBook {
         let bids_ptr = self.levels.bids.get();
         let asks_ptr = self.levels.asks.get();
 
-        if !bids.is_empty() {
+        let bids_changed = !bids.is_empty();
+        let asks_changed = !asks.is_empty();
+
+        if bids_changed {
             bid_count = self.fast_update_side(bids, &mut *bids_ptr, bid_count, true);
         }
 
-        if !asks.is_empty() {
+        if asks_changed {
             ask_count = self.fast_update_side(asks, &mut *asks_ptr, ask_count, false);
         }
 
         *counts_ptr = (bid_count, ask_count);
-        self.update_best_prices();
+
+        if bids_changed || asks_changed {
+            self.update_best_prices();
+        }
     }
 
     #[inline(always)]
@@ -233,50 +239,18 @@ impl OrderBook {
             return 0;
         }
 
-        match count {
-            1 => {
-                let level_price = levels.get_unchecked(0).0;
-                let should_insert_before = if is_bids {
-                    level_price < price
-                } else {
-                    level_price > price
-                };
-                if should_insert_before {
-                    0
-                } else {
-                    1
-                }
-            }
-            2 => {
-                let price0 = levels.get_unchecked(0).0;
-                let should_insert_at_0 = if is_bids { price0 < price } else { price0 > price };
-                if should_insert_at_0 {
-                    0
-                } else {
-                    let price1 = levels.get_unchecked(1).0;
-                    let should_insert_at_1 = if is_bids { price1 < price } else { price1 > price };
-                    if should_insert_at_1 {
-                        1
-                    } else {
-                        2
-                    }
-                }
-            }
-            _ => {
-                for i in 0..count {
-                    let level_price = levels.get_unchecked(i).0;
-                    let should_insert_here = if is_bids {
-                        level_price < price
-                    } else {
-                        level_price > price
-                    };
-                    if should_insert_here {
-                        return i;
-                    }
-                }
-                count
+        for i in 0..count {
+            let level_price = levels.get_unchecked(i).0;
+            let should_insert_here = if is_bids {
+                level_price < price
+            } else {
+                level_price > price
+            };
+            if should_insert_here {
+                return i;
             }
         }
+        count
     }
 
     #[inline(always)]
@@ -327,6 +301,9 @@ impl OrderBook {
 
             let bids_ptr = self.levels.bids.get();
             let asks_ptr = self.levels.asks.get();
+
+            std::ptr::write_bytes((*bids_ptr).as_mut_ptr(), 0, MAX_DEPTH);
+            std::ptr::write_bytes((*asks_ptr).as_mut_ptr(), 0, MAX_DEPTH);
 
             for (i, level) in bids.into_iter().take(bid_len).enumerate() {
                 if level.quantity > 0.0 {

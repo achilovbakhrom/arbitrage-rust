@@ -293,7 +293,7 @@ impl FixClient {
         )?;
 
         tcp_stream.set_nodelay(true)?;
-        tcp_stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        tcp_stream.set_read_timeout(Some(Duration::from_millis(1000)))?; // Shorter timeout
         tcp_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
         let domain = self.fix_config.endpoint.split(':').next().unwrap();
@@ -857,17 +857,21 @@ impl FixClient {
                 Err(e) => {
                     if
                         e.to_string().contains("Resource temporarily unavailable") ||
-                        e.to_string().contains("timed out")
+                        e.to_string().contains("timed out") ||
+                        e.to_string().contains("Read timeout")
                     {
                         if shutdown.load(Ordering::Relaxed) {
                             debug!("Read timeout during shutdown, stopping message reader");
                             break;
                         }
-                        std::thread::sleep(Duration::from_millis(100));
+                        std::thread::sleep(Duration::from_millis(10));
                         continue;
                     } else {
                         error!("Error reading message: {}", e);
-                        break;
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
                     }
                 }
             }
@@ -884,11 +888,63 @@ impl FixClient {
             let mut reader = BufReader::with_capacity(8192, stream);
 
             let mut begin_buffer = Vec::with_capacity(16);
-            reader.read_until(0x01, &mut begin_buffer)?;
+            match reader.read_until(0x01, &mut begin_buffer) {
+                Ok(0) => {
+                    return Err(
+                        FixError::Connection(
+                            std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "Connection closed"
+                            )
+                        ).into()
+                    );
+                }
+                Err(ref e) if
+                    e.kind() == std::io::ErrorKind::WouldBlock ||
+                    e.kind() == std::io::ErrorKind::TimedOut
+                => {
+                    return Err(
+                        FixError::Connection(
+                            std::io::Error::new(std::io::ErrorKind::TimedOut, "Read timeout")
+                        ).into()
+                    );
+                }
+                Err(e) => {
+                    return Err(FixError::Connection(e).into());
+                }
+                _ => {}
+            }
+
             let begin_string = String::from_utf8_lossy(&begin_buffer);
 
             let mut body_length_buffer = Vec::with_capacity(16);
-            reader.read_until(0x01, &mut body_length_buffer)?;
+            match reader.read_until(0x01, &mut body_length_buffer) {
+                Ok(0) => {
+                    return Err(
+                        FixError::Connection(
+                            std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "Connection closed"
+                            )
+                        ).into()
+                    );
+                }
+                Err(ref e) if
+                    e.kind() == std::io::ErrorKind::WouldBlock ||
+                    e.kind() == std::io::ErrorKind::TimedOut
+                => {
+                    return Err(
+                        FixError::Connection(
+                            std::io::Error::new(std::io::ErrorKind::TimedOut, "Read timeout")
+                        ).into()
+                    );
+                }
+                Err(e) => {
+                    return Err(FixError::Connection(e).into());
+                }
+                _ => {}
+            }
+
             let body_length_field = String::from_utf8_lossy(&body_length_buffer);
 
             if let Some(length_part) = body_length_field.trim_end_matches('\x01').split('=').nth(1) {
@@ -1100,7 +1156,12 @@ impl FixClient {
 
         let handle = thread::spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_secs(interval_secs));
+                let mut remaining = Duration::from_secs(interval_secs);
+                while remaining > Duration::ZERO && !shutdown.load(Ordering::Relaxed) {
+                    let sleep_duration = remaining.min(Duration::from_millis(500));
+                    thread::sleep(sleep_duration);
+                    remaining = remaining.saturating_sub(sleep_duration);
+                }
 
                 if shutdown.load(Ordering::Relaxed) {
                     break;
@@ -1140,6 +1201,7 @@ impl FixClient {
                     }
                 }
             }
+            debug!("Heartbeat thread stopped");
         });
 
         self.heartbeat_handle = Some(handle);

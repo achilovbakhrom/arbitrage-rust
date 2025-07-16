@@ -162,6 +162,15 @@ impl<F> BinanceSbeClient<F>
                     }
                 }
                 Err(e) => {
+                    if e.to_string().contains("would block") || e.to_string().contains("timed out") {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+
+                    if shutdown.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+
                     error!("WebSocket message error: {}", e);
                     return Err(anyhow::anyhow!("WebSocket error: {}", e));
                 }

@@ -9,3 +9,4 @@ pub mod thread_ops;
 pub mod types;
 pub mod websocket_ops;
 pub mod validation;
+pub mod simulation_logger;
