@@ -4,6 +4,12 @@ use crate::models::symbol_map::SymbolMap;
 use crate::arbitrage::detector::ArbitrageOpportunity;
 
 #[inline(always)]
+pub fn apply_precision(value: f64, precision: u8) -> f64 {
+    let factor = (10f64).powi(precision as i32);
+    (value * factor).floor() / factor
+}
+
+#[inline(always)]
 pub fn create_order_with_precision(
     symbol: String,
     is_base_to_quote: bool,
@@ -12,20 +18,22 @@ pub fn create_order_with_precision(
     price_precision: u8
 ) -> MarketOrder {
     if is_base_to_quote {
+        let precise_quantity = apply_precision(amount, qty_precision);
         MarketOrder {
             symbol,
             side: OrderSide::Sell,
-            quantity: amount,
+            quantity: precise_quantity,
             quote_quantity: None,
             qty_precision: Some(qty_precision),
             price_precision: Some(price_precision),
         }
     } else {
+        let precise_quote_quantity = apply_precision(amount, price_precision);
         MarketOrder {
             symbol,
             side: OrderSide::Buy,
             quantity: 0.0,
-            quote_quantity: Some(amount),
+            quote_quantity: Some(precise_quote_quantity),
             qty_precision: Some(qty_precision),
             price_precision: Some(price_precision),
         }
