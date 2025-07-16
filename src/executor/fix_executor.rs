@@ -6,6 +6,7 @@ use std::thread;
 use anyhow::Result;
 use tracing::{ info, warn, debug, error };
 use crate::arbitrage::detector::{ ArbitrageOpportunity, ExecutionCallback };
+use crate::config::Config;
 use crate::models::symbol_map::SymbolMap;
 use crate::utils::{
     fix_ops::{ create_fix_client, execute_triangular_trades, FixClientType },
@@ -27,11 +28,15 @@ impl FixArbitrageExecutor {
     pub fn new(
         is_debug_mode: bool,
         fix_config: Option<crate::exchange::fix_api::FixConfig>,
+        config: Config,
         symbol_map: Arc<SymbolMap>
     ) -> Result<Self> {
-        let fix_client = create_fix_client(is_debug_mode, fix_config, &symbol_map)?.ok_or_else(||
-            anyhow::anyhow!("Failed to create FIX client")
-        )?;
+        let fix_client = create_fix_client(
+            is_debug_mode,
+            fix_config,
+            config,
+            &symbol_map
+        )?.ok_or_else(|| anyhow::anyhow!("Failed to create FIX client"))?;
 
         Ok(Self {
             fix_client,

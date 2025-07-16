@@ -3,6 +3,8 @@ use chrono::Utc;
 use ed25519_dalek::{ Signature, Signer, SigningKey };
 use native_tls::{ TlsConnector, TlsStream };
 use parking_lot::Mutex;
+use reqwest::Client as HttpClient;
+use serde::{ self, Deserialize };
 use std::collections::HashMap;
 use std::io::{ BufRead, BufReader, Write, Read };
 use std::net::TcpStream;
@@ -12,6 +14,24 @@ use std::thread;
 use std::time::{ Duration, Instant };
 use anyhow::{ Result, Context };
 use tracing::{ info, error, debug, warn };
+
+use crate::config::Config;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrderStatusResponse {
+    pub symbol: String,
+    pub order_id: u64,
+    pub client_order_id: String,
+    pub price: String,
+    pub orig_qty: String,
+    pub executed_qty: String,
+    pub cummulative_quote_qty: String,
+    pub status: String,
+    pub side: String,
+    pub time: u64,
+    pub update_time: u64,
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum FixError {
@@ -129,7 +149,7 @@ impl RateLimiter {
 }
 
 pub struct FixClient {
-    config: FixConfig,
+    fix_config: FixConfig,
     sender_comp_id: String,
     seq_num: Arc<AtomicU32>,
     pending_orders: Arc<Mutex<HashMap<String, OrderExecution>>>,
@@ -143,19 +163,36 @@ pub struct FixClient {
     rate_limiter: Arc<Mutex<RateLimiter>>,
     logout_received: Arc<AtomicBool>,
     logout_condvar: Arc<(StdMutex<bool>, Condvar)>,
+    http_client: HttpClient,
+    config: Config,
 }
 
 impl FixClient {
-    pub fn new(config: FixConfig) -> Result<Self> {
+    pub fn new(fix_config: FixConfig, config: Config) -> Result<Self> {
         let key_bytes = general_purpose::STANDARD
-            .decode(&config.private_key_base64)
+            .decode(&fix_config.private_key_base64)
             .map_err(|e| FixError::Parse(format!("Failed to decode private key: {e}")))?;
 
         let signing_key = Self::parse_ed25519_key(&key_bytes)?;
 
+        let http_client = HttpClient::builder()
+            .timeout(Duration::from_secs(5))
+            .tcp_nodelay(true)
+            .build()
+            .map_err(|e|
+                FixError::Connection(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to create HTTP client: {e}")
+                    )
+                )
+            )?;
+
         Ok(Self {
-            config: config.clone(),
-            sender_comp_id: config.api_key[..8].to_string(),
+            config,
+            http_client,
+            fix_config: fix_config.clone(),
+            sender_comp_id: fix_config.api_key[..8].to_string(),
             seq_num: Arc::new(AtomicU32::new(1)),
             pending_orders: Arc::new(Mutex::new(HashMap::with_capacity(64))),
             signing_key,
@@ -251,7 +288,7 @@ impl FixClient {
         info!("Starting FIX connection process...");
 
         let connector = TlsConnector::new()?;
-        let tcp_stream = TcpStream::connect(&self.config.endpoint).context(
+        let tcp_stream = TcpStream::connect(&self.fix_config.endpoint).context(
             "Failed to connect to FIX endpoint"
         )?;
 
@@ -259,7 +296,7 @@ impl FixClient {
         tcp_stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         tcp_stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
-        let domain = self.config.endpoint.split(':').next().unwrap();
+        let domain = self.fix_config.endpoint.split(':').next().unwrap();
         let tls_stream = connector.connect(domain, tcp_stream).context("TLS handshake failed")?;
 
         info!("✓ TLS connection established");
@@ -281,7 +318,7 @@ impl FixClient {
         let signature_payload = format!(
             "A\x01{}\x01{}\x01{}\x01{}",
             self.sender_comp_id,
-            self.config.target_comp_id,
+            self.fix_config.target_comp_id,
             seq_num,
             sending_time
         );
@@ -290,11 +327,11 @@ impl FixClient {
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         let sender_comp_field = format!("49={}", self.sender_comp_id);
-        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let target_comp_field = format!("56={}", self.fix_config.target_comp_id);
         let seq_num_field = format!("34={seq_num}");
         let sending_time_field = format!("52={sending_time}");
-        let heartbeat_field = format!("108={}", self.config.heartbeat_interval);
-        let api_key_field = format!("553={}", self.config.api_key);
+        let heartbeat_field = format!("108={}", self.fix_config.heartbeat_interval);
+        let api_key_field = format!("553={}", self.fix_config.api_key);
         let signature_len_field = format!("95={}", signature_base64.len());
         let signature_field = format!("96={signature_base64}");
 
@@ -368,6 +405,43 @@ impl FixClient {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         );
 
+        info!("🚀 FAST execution mode: Placing order via FIX, checking status via REST");
+
+        let initial_result = self.place_order_via_fix(&order, &client_order_id)?;
+
+        if initial_result.order_status == "REJECTED" {
+            return Err(
+                FixError::OrderRejected(
+                    initial_result.reject_reason.unwrap_or("Order rejected".to_string())
+                ).into()
+            );
+        }
+
+        if initial_result.order_status == "FILLED" {
+            info!("✅ Order filled immediately via FIX");
+            return Ok(initial_result);
+        }
+
+        info!(
+            "✅ Order placed via FIX ({}), checking fill status via REST API...",
+            initial_result.order_status
+        );
+
+        let final_result = self.check_order_status_until_filled(
+            &order.symbol,
+            &initial_result.order_id,
+            &client_order_id,
+            Duration::from_secs(30)
+        )?;
+
+        Ok(final_result)
+    }
+
+    fn place_order_via_fix(
+        &mut self,
+        order: &MarketOrder,
+        client_order_id: &str
+    ) -> Result<ExecutionResult> {
         let result = Arc::new(StdMutex::new(None));
         let condvar = Arc::new(Condvar::new());
         let completed = Arc::new(AtomicBool::new(false));
@@ -381,10 +455,10 @@ impl FixClient {
 
         {
             let mut pending = self.pending_orders.lock();
-            pending.insert(client_order_id.clone(), order_exec);
+            pending.insert(client_order_id.to_string(), order_exec);
         }
 
-        let mut order = order;
+        let mut order = order.clone();
         if order.qty_precision.is_none() {
             let cache = self.symbol_precisions.lock();
             if let Some(precision_info) = cache.get(&order.symbol) {
@@ -399,7 +473,7 @@ impl FixClient {
         let seq_num_field = format!("34={seq_num}");
         let sender_comp_field = format!("49={}", self.sender_comp_id);
         let sending_time_field = format!("52={sending_time}");
-        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let target_comp_field = format!("56={}", self.fix_config.target_comp_id);
         let client_order_id_field = format!("11={client_order_id}");
         let symbol_field = format!("55={}", order.symbol.to_uppercase());
         let side_field = format!("54={}", order.side.to_fix_side());
@@ -426,57 +500,25 @@ impl FixClient {
         ];
 
         let message = self.build_fix_message_fast(&fields);
-        info!("Sending order: {} {} {}", order.side.to_fix_side(), order.symbol, if
-            order.quote_quantity.is_some()
-        {
-            order.quote_quantity.unwrap()
-        } else {
-            order.quantity
-        });
-
         self.send_message_fast(message)?;
 
-        let timeout = Duration::from_secs(30);
+        let timeout = Duration::from_secs(10);
         let start_time = Instant::now();
-
-        info!("⏳ Waiting for order execution (market order should fill immediately)...");
-
-        let mut order_accepted = false;
-        let mut partial_fills = Vec::new();
 
         loop {
             if start_time.elapsed() > timeout {
-                self.pending_orders.lock().remove(&client_order_id);
+                self.pending_orders.lock().remove(client_order_id);
                 return Err(FixError::Timeout.into());
-            }
-
-            if completed.load(Ordering::Relaxed) {
-                let guard = result.lock().unwrap();
-                if let Some(exec_result) = guard.clone() {
-                    return Ok(exec_result);
-                }
             }
 
             let guard = result.lock().unwrap();
             let (result_guard, timeout_result) = condvar
-                .wait_timeout(guard, Duration::from_secs(2))
+                .wait_timeout(guard, Duration::from_millis(500))
                 .unwrap();
 
-            if timeout_result.timed_out() {
-                continue;
-            }
-
             if let Some(exec_result) = result_guard.clone() {
-                info!(
-                    "📨 Received ExecutionReport: Status={}, ExecType={}, FilledQty={:.8}, LeavesQty={:.8}",
-                    exec_result.order_status,
-                    exec_result.exec_type,
-                    exec_result.filled_qty,
-                    exec_result.leaves_qty
-                );
-
-                if exec_result.order_status == "REJECTED" || exec_result.exec_type == "REJECTED" {
-                    self.pending_orders.lock().remove(&client_order_id);
+                if exec_result.order_status == "REJECTED" {
+                    self.pending_orders.lock().remove(client_order_id);
                     return Err(
                         FixError::OrderRejected(
                             exec_result.reject_reason.unwrap_or("Order rejected".to_string())
@@ -484,50 +526,192 @@ impl FixClient {
                     );
                 }
 
-                if exec_result.order_status == "CANCELED" || exec_result.order_status == "EXPIRED" {
-                    self.pending_orders.lock().remove(&client_order_id);
-                    return Err(
-                        FixError::OrderRejected(
-                            format!("Order {}", exec_result.order_status.to_lowercase())
-                        ).into()
-                    );
-                }
-
-                if exec_result.order_status == "NEW" && !order_accepted {
-                    order_accepted = true;
-                    info!("✅ Market order accepted by exchange, waiting for fills...");
-                    continue;
-                }
-
-                if exec_result.order_status == "PARTIALLY_FILLED" {
-                    partial_fills.push((exec_result.filled_qty, exec_result.avg_price));
-                    info!(
-                        "🔄 Partial fill: {:.8} @ {:.8} (Total filled: {:.8}, Remaining: {:.8})",
-                        exec_result.last_qty,
-                        exec_result.last_px,
-                        exec_result.filled_qty,
-                        exec_result.leaves_qty
-                    );
-                    continue;
-                }
-
-                if exec_result.order_status == "FILLED" {
-                    self.pending_orders.lock().remove(&client_order_id);
-                    info!(
-                        "🎉 Market order FULLY EXECUTED! Filled: {:.8} @ avg price {:.8} (Total value: {:.8})",
-                        exec_result.filled_qty,
-                        exec_result.avg_price,
-                        exec_result.cum_quote_qty
-                    );
-
-                    if partial_fills.len() > 0 {
-                        info!("📊 Order executed in {} fills", partial_fills.len() + 1);
-                    }
-
+                if exec_result.order_status == "NEW" || exec_result.order_status == "FILLED" {
+                    self.pending_orders.lock().remove(client_order_id);
                     return Ok(exec_result);
                 }
             }
+
+            if timeout_result.timed_out() {
+                continue;
+            }
         }
+    }
+
+    fn check_order_status_until_filled(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        client_order_id: &str,
+        max_wait_duration: Duration
+    ) -> Result<ExecutionResult> {
+        let start_time = Instant::now();
+        let mut poll_interval = Duration::from_millis(50);
+        let max_poll_interval = Duration::from_millis(250);
+
+        loop {
+            if start_time.elapsed() > max_wait_duration {
+                return Err(FixError::Timeout.into());
+            }
+
+            match self.check_order_status_rest(symbol, client_order_id) {
+                Ok(status) => {
+                    debug!(
+                        "Order status: {} - Executed: {}/{}",
+                        status.status,
+                        status.executed_qty,
+                        status.orig_qty
+                    );
+
+                    debug!("order: {:?}", status);
+
+                    match status.status.as_str() {
+                        "FILLED" => {
+                            let executed_qty = status.executed_qty.parse::<f64>().unwrap_or(0.0);
+                            let cum_quote_qty = status.cummulative_quote_qty
+                                .parse::<f64>()
+                                .unwrap_or(0.0);
+                            let avg_price = if executed_qty > 0.0 {
+                                cum_quote_qty / executed_qty
+                            } else {
+                                0.0
+                            };
+
+                            info!(
+                                "✅ Order FILLED via REST check: {} {} @ {:.8}",
+                                executed_qty,
+                                symbol,
+                                avg_price
+                            );
+
+                            return Ok(ExecutionResult {
+                                client_order_id: status.client_order_id,
+                                order_id: status.order_id.to_string(),
+                                symbol: status.symbol,
+                                side: status.side,
+                                filled_qty: executed_qty,
+                                avg_price,
+                                cum_quote_qty,
+                                leaves_qty: 0.0,
+                                order_status: "FILLED".to_string(),
+                                exec_type: "FILL".to_string(),
+                                last_px: avg_price,
+                                last_qty: executed_qty,
+                                execution_time: start_time.elapsed(),
+                                reject_reason: None,
+                            });
+                        }
+                        "PARTIALLY_FILLED" => {
+                            debug!("Order partially filled, continuing to poll...");
+                        }
+                        "REJECTED" | "CANCELED" | "EXPIRED" => {
+                            return Err(
+                                FixError::OrderRejected(
+                                    format!(
+                                        "Order {} with status: {}",
+                                        client_order_id,
+                                        status.status
+                                    )
+                                ).into()
+                            );
+                        }
+                        _ => {
+                            debug!("Order status: {}, continuing to poll...", status.status);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Error checking order status: {}", e);
+                    poll_interval = (poll_interval * 2).min(max_poll_interval);
+                }
+            }
+
+            std::thread::sleep(poll_interval);
+            poll_interval = (poll_interval + Duration::from_millis(5)).min(max_poll_interval);
+        }
+    }
+
+    fn check_order_status_rest(
+        &self,
+        symbol: &str,
+        client_order_id: &str
+    ) -> Result<OrderStatusResponse> {
+        let rt = tokio::runtime::Runtime
+            ::new()
+            .map_err(|e|
+                FixError::Connection(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to create runtime: {e}")
+                    )
+                )
+            )?;
+
+        rt.block_on(async {
+            let timestamp = chrono::Utc::now().timestamp_millis();
+            let query_string = format!(
+                "symbol={}&origClientOrderId={}&timestamp={}",
+                symbol,
+                client_order_id,
+                timestamp
+            );
+
+            let signature = self.sign_query(&query_string);
+            let url = format!(
+                "https://api.binance.com/api/v3/order?{}&signature={}",
+                query_string,
+                signature
+            );
+
+            info!("url: {}", url);
+
+            let response = self.http_client
+                .get(&url)
+                .header("X-MBX-APIKEY", &self.config.rest_api_key)
+                .send().await
+                .map_err(|e|
+                    FixError::Connection(
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("REST API request failed: {e}")
+                        )
+                    )
+                )?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(
+                    FixError::Connection(
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("REST API error: {} - {}", status, text)
+                        )
+                    ).into()
+                );
+            }
+
+            let order_status: OrderStatusResponse = response
+                .json().await
+                .map_err(|e| FixError::Parse(format!("Failed to parse REST response: {e}")))?;
+
+            Ok(order_status)
+        })
+    }
+
+    fn sign_query(&self, query: &str) -> String {
+        use hmac::{ Hmac, Mac };
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(self.config.rest_api_secret.as_bytes()).expect(
+            "HMAC can take key of any size"
+        );
+        mac.update(query.as_bytes());
+
+        let result = mac.finalize();
+        hex::encode(result.into_bytes())
     }
 
     #[inline]
@@ -907,11 +1091,11 @@ impl FixClient {
     }
 
     fn start_heartbeat(&mut self) -> Result<()> {
-        let interval_secs = self.config.heartbeat_interval as u64;
+        let interval_secs = self.fix_config.heartbeat_interval as u64;
         let shutdown = Arc::clone(&self.shutdown);
         let stream_ref = Arc::clone(&self.stream);
         let sender_comp_id = self.sender_comp_id.clone();
-        let target_comp_id = self.config.target_comp_id.clone();
+        let target_comp_id = self.fix_config.target_comp_id.clone();
         let seq_num = Arc::clone(&self.seq_num);
 
         let handle = thread::spawn(move || {
@@ -976,7 +1160,7 @@ impl FixClient {
         let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
         let sender_comp_field = format!("49={}", self.sender_comp_id);
-        let target_comp_field = format!("56={}", self.config.target_comp_id);
+        let target_comp_field = format!("56={}", self.fix_config.target_comp_id);
         let seq_num_field = format!("34={seq_num}");
         let sending_time_field = format!("52={sending_time}");
 
