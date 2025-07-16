@@ -43,7 +43,7 @@ impl Default for FixConfig {
             private_key_base64: String::new(),
             target_comp_id: "SPOT".to_string(),
             heartbeat_interval: 30,
-            endpoint: "fix-dc.binance.com:9000".to_string(),
+            endpoint: "fix-oe.binance.com:9000".to_string(),
         }
     }
 }
@@ -311,7 +311,7 @@ impl FixClient {
             &signature_len_field,
             &signature_field,
             "25035=1",
-            "25036=2"
+            "25036=1"
         ];
 
         let message = self.build_fix_message_fast(&fields);
@@ -439,7 +439,10 @@ impl FixClient {
         let timeout = Duration::from_secs(30);
         let start_time = Instant::now();
 
-        info!("⏳ Waiting for order placement confirmation...");
+        info!("⏳ Waiting for order execution (market order should fill immediately)...");
+
+        let mut order_accepted = false;
+        let mut partial_fills = Vec::new();
 
         loop {
             if start_time.elapsed() > timeout {
@@ -465,9 +468,11 @@ impl FixClient {
 
             if let Some(exec_result) = result_guard.clone() {
                 info!(
-                    "📨 Received ExecutionReport: Status={}, ExecType={}",
+                    "📨 Received ExecutionReport: Status={}, ExecType={}, FilledQty={:.8}, LeavesQty={:.8}",
                     exec_result.order_status,
-                    exec_result.exec_type
+                    exec_result.exec_type,
+                    exec_result.filled_qty,
+                    exec_result.leaves_qty
                 );
 
                 if exec_result.order_status == "REJECTED" || exec_result.exec_type == "REJECTED" {
@@ -479,12 +484,6 @@ impl FixClient {
                     );
                 }
 
-                if exec_result.order_status == "NEW" {
-                    self.pending_orders.lock().remove(&client_order_id);
-                    info!("✅ Market order placed successfully! (Order accepted by exchange)");
-                    return Ok(exec_result);
-                }
-
                 if exec_result.order_status == "CANCELED" || exec_result.order_status == "EXPIRED" {
                     self.pending_orders.lock().remove(&client_order_id);
                     return Err(
@@ -492,6 +491,40 @@ impl FixClient {
                             format!("Order {}", exec_result.order_status.to_lowercase())
                         ).into()
                     );
+                }
+
+                if exec_result.order_status == "NEW" && !order_accepted {
+                    order_accepted = true;
+                    info!("✅ Market order accepted by exchange, waiting for fills...");
+                    continue;
+                }
+
+                if exec_result.order_status == "PARTIALLY_FILLED" {
+                    partial_fills.push((exec_result.filled_qty, exec_result.avg_price));
+                    info!(
+                        "🔄 Partial fill: {:.8} @ {:.8} (Total filled: {:.8}, Remaining: {:.8})",
+                        exec_result.last_qty,
+                        exec_result.last_px,
+                        exec_result.filled_qty,
+                        exec_result.leaves_qty
+                    );
+                    continue;
+                }
+
+                if exec_result.order_status == "FILLED" {
+                    self.pending_orders.lock().remove(&client_order_id);
+                    info!(
+                        "🎉 Market order FULLY EXECUTED! Filled: {:.8} @ avg price {:.8} (Total value: {:.8})",
+                        exec_result.filled_qty,
+                        exec_result.avg_price,
+                        exec_result.cum_quote_qty
+                    );
+
+                    if partial_fills.len() > 0 {
+                        info!("📊 Order executed in {} fills", partial_fills.len() + 1);
+                    }
+
+                    return Ok(exec_result);
                 }
             }
         }
