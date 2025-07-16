@@ -153,23 +153,47 @@ pub fn execute_triangular_trades(
                 );
 
                 if i < trade_data.symbols.len() - 1 {
-                    current_amount = if trade_data.directions[i] {
+                    let raw_amount = if trade_data.directions[i] {
                         result.cum_quote_qty
                     } else {
                         result.filled_qty
                     };
 
-                    if current_amount <= 0.0 {
+                    if raw_amount <= 0.0 {
                         error!(
-                            "❌ Invalid amount for next trade: {:.8} (from trade {} result)",
-                            current_amount,
+                            "❌ Invalid raw amount for next trade: {:.8} (from trade {} result)",
+                            raw_amount,
                             i + 1
                         );
                         all_successful = false;
                         break;
                     }
 
-                    info!("💰 Amount for next trade: {:.8}", current_amount);
+                    let next_symbol = &trade_data.symbols[i + 1];
+                    let (next_qty_precision, next_price_precision) =
+                        order_ops::get_symbol_precision(symbol_map, next_symbol);
+
+                    current_amount = if trade_data.directions[i + 1] {
+                        order_ops::apply_precision(raw_amount, next_qty_precision)
+                    } else {
+                        order_ops::apply_precision(raw_amount, next_price_precision)
+                    };
+
+                    if current_amount <= 0.0 {
+                        error!(
+                            "❌ Invalid precision-adjusted amount for next trade: {:.8} (from raw: {:.8})",
+                            current_amount,
+                            raw_amount
+                        );
+                        all_successful = false;
+                        break;
+                    }
+
+                    info!(
+                        "💰 Amount for next trade (precision-adjusted): {:.8} (raw: {:.8})",
+                        current_amount,
+                        raw_amount
+                    );
                 }
             }
             Err(e) => {
