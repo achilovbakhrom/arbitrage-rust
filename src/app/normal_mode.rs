@@ -12,7 +12,7 @@ use crate::{
         symbol_interner::global,
     },
     utils::{
-        fix_ops::{ create_fix_client, FixClientType },
+        fix_ops::{ create_fix_client, FixClientType, execute_triangular_trades_with_simulation },
         thread_ops::{ start_detection_thread, start_execution_thread, ThreadManager },
         validation::{ print_trading_mode_info },
         websocket_ops::{ start_websocket_thread, create_standard_depth_callback, WebSocketConfig },
@@ -77,7 +77,13 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
 
     let execution_callback = fix_client
         .as_ref()
-        .map(|client| { create_execution_callback(client.clone(), Arc::clone(&symbol_map)) });
+        .map(|client| {
+            create_execution_callback_with_simulation(
+                client.clone(),
+                Arc::clone(&symbol_map),
+                Arc::clone(&orderbook_manager)
+            )
+        });
 
     let execution_handle = start_execution_thread(
         Arc::clone(&detector),
@@ -158,25 +164,40 @@ fn create_fix_executor(
     }
 }
 
-fn create_execution_callback(
+fn create_execution_callback_with_simulation(
     fix_client: FixClientType,
-    symbol_map: Arc<crate::models::symbol_map::SymbolMap>
+    symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
+    orderbook_manager: Arc<OrderBookManager>
 ) -> crate::arbitrage::detector::ExecutionCallback {
-    use crate::utils::order_ops::TriangularTradeData;
-    use crate::utils::fix_ops::execute_triangular_trades;
-
     Arc::new(move |opportunity| {
-        let trade_data = TriangularTradeData::from_opportunity(&opportunity);
+        info!("🚀 ENHANCED EXECUTION: Starting arbitrage with simulation logging");
 
-        match execute_triangular_trades(&trade_data, &fix_client, &symbol_map) {
+        match
+            execute_triangular_trades_with_simulation(
+                &opportunity,
+                &fix_client,
+                &symbol_map,
+                &orderbook_manager
+            )
+        {
             Ok(true) => {
-                info!("✅ Triangular arbitrage completed successfully: {}", opportunity.display());
+                info!(
+                    "✅ Enhanced triangular arbitrage completed successfully: {}",
+                    opportunity.display()
+                );
             }
             Ok(false) => {
-                error!("⚠️ Triangular arbitrage partially failed: {}", opportunity.display());
+                error!(
+                    "⚠️ Enhanced triangular arbitrage partially failed: {}",
+                    opportunity.display()
+                );
             }
             Err(e) => {
-                error!("❌ Triangular arbitrage failed: {} - Error: {}", opportunity.display(), e);
+                error!(
+                    "❌ Enhanced triangular arbitrage failed: {} - Error: {}",
+                    opportunity.display(),
+                    e
+                );
             }
         }
     })

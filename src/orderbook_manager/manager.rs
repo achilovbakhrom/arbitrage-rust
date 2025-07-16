@@ -1,5 +1,4 @@
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{ AtomicU64, Ordering };
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::Semaphore;
@@ -15,7 +14,7 @@ use crate::utils::symbol_interner::{ global, SymbolId };
 const MAX_SYMBOLS: usize = 2048;
 static LAST_REQUEST_TIME: AtomicU64 = AtomicU64::new(0);
 const MIN_REQUEST_INTERVAL_MS: u64 = 100;
-const MAX_CONCURRENT_SNAPSHOTS: usize = 3;
+const MAX_CONCURRENT_SNAPSHOTS: usize = 2;
 
 lazy_static::lazy_static! {
     static ref SNAPSHOT_SEMAPHORE: Arc<Semaphore> = Arc::new(
@@ -80,10 +79,6 @@ impl OrderBookManager {
         }
     }
 
-    pub fn get_symbol_mappings(&self) -> Vec<(String, u16)> {
-        global::get_all_mappings()
-    }
-
     #[inline]
     pub fn register_update_callback(&self, callback: OrderbookUpdateCallback) {
         let mut cb = self.update_callback.write();
@@ -92,11 +87,11 @@ impl OrderBookManager {
 
     #[inline(always)]
     pub fn trigger_arbitrage_detection(&self, symbol_id: SymbolId) {
-        let callback = self.update_callback.read();
-
-        if let Some(ref cb) = *callback {
-            if let Some(book) = self.get_book_by_id(symbol_id) {
-                cb(symbol_id, &book);
+        if let Some(callback) = self.update_callback.try_read() {
+            if let Some(ref cb) = *callback {
+                if let Some(book) = self.get_book_by_id(symbol_id) {
+                    cb(symbol_id, &book);
+                }
             }
         }
     }
@@ -206,7 +201,7 @@ impl OrderBookManager {
                 .load(std::sync::atomic::Ordering::Relaxed)
         };
 
-        if now_ms < last_time + 1000 {
+        if now_ms < last_time + 2000 {
             return;
         }
 
@@ -257,7 +252,7 @@ impl OrderBookManager {
             Ordering::Relaxed
         );
 
-        let jitter = rand::random::<u64>() % 200;
+        let jitter = rand::random::<u64>() % 100;
         tokio::time::sleep(Duration::from_millis(jitter)).await;
 
         match self.fetch_snapshot(symbol.as_ref()).await {
@@ -318,7 +313,7 @@ impl OrderBookManager {
         }
 
         let depth_response = self.exchange_client
-            .fetch_depth(symbol, 20).await
+            .fetch_depth(symbol, 10).await
             .context(format!("Failed to fetch orderbook snapshot for {symbol}"))?;
 
         let bids = depth_response.bids
@@ -341,6 +336,10 @@ impl OrderBookManager {
             total_books: interner_len,
             symbol_hash_cache_size: interner_len,
         }
+    }
+
+    pub fn get_symbol_mappings(&self) -> Vec<(String, u16)> {
+        global::get_all_mappings()
     }
 }
 

@@ -6,6 +6,9 @@ use crate::config::Config;
 use crate::exchange::fix_api::{ FixClient, ExecutionResult, MarketOrder };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
+use crate::arbitrage::detector::ArbitrageOpportunity;
+use crate::orderbook_manager::manager::OrderBookManager;
+use crate::utils::simulation_logger::{ SimulationLogger, SimulationResult };
 
 use crate::utils::order_ops::{ self, TriangularTradeData };
 
@@ -73,13 +76,73 @@ impl FixClientType {
     }
 }
 
+pub fn execute_triangular_trades_with_simulation(
+    opportunity: &ArbitrageOpportunity,
+    client: &FixClientType,
+    symbol_map: &Arc<SymbolMap>,
+    orderbook_manager: &Arc<OrderBookManager>
+) -> Result<bool> {
+    let simulation_logger = SimulationLogger::new(
+        Arc::clone(orderbook_manager),
+        Arc::clone(symbol_map)
+    );
+
+    let simulation_result = simulation_logger.simulate_opportunity(opportunity);
+
+    if let Some(ref sim) = simulation_result {
+        info!(
+            "🔮 Pre-execution simulation: {:.4}% profit expected",
+            sim.simulated_profit_percentage
+        );
+    }
+
+    let trade_data = TriangularTradeData::from_opportunity(opportunity);
+    let execution_start = Instant::now();
+
+    let result = execute_triangular_trades_internal(&trade_data, client, symbol_map);
+    let execution_time = execution_start.elapsed();
+
+    match result {
+        Ok((success, executed_trades)) => {
+            simulation_logger.log_execution_result(
+                opportunity,
+                simulation_result,
+                &executed_trades,
+                execution_time,
+                success
+            );
+            Ok(success)
+        }
+        Err(e) => {
+            simulation_logger.log_execution_result(
+                opportunity,
+                simulation_result,
+                &[],
+                execution_time,
+                false
+            );
+            Err(e)
+        }
+    }
+}
+
 pub fn execute_triangular_trades(
     trade_data: &TriangularTradeData,
     client: &FixClientType,
     symbol_map: &Arc<SymbolMap>
 ) -> Result<bool> {
+    let (success, _) = execute_triangular_trades_internal(trade_data, client, symbol_map)?;
+    Ok(success)
+}
+
+fn execute_triangular_trades_internal(
+    trade_data: &TriangularTradeData,
+    client: &FixClientType,
+    symbol_map: &Arc<SymbolMap>
+) -> Result<(bool, Vec<(String, f64, f64)>)> {
     let mut current_amount = trade_data.start_amount;
     let mut all_successful = true;
+    let mut executed_trades = Vec::with_capacity(3);
     let execution_start = Instant::now();
 
     info!(
@@ -141,6 +204,20 @@ pub fn execute_triangular_trades(
                     break;
                 }
 
+                executed_trades.push((
+                    symbol.clone(),
+                    result.avg_price,
+                    if i == trade_data.symbols.len() - 1 {
+                        if trade_data.directions[i] {
+                            result.cum_quote_qty
+                        } else {
+                            result.filled_qty
+                        }
+                    } else {
+                        current_amount
+                    },
+                ));
+
                 info!(
                     "✅ Trade {}/{} COMPLETED: {} {} - Filled: {:.8} @ {:.8} in {:.2}ms",
                     i + 1,
@@ -194,6 +271,12 @@ pub fn execute_triangular_trades(
                         current_amount,
                         raw_amount
                     );
+                } else {
+                    current_amount = if trade_data.directions[i] {
+                        result.cum_quote_qty
+                    } else {
+                        result.filled_qty
+                    };
                 }
             }
             Err(e) => {
@@ -238,7 +321,7 @@ pub fn execute_triangular_trades(
         );
     }
 
-    Ok(all_successful)
+    Ok((all_successful, executed_trades))
 }
 
 pub fn create_fix_client(
@@ -251,7 +334,7 @@ pub fn create_fix_client(
         let mock_client = MockFixClient::new();
         Ok(Some(FixClientType::Mock(Arc::new(Mutex::new(mock_client)))))
     } else if let Some(fix_config) = fix_config {
-        let mut real_client = FixClient::new(fix_config, config)?;
+        let real_client = FixClient::new(fix_config, config)?;
 
         for symbol in symbol_map.get_all_symbols() {
             real_client.update_symbol_precision(

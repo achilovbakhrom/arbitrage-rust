@@ -24,59 +24,24 @@ impl SymbolInterner {
         }
     }
 
-    #[inline]
-    pub fn get_or_intern(&self, symbol: &str) -> SymbolId {
-        let arc_symbol: Arc<str> = symbol.into();
-        self.get_or_intern_arc(&arc_symbol)
-    }
-
-    #[inline]
-    pub fn get_or_intern_arc(&self, symbol: &Arc<str>) -> SymbolId {
-        {
-            let symbol_map = self.symbol_to_id.read();
-            if let Some(&id) = symbol_map.get(symbol) {
-                return id;
-            }
-        }
-
-        let mut symbol_map = self.symbol_to_id.write();
-        if let Some(&id) = symbol_map.get(symbol) {
-            return id;
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if id >= (MAX_SYMBOLS as u16) {
-            panic!("Symbol interner capacity exceeded");
-        }
-
-        symbol_map.insert(Arc::clone(symbol), id);
-        *self.id_to_symbol[id as usize].write() = Some(Arc::clone(symbol));
-
-        let symbol_bytes = symbol.as_bytes().to_vec().into_boxed_slice();
-        self.bytes_to_id.write().insert(symbol_bytes, id);
-
-        id
-    }
-
     #[inline(always)]
     pub fn get_id(&self, symbol: &str) -> Option<SymbolId> {
-        let arc_symbol: Arc<str> = symbol.into();
-        self.symbol_to_id.read().get(&arc_symbol).copied()
+        self.symbol_to_id.read().get(symbol).copied()
     }
 
     #[inline(always)]
     pub fn get_id_from_bytes(&self, symbol_bytes: &[u8]) -> Option<SymbolId> {
-        let trimmed_end = symbol_bytes
+        let actual_len = symbol_bytes
             .iter()
             .rposition(|&b| b != 0)
             .map(|i| i + 1)
             .unwrap_or(0);
 
-        if trimmed_end == 0 {
+        if actual_len == 0 {
             return None;
         }
 
-        let trimmed = &symbol_bytes[..trimmed_end];
+        let trimmed = &symbol_bytes[..actual_len];
         self.bytes_to_id.read().get(trimmed).copied()
     }
 
@@ -89,10 +54,49 @@ impl SymbolInterner {
     }
 
     pub fn intern_batch(&self, symbols: &[String]) -> Vec<SymbolId> {
-        symbols
-            .iter()
-            .map(|s| self.get_or_intern(s))
-            .collect()
+        let mut result = Vec::with_capacity(symbols.len());
+
+        let mut to_intern = Vec::new();
+        {
+            let symbol_map = self.symbol_to_id.read();
+            for symbol in symbols {
+                if let Some(&id) = symbol_map.get(symbol.as_str()) {
+                    result.push(id);
+                } else {
+                    to_intern.push((result.len(), symbol));
+                    result.push(0);
+                }
+            }
+        }
+
+        if !to_intern.is_empty() {
+            let mut symbol_map = self.symbol_to_id.write();
+            let mut bytes_map = self.bytes_to_id.write();
+
+            for (index, symbol) in to_intern {
+                if let Some(&id) = symbol_map.get(symbol.as_str()) {
+                    result[index] = id;
+                    continue;
+                }
+
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                if id >= (MAX_SYMBOLS as u16) {
+                    panic!("Symbol interner capacity exceeded");
+                }
+
+                let arc_symbol: Arc<str> = symbol.as_str().into();
+
+                symbol_map.insert(Arc::clone(&arc_symbol), id);
+                *self.id_to_symbol[id as usize].write() = Some(Arc::clone(&arc_symbol));
+
+                let symbol_bytes = arc_symbol.as_bytes().to_vec().into_boxed_slice();
+                bytes_map.insert(symbol_bytes, id);
+
+                result[index] = id;
+            }
+        }
+
+        result
     }
 
     pub fn get_all_mappings(&self) -> Vec<(String, SymbolId)> {
