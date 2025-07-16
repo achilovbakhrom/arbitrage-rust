@@ -135,9 +135,13 @@ fn create_fix_executor(
             "Real"
         });
 
-        let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
+        let fix_config = if config.debug {
+            None
+        } else {
+            Some(config.clone().get_fix_client_config())
+        };
 
-        match create_fix_client(config.debug, fix_config, &symbol_map)? {
+        match create_fix_client(config.debug, fix_config, config.clone(), &symbol_map)? {
             Some(executor) => {
                 executor.connect()?;
                 info!("✓ FIX executor connected successfully with precision support");

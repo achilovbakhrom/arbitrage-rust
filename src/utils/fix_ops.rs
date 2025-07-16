@@ -2,6 +2,7 @@ use std::sync::{ Arc, Mutex };
 use std::time::{ Duration, Instant };
 use anyhow::Result;
 use tracing::{ error, info, warn };
+use crate::config::Config;
 use crate::exchange::fix_api::{ FixClient, ExecutionResult, MarketOrder };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
@@ -219,13 +220,14 @@ pub fn execute_triangular_trades(
 pub fn create_fix_client(
     is_debug_mode: bool,
     fix_config: Option<crate::exchange::fix_api::FixConfig>,
+    config: Config,
     symbol_map: &Arc<SymbolMap>
 ) -> Result<Option<FixClientType>> {
     if is_debug_mode {
         let mock_client = MockFixClient::new();
         Ok(Some(FixClientType::Mock(Arc::new(Mutex::new(mock_client)))))
-    } else if let Some(config) = fix_config {
-        let mut real_client = FixClient::new(config)?;
+    } else if let Some(fix_config) = fix_config {
+        let mut real_client = FixClient::new(fix_config, config)?;
 
         for symbol in symbol_map.get_all_symbols() {
             real_client.update_symbol_precision(

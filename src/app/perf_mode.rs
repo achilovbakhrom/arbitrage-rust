@@ -209,7 +209,14 @@ fn create_fix_executor(
 
         let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
-        match FixArbitrageExecutor::new(config.debug, fix_config, Arc::clone(&symbol_map)) {
+        match
+            FixArbitrageExecutor::new(
+                config.debug,
+                fix_config,
+                config.clone(),
+                Arc::clone(&symbol_map)
+            )
+        {
             Ok(executor) => {
                 if let Err(e) = executor.connect() {
                     error!("Failed to connect FIX executor: {}", e);

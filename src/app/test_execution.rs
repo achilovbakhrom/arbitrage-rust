@@ -49,8 +49,8 @@ pub fn run_test_execution(config: Config, shutdown: Option<Arc<AtomicBool>>) -> 
 
     let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
 
-    match create_fix_client(config.debug, fix_config, &symbol_map)? {
-        Some(mut client) => {
+    match create_fix_client(config.debug, fix_config, config.clone(), &symbol_map)? {
+        Some(client) => {
             info!("🔧 Creating {} FIX client for testing...", if config.debug {
                 "Mock"
             } else {

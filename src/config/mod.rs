@@ -27,6 +27,8 @@ pub struct Config {
     pub max_slippage_percentage: f64,
     pub min_execution_profit_threshold: f64,
     pub performance_test_duration_secs: u64,
+    pub rest_api_key: String,
+    pub rest_api_secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +210,9 @@ impl Config {
             .parse::<u64>()
             .context("Failed to parse TAA_PERFORMANCE_TEST_DURATION")?;
 
+        let rest_api_key = env::var("TAA_API_KEY").unwrap_or_else(|_| "".to_string());
+        let rest_api_secret = env::var("TAA_API_SECRET").unwrap_or_else(|_| "".to_string());
+
         Ok(Config {
             debug,
             sbe_api_key,
@@ -227,6 +232,8 @@ impl Config {
             max_slippage_percentage,
             min_execution_profit_threshold,
             performance_test_duration_secs,
+            rest_api_key,
+            rest_api_secret,
         })
     }
 
