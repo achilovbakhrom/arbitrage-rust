@@ -1,7 +1,7 @@
 use std::sync::{ Arc, Mutex };
 use std::time::{ Duration, Instant };
 use anyhow::Result;
-use tracing::{ info, error, debug };
+use tracing::{ error, info, warn };
 use crate::exchange::fix_api::{ FixClient, ExecutionResult, MarketOrder };
 use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
@@ -79,10 +79,19 @@ pub fn execute_triangular_trades(
 ) -> Result<bool> {
     let mut current_amount = trade_data.start_amount;
     let mut all_successful = true;
+    let execution_start = Instant::now();
+
+    info!(
+        "🔄 Starting triangular arbitrage execution: {} → {} → {} (Start: {:.8})",
+        trade_data.symbols[0],
+        trade_data.symbols[1],
+        trade_data.symbols[2],
+        current_amount
+    );
 
     for (i, symbol) in trade_data.symbols.iter().enumerate() {
         if !client.is_connected() {
-            error!("FIX client disconnected during execution");
+            error!("FIX client disconnected during execution at step {}", i + 1);
             return Err(anyhow::anyhow!("FIX client disconnected"));
         }
 
@@ -97,55 +106,111 @@ pub fn execute_triangular_trades(
         );
 
         let trade_start = Instant::now();
+        info!(
+            "📤 Executing trade {}/{}: {} {} {:.8}",
+            i + 1,
+            trade_data.symbols.len(),
+            if trade_data.directions[i] {
+                "SELL"
+            } else {
+                "BUY"
+            },
+            symbol,
+            current_amount
+        );
 
         match client.place_market_order(order) {
             Ok(result) => {
                 let trade_time = trade_start.elapsed();
 
-                if result.order_status == "REJECTED" || result.exec_type == "REJECTED" {
-                    error!("Order rejected: {:?}", result.reject_reason);
+                if result.order_status != "FILLED" {
+                    error!("❌ Unexpected order status: {} (expected FILLED)", result.order_status);
                     all_successful = false;
                     break;
                 }
 
-                debug!(
-                    "Trade {}/{} executed: {} {} in {:.2}ms",
+                if result.filled_qty <= 0.0 {
+                    error!(
+                        "❌ No quantity filled for trade {}/{}: {}",
+                        i + 1,
+                        trade_data.symbols.len(),
+                        symbol
+                    );
+                    all_successful = false;
+                    break;
+                }
+
+                info!(
+                    "✅ Trade {}/{} COMPLETED: {} {} - Filled: {:.8} @ {:.8} in {:.2}ms",
                     i + 1,
                     trade_data.symbols.len(),
                     result.side,
                     symbol,
+                    result.filled_qty,
+                    result.avg_price,
                     trade_time.as_secs_f64() * 1000.0
                 );
 
                 if i < trade_data.symbols.len() - 1 {
-                    current_amount = match client {
-                        FixClientType::Real(_) => result.leaves_qty,
-                        FixClientType::Mock(_) => {
-                            if trade_data.directions[i] {
-                                result.cum_quote_qty
-                            } else {
-                                result.filled_qty
-                            }
-                        }
+                    current_amount = if trade_data.directions[i] {
+                        result.cum_quote_qty
+                    } else {
+                        result.filled_qty
                     };
 
                     if current_amount <= 0.0 {
-                        error!("Invalid amount for next trade: {:.8}", current_amount);
+                        error!(
+                            "❌ Invalid amount for next trade: {:.8} (from trade {} result)",
+                            current_amount,
+                            i + 1
+                        );
                         all_successful = false;
                         break;
                     }
+
+                    info!("💰 Amount for next trade: {:.8}", current_amount);
                 }
             }
             Err(e) => {
-                error!("Trade {}/{} failed: {}", i + 1, trade_data.symbols.len(), e);
+                error!(
+                    "❌ Trade {}/{} failed: {} - Error: {}",
+                    i + 1,
+                    trade_data.symbols.len(),
+                    symbol,
+                    e
+                );
                 all_successful = false;
                 break;
             }
         }
 
-        if matches!(client, FixClientType::Mock(_)) {
+        if matches!(client, FixClientType::Mock(_)) && i < trade_data.symbols.len() - 1 {
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    let total_execution_time = execution_start.elapsed();
+
+    if all_successful {
+        info!(
+            "🎉 Triangular arbitrage COMPLETED successfully in {:.2}ms! Final amount: {:.8}",
+            total_execution_time.as_secs_f64() * 1000.0,
+            current_amount
+        );
+
+        let profit = current_amount - trade_data.start_amount;
+        let profit_percentage = (profit / trade_data.start_amount) * 100.0;
+
+        if profit > 0.0 {
+            info!("💰 Actual profit: {:.8} ({:.4}%)", profit, profit_percentage);
+        } else {
+            warn!("📉 Loss: {:.8} ({:.4}%)", profit.abs(), profit_percentage.abs());
+        }
+    } else {
+        error!(
+            "❌ Triangular arbitrage failed after {:.2}ms",
+            total_execution_time.as_secs_f64() * 1000.0
+        );
     }
 
     Ok(all_successful)
