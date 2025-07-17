@@ -3,7 +3,6 @@ use std::sync::atomic::{ AtomicBool, Ordering };
 
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook_manager::manager::OrderBookManager;
-use crate::orderbook_manager::orderbook::OrderBook;
 use crate::utils::symbol_interner::global;
 
 #[derive(Debug, Clone)]
@@ -12,7 +11,6 @@ pub struct ArbitrageOpportunity {
     pub profit_ratio: f64,
     pub start_amount: f64,
     pub symbols_involved: [u16; 3],
-    pub estimated_slippage: f64,
 }
 
 impl ArbitrageOpportunity {
@@ -21,19 +19,13 @@ impl ArbitrageOpportunity {
         (self.profit_ratio - 1.0) * 100.0
     }
 
-    #[inline(always)]
-    pub fn net_profit_percentage(&self) -> f64 {
-        (self.profit_ratio - self.estimated_slippage - 1.0) * 100.0
-    }
-
     pub fn display(&self) -> String {
         format!(
-            "{} → {} → {} | Gross: {:.4}% | Net: {:.4}%",
+            "{} → {} → {} | Profit: {:.4}%",
             self.path.first_symbol,
             self.path.second_symbol,
             self.path.third_symbol,
-            self.profit_percentage(),
-            self.net_profit_percentage()
+            self.profit_percentage()
         )
     }
 }
@@ -92,11 +84,8 @@ pub struct ArbitrageDetector {
     symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>,
     execution_callbacks: parking_lot::RwLock<Vec<ExecutionCallback>>,
     start_amount: f32,
-    min_volume_multiplier: f32,
     shutdown: Arc<AtomicBool>,
     symbol_precisions: Box<[(u8, u8); MAX_SYMBOLS]>,
-    slippage_buffer: f32,
-    execution_delay_buffer: f32,
 }
 
 impl ArbitrageDetector {
@@ -107,7 +96,6 @@ impl ArbitrageDetector {
         fee_rate: f64,
         min_profit_threshold: f64,
         start_amount: f64,
-        min_volume_multiplier: f64,
         symbol_precision_map: &crate::models::symbol_map::SymbolMap
     ) -> Arc<Self> {
         let path_count = paths.len();
@@ -154,7 +142,7 @@ impl ArbitrageDetector {
             }
         }
 
-        let min_threshold = (1.0 + min_profit_threshold * 1.5) as f32;
+        let min_threshold = (1.0 + min_profit_threshold) as f32;
 
         for (i, path) in unwrapped_paths.iter().enumerate() {
             let first_symbol_id = global::get_id(&path.first_symbol).unwrap();
@@ -190,10 +178,7 @@ impl ArbitrageDetector {
             symbol_map,
             execution_callbacks: parking_lot::RwLock::new(Vec::with_capacity(2)),
             start_amount: start_amount as f32,
-            min_volume_multiplier: min_volume_multiplier as f32,
             symbol_precisions,
-            slippage_buffer: 0.02,
-            execution_delay_buffer: 0.001,
         })
     }
 
@@ -220,20 +205,6 @@ impl ArbitrageDetector {
                 symbol_paths.indices[symbol_paths.count as usize] = path_idx;
                 symbol_paths.count += 1;
             }
-        }
-    }
-
-    #[inline]
-    fn estimate_slippage(&self, book: &Arc<OrderBook>, amount: f64, is_buy: bool) -> f32 {
-        if
-            let (Some(full_price), Some(top_price)) = (
-                book.get_effective_price(amount, is_buy),
-                book.get_effective_price(0.001, is_buy),
-            )
-        {
-            ((full_price - top_price).abs() / top_price) as f32
-        } else {
-            0.01
         }
     }
 
@@ -293,7 +264,7 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn calculate_portfolio(&self, path_idx: u16) -> Option<(f32, f32)> {
+    fn calculate_portfolio(&self, path_idx: u16) -> Option<f32> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
@@ -321,20 +292,14 @@ impl ArbitrageDetector {
                 path_data.third_symbol_id as usize
             );
 
-            let mut total_slippage = 0.0f32;
             let mut amount = self.start_amount;
 
+            // First trade
             let first_amount_f64 = amount as f64;
             let first_price = first_book.get_effective_price(
                 first_amount_f64,
                 path_data.first_is_base_to_quote()
             )? as f32;
-
-            total_slippage += self.estimate_slippage(
-                &first_book,
-                first_amount_f64,
-                path_data.first_is_base_to_quote()
-            );
 
             let precise_input = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
                 first_qty_prec
@@ -354,17 +319,12 @@ impl ArbitrageDetector {
                 first_qty_prec
             });
 
+            // Second trade
             let second_amount_f64 = amount as f64;
             let second_price = second_book.get_effective_price(
                 second_amount_f64,
                 path_data.second_is_base_to_quote()
             )? as f32;
-
-            total_slippage += self.estimate_slippage(
-                &second_book,
-                second_amount_f64,
-                path_data.second_is_base_to_quote()
-            );
 
             let precise_input = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
                 second_qty_prec
@@ -384,17 +344,12 @@ impl ArbitrageDetector {
                 second_qty_prec
             });
 
+            // Third trade
             let third_amount_f64 = amount as f64;
             let third_price = third_book.get_effective_price(
                 third_amount_f64,
                 path_data.third_is_base_to_quote()
             )? as f32;
-
-            total_slippage += self.estimate_slippage(
-                &third_book,
-                third_amount_f64,
-                path_data.third_is_base_to_quote()
-            );
 
             let precise_input = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
                 third_qty_prec
@@ -416,10 +371,8 @@ impl ArbitrageDetector {
 
             let profit_ratio = amount / self.start_amount;
 
-            total_slippage += self.slippage_buffer + self.execution_delay_buffer;
-
-            if profit_ratio > path_data.min_threshold + total_slippage {
-                Some((profit_ratio, total_slippage))
+            if profit_ratio > path_data.min_threshold {
+                Some(profit_ratio)
             } else {
                 None
             }
@@ -427,12 +380,7 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path(
-        &self,
-        path_idx: u16,
-        profit_ratio: f32,
-        estimated_slippage: f32
-    ) -> Option<ArbitrageOpportunity> {
+    fn check_path(&self, path_idx: u16, profit_ratio: f32) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path = self.all_paths.get_unchecked(path_idx as usize);
             let path_data = self.path_data.get_unchecked(path_idx as usize);
@@ -446,7 +394,6 @@ impl ArbitrageDetector {
                     path_data.second_symbol_id,
                     path_data.third_symbol_id,
                 ],
-                estimated_slippage: estimated_slippage as f64,
             })
         }
     }
@@ -470,17 +417,8 @@ impl ArbitrageDetector {
             for i in 0..max_paths_to_check {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
-                if
-                    let Some((profit_ratio, estimated_slippage)) =
-                        self.calculate_portfolio(path_idx)
-                {
-                    if
-                        let Some(opportunity) = self.check_path(
-                            path_idx,
-                            profit_ratio,
-                            estimated_slippage
-                        )
-                    {
+                if let Some(profit_ratio) = self.calculate_portfolio(path_idx) {
+                    if let Some(opportunity) = self.check_path(path_idx, profit_ratio) {
                         self.trigger_execution_callbacks(opportunity);
                     }
                 }
@@ -509,7 +447,6 @@ pub fn create_detector(
     fee_rate: f64,
     min_profit_threshold: f64,
     start_amount: f64,
-    min_volume_multiplier: f64,
     symbol_map: &crate::models::symbol_map::SymbolMap
 ) -> Arc<ArbitrageDetector> {
     ArbitrageDetector::new(
@@ -519,7 +456,6 @@ pub fn create_detector(
         fee_rate,
         min_profit_threshold,
         start_amount,
-        min_volume_multiplier,
         symbol_map
     )
 }

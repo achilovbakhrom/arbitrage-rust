@@ -3,7 +3,6 @@ use crate::{
     arbitrage::{ self, detector::ArbitrageDetector },
     config::Config,
     exchange::{ binance::BinanceClient, client::ExchangeClient },
-    executor::fix_executor::FixArbitrageExecutor,
     orderbook_manager::manager::OrderBookManager,
     performance,
     utils::{
@@ -12,7 +11,6 @@ use crate::{
             build_symbol_map,
             build_tokio_async_runtime,
             create_output_file,
-            print_executor_info,
             run_api_with_timeout,
         },
         symbol_interner::global,
@@ -31,9 +29,7 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     let output_file = create_output_file()?;
 
     let api_client = Arc::new(
-        BinanceClient::new(config.fix_api.clone(), config.debug).context(
-            "Failed to create Binance client"
-        )?
+        BinanceClient::new(config.fix_api.clone()).context("Failed to create Binance client")?
     );
 
     let rt = build_tokio_async_runtime()?;
@@ -68,7 +64,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
         config.fee,
         config.threshold,
         config.trade_amount,
-        config.min_volume_multiplier,
         &symbol_map
     );
 
@@ -78,9 +73,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
         Arc::clone(&shutdown),
         Arc::clone(&detection_times)
     );
-
-    let fix_executor = create_fix_executor(Arc::clone(&symbol_map), &config)?;
-    print_executor_info(fix_executor.is_some(), config.debug, config.threshold);
 
     let execution_handler = start_execution_thread(Arc::clone(&detector), Arc::clone(&shutdown));
 
@@ -94,14 +86,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
         shutdown,
         detection_times
     );
-
-    if let Some(fix_exec) = fix_executor {
-        if let Err(e) = fix_exec.disconnect() {
-            error!("Error disconnecting FIX executor: {}", e);
-        } else {
-            info!("FIX executor disconnected successfully");
-        }
-    }
 
     info!("Waiting for threads to complete...");
 
@@ -195,47 +179,4 @@ fn start_execution_thread(
             info!("Execution thread stopped");
         })
         .expect("Failed to spawn execution thread")
-}
-
-fn create_fix_executor(
-    symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
-    config: &Config
-) -> Result<Option<Arc<FixArbitrageExecutor>>> {
-    if config.should_enable_real_trading() || config.should_enable_mock_trading() {
-        info!("Creating FIX executor ({}) for performance test", if config.debug {
-            "Mock"
-        } else {
-            "Real"
-        });
-
-        let fix_config = if config.debug { None } else { Some(config.get_fix_client_config()) };
-
-        match
-            FixArbitrageExecutor::new(
-                config.debug,
-                fix_config,
-                config.clone(),
-                Arc::clone(&symbol_map)
-            )
-        {
-            Ok(executor) => {
-                if let Err(e) = executor.connect() {
-                    error!("Failed to connect FIX executor: {}", e);
-                    return Err(anyhow!("Failed to connect FIX executor: {}", e));
-                }
-
-                let executor_arc = Arc::new(executor);
-
-                info!("✓ FIX executor connected successfully for performance test");
-                Ok(Some(executor_arc))
-            }
-            Err(e) => {
-                error!("Failed to create FIX executor: {}", e);
-                Err(anyhow!("Failed to create FIX executor: {}", e))
-            }
-        }
-    } else {
-        info!("Trading disabled, using simulation mode only");
-        Ok(None)
-    }
 }
