@@ -104,17 +104,3 @@ pub fn create_output_file() -> anyhow::Result<String> {
 
     Ok(output_file)
 }
-
-pub fn print_executor_info(has_exec: bool, is_debug: bool, threshold: f64) {
-    let mode = if has_exec {
-        if is_debug {
-            "FIX Mock Trading (Performance Test)"
-        } else {
-            "FIX Real Trading (Performance Test)"
-        }
-    } else {
-        "Simulation Only (Performance Test)"
-    };
-
-    info!("Created arbitrage detector with threshold: {:.2}% (Mode: {})", threshold * 100.0, mode);
-}

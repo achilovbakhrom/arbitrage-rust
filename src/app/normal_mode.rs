@@ -13,7 +13,7 @@ use crate::{
         validation::{ print_trading_mode_info, validate_startup_config },
     },
     utils::{
-        fix_ops::{ create_fix_client, FixClientType, execute_triangular_trades_with_simulation },
+        fix_ops::{ create_fix_client, FixClientType, execute_triangular_trades },
         thread_ops::{ start_detection_thread, start_execution_thread, ThreadManager },
         websocket_ops::{ start_websocket_thread, create_depth_update_callback, WebSocketConfig },
     },
@@ -28,9 +28,7 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     validate_startup_config(&config)?;
 
     let client = Arc::new(
-        BinanceClient::new(config.fix_api.clone(), config.debug).context(
-            "Failed to create Binance client"
-        )?
+        BinanceClient::new(config.fix_api.clone()).context("Failed to create Binance client")?
     );
 
     let rt = build_tokio_async_runtime()?;
@@ -174,14 +172,7 @@ fn create_execution_callback(
     Arc::new(move |opportunity| {
         info!("🚀 ENHANCED EXECUTION: Starting arbitrage with simulation logging");
 
-        match
-            execute_triangular_trades_with_simulation(
-                &opportunity,
-                &fix_client,
-                &symbol_map,
-                &orderbook_manager
-            )
-        {
+        match execute_triangular_trades(&opportunity, &fix_client, &symbol_map, &orderbook_manager) {
             Ok(true) => {
                 info!(
                     "✅ Enhanced triangular arbitrage completed successfully: {}",

@@ -1,7 +1,7 @@
 use std::sync::{ Arc, Mutex };
 use std::time::{ Duration, Instant };
 use anyhow::Result;
-use tracing::{ error, info, warn };
+use tracing::{ info, warn };
 use crate::config::Config;
 use crate::exchange::fix_api::{ FixClient, ExecutionResult, MarketOrder };
 use crate::exchange::mock_fix_api::MockFixClient;
@@ -247,7 +247,8 @@ fn execute_triangular_sequence(
     Ok((true, executed_trades))
 }
 
-pub fn execute_triangular_trades_with_simulation(
+// for real mode
+pub fn execute_triangular_trades(
     opportunity: &ArbitrageOpportunity,
     client: &FixClientType,
     symbol_map: &Arc<SymbolMap>,
@@ -297,7 +298,8 @@ pub fn execute_triangular_trades_with_simulation(
     }
 }
 
-pub fn execute_triangular_trades(
+// for trade simulation mode
+pub fn execute_triangular_trades_test(
     trade_data: &TriangularTradeData,
     client: &FixClientType,
     symbol_map: &Arc<SymbolMap>

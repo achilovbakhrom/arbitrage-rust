@@ -32,7 +32,6 @@ struct BinanceDepthResponse {
 pub struct BinanceClient {
     base_url: Url,
     api_key: Arc<str>,
-    testnet: bool,
     symbols_cache: RwLock<Option<Vec<Symbol>>>,
     symbols_cache_updated_at: RwLock<Instant>,
     symbols_cache_ttl: Duration,
@@ -73,13 +72,12 @@ enum BinanceSymbolFilter {
 }
 
 impl BinanceClient {
-    pub fn new(api_key: String, testnet: bool) -> Result<Self> {
+    pub fn new(api_key: String) -> Result<Self> {
         let base_url = Url::parse("https://api.binance.com/api/").context("Invalid API URL")?;
 
         Ok(Self {
             base_url,
             api_key: api_key.into(),
-            testnet,
             symbols_cache: RwLock::new(None),
             symbols_cache_updated_at: RwLock::new(Instant::now()),
             symbols_cache_ttl: Duration::from_secs(300),
