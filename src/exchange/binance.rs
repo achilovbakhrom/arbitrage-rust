@@ -147,10 +147,6 @@ impl BinanceClient {
 
 #[async_trait]
 impl ExchangeClient for BinanceClient {
-    fn name(&self) -> &str {
-        if self.testnet { "Binance Testnet" } else { "Binance" }
-    }
-
     async fn get_all_symbols(&self) -> Result<Vec<Symbol>> {
         if self.is_cache_valid().await {
             if let Some(symbols) = self.symbols_cache.read().await.as_ref() {

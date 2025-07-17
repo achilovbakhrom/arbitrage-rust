@@ -3,6 +3,7 @@ use std::sync::atomic::{ AtomicBool, Ordering };
 
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook_manager::manager::OrderBookManager;
+use crate::orderbook_manager::orderbook::OrderBook;
 use crate::utils::symbol_interner::global;
 
 #[derive(Debug, Clone)]
@@ -11,6 +12,7 @@ pub struct ArbitrageOpportunity {
     pub profit_ratio: f64,
     pub start_amount: f64,
     pub symbols_involved: [u16; 3],
+    pub estimated_slippage: f64,
 }
 
 impl ArbitrageOpportunity {
@@ -19,13 +21,19 @@ impl ArbitrageOpportunity {
         (self.profit_ratio - 1.0) * 100.0
     }
 
+    #[inline(always)]
+    pub fn net_profit_percentage(&self) -> f64 {
+        (self.profit_ratio - self.estimated_slippage - 1.0) * 100.0
+    }
+
     pub fn display(&self) -> String {
         format!(
-            "{} → {} → {} | {:.4}%",
+            "{} → {} → {} | Gross: {:.4}% | Net: {:.4}%",
             self.path.first_symbol,
             self.path.second_symbol,
             self.path.third_symbol,
-            self.profit_percentage()
+            self.profit_percentage(),
+            self.net_profit_percentage()
         )
     }
 }
@@ -39,7 +47,7 @@ struct PathData {
     second_symbol_id: u16,
     third_symbol_id: u16,
     directions: u8,
-    fee_multiplier_cubed: f32,
+    fee_rate: f32,
     min_threshold: f32,
     _padding: [u8; 2],
 }
@@ -58,6 +66,11 @@ impl PathData {
     #[inline(always)]
     fn third_is_base_to_quote(&self) -> bool {
         (self.directions & 0b100) != 0
+    }
+
+    #[inline(always)]
+    fn fee_multiplier(&self) -> f32 {
+        1.0 - self.fee_rate
     }
 }
 
@@ -81,6 +94,9 @@ pub struct ArbitrageDetector {
     start_amount: f32,
     min_volume_multiplier: f32,
     shutdown: Arc<AtomicBool>,
+    symbol_precisions: Box<[(u8, u8); MAX_SYMBOLS]>,
+    slippage_buffer: f32,
+    execution_delay_buffer: f32,
 }
 
 impl ArbitrageDetector {
@@ -91,7 +107,8 @@ impl ArbitrageDetector {
         fee_rate: f64,
         min_profit_threshold: f64,
         start_amount: f64,
-        min_volume_multiplier: f64
+        min_volume_multiplier: f64,
+        symbol_precision_map: &crate::models::symbol_map::SymbolMap
     ) -> Arc<Self> {
         let path_count = paths.len();
         let unwrapped_paths: Vec<TriangularPath> = paths
@@ -124,8 +141,20 @@ impl ArbitrageDetector {
             ]
         );
 
-        let fee_multiplier_cubed = ((1.0 - fee_rate) as f32).powi(3);
-        let min_threshold = (1.0 + min_profit_threshold) as f32;
+        let mut symbol_precisions = Box::new([(8u8, 8u8); MAX_SYMBOLS]);
+
+        for symbol_info in symbol_precision_map.get_all_symbols() {
+            if let Some(symbol_id) = global::get_id(&symbol_info.symbol) {
+                if (symbol_id as usize) < MAX_SYMBOLS {
+                    symbol_precisions[symbol_id as usize] = (
+                        symbol_info.qty_precision,
+                        symbol_info.price_precision,
+                    );
+                }
+            }
+        }
+
+        let min_threshold = (1.0 + min_profit_threshold * 1.5) as f32;
 
         for (i, path) in unwrapped_paths.iter().enumerate() {
             let first_symbol_id = global::get_id(&path.first_symbol).unwrap();
@@ -142,7 +171,7 @@ impl ArbitrageDetector {
                 second_symbol_id,
                 third_symbol_id,
                 directions,
-                fee_multiplier_cubed,
+                fee_rate: fee_rate as f32,
                 min_threshold,
                 _padding: [0; 2],
             });
@@ -162,7 +191,16 @@ impl ArbitrageDetector {
             execution_callbacks: parking_lot::RwLock::new(Vec::with_capacity(2)),
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
+            symbol_precisions,
+            slippage_buffer: 0.02,
+            execution_delay_buffer: 0.001,
         })
+    }
+
+    #[inline(always)]
+    fn apply_precision(&self, value: f32, precision: u8) -> f32 {
+        let factor = (10f32).powi(precision as i32);
+        (value * factor).floor() / factor
     }
 
     #[inline]
@@ -185,10 +223,83 @@ impl ArbitrageDetector {
         }
     }
 
+    #[inline]
+    fn estimate_slippage(&self, book: &Arc<OrderBook>, amount: f64, is_buy: bool) -> f32 {
+        if
+            let (Some(full_price), Some(top_price)) = (
+                book.get_effective_price(amount, is_buy),
+                book.get_effective_price(0.001, is_buy),
+            )
+        {
+            ((full_price - top_price).abs() / top_price) as f32
+        } else {
+            0.01
+        }
+    }
+
+    #[inline]
+    fn check_path_liquidity(&self, path_data: &PathData, start_amount: f32) -> bool {
+        let first_book = self.orderbook_manager.get_or_create_book_by_id(path_data.first_symbol_id);
+        let second_book = self.orderbook_manager.get_or_create_book_by_id(
+            path_data.second_symbol_id
+        );
+        let third_book = self.orderbook_manager.get_or_create_book_by_id(path_data.third_symbol_id);
+
+        if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
+            return false;
+        }
+
+        let mut amount = start_amount as f64;
+
+        if !first_book.has_sufficient_liquidity(amount, path_data.first_is_base_to_quote()) {
+            return false;
+        }
+
+        if
+            let Some(first_price) = first_book.get_effective_price(
+                amount,
+                path_data.first_is_base_to_quote()
+            )
+        {
+            amount = if path_data.first_is_base_to_quote() {
+                amount * (first_price as f64) * (path_data.fee_multiplier() as f64)
+            } else {
+                (amount / (first_price as f64)) * (path_data.fee_multiplier() as f64)
+            };
+        } else {
+            return false;
+        }
+
+        if !second_book.has_sufficient_liquidity(amount, path_data.second_is_base_to_quote()) {
+            return false;
+        }
+
+        if
+            let Some(second_price) = second_book.get_effective_price(
+                amount,
+                path_data.second_is_base_to_quote()
+            )
+        {
+            amount = if path_data.second_is_base_to_quote() {
+                amount * (second_price as f64) * (path_data.fee_multiplier() as f64)
+            } else {
+                (amount / (second_price as f64)) * (path_data.fee_multiplier() as f64)
+            };
+        } else {
+            return false;
+        }
+
+        third_book.has_sufficient_liquidity(amount, path_data.third_is_base_to_quote())
+    }
+
     #[inline(always)]
-    fn calculate_portfolio(&self, path_idx: u16) -> Option<f32> {
+    fn calculate_portfolio(&self, path_idx: u16) -> Option<(f32, f32)> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
+
+            if !self.check_path_liquidity(path_data, self.start_amount) {
+                return None;
+            }
 
             let first_book = self.orderbook_manager.get_or_create_book_by_id(
                 path_data.first_symbol_id
@@ -200,69 +311,115 @@ impl ArbitrageDetector {
                 path_data.third_symbol_id
             );
 
-            if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
-                return None;
-            }
+            let (first_qty_prec, first_price_prec) = *self.symbol_precisions.get_unchecked(
+                path_data.first_symbol_id as usize
+            );
+            let (second_qty_prec, second_price_prec) = *self.symbol_precisions.get_unchecked(
+                path_data.second_symbol_id as usize
+            );
+            let (third_qty_prec, third_price_prec) = *self.symbol_precisions.get_unchecked(
+                path_data.third_symbol_id as usize
+            );
 
-            let min_vol = self.start_amount * self.min_volume_multiplier;
-            let min_vol_f64 = min_vol as f64;
+            let mut total_slippage = 0.0f32;
+            let mut amount = self.start_amount;
 
-            if
-                !first_book.has_sufficient_liquidity(
-                    min_vol_f64,
-                    path_data.first_is_base_to_quote()
-                ) ||
-                !second_book.has_sufficient_liquidity(
-                    min_vol_f64,
-                    path_data.second_is_base_to_quote()
-                ) ||
-                !third_book.has_sufficient_liquidity(
-                    min_vol_f64,
-                    path_data.third_is_base_to_quote()
-                )
-            {
-                return None;
-            }
-
+            let first_amount_f64 = amount as f64;
             let first_price = first_book.get_effective_price(
-                self.start_amount as f64,
+                first_amount_f64,
                 path_data.first_is_base_to_quote()
             )? as f32;
 
-            let mut amount = self.start_amount;
-            amount = if path_data.first_is_base_to_quote() {
-                amount * first_price
+            total_slippage += self.estimate_slippage(
+                &first_book,
+                first_amount_f64,
+                path_data.first_is_base_to_quote()
+            );
+
+            let precise_input = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
+                first_qty_prec
             } else {
-                amount / first_price
+                first_price_prec
+            });
+
+            amount = if path_data.first_is_base_to_quote() {
+                precise_input * first_price * path_data.fee_multiplier()
+            } else {
+                (precise_input / first_price) * path_data.fee_multiplier()
             };
 
+            amount = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
+                first_price_prec
+            } else {
+                first_qty_prec
+            });
+
+            let second_amount_f64 = amount as f64;
             let second_price = second_book.get_effective_price(
-                amount as f64,
+                second_amount_f64,
                 path_data.second_is_base_to_quote()
             )? as f32;
 
-            amount = if path_data.second_is_base_to_quote() {
-                amount * second_price
+            total_slippage += self.estimate_slippage(
+                &second_book,
+                second_amount_f64,
+                path_data.second_is_base_to_quote()
+            );
+
+            let precise_input = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
+                second_qty_prec
             } else {
-                amount / second_price
+                second_price_prec
+            });
+
+            amount = if path_data.second_is_base_to_quote() {
+                precise_input * second_price * path_data.fee_multiplier()
+            } else {
+                (precise_input / second_price) * path_data.fee_multiplier()
             };
 
+            amount = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
+                second_price_prec
+            } else {
+                second_qty_prec
+            });
+
+            let third_amount_f64 = amount as f64;
             let third_price = third_book.get_effective_price(
-                amount as f64,
+                third_amount_f64,
                 path_data.third_is_base_to_quote()
             )? as f32;
 
-            amount = if path_data.third_is_base_to_quote() {
-                amount * third_price
+            total_slippage += self.estimate_slippage(
+                &third_book,
+                third_amount_f64,
+                path_data.third_is_base_to_quote()
+            );
+
+            let precise_input = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
+                third_qty_prec
             } else {
-                amount / third_price
+                third_price_prec
+            });
+
+            amount = if path_data.third_is_base_to_quote() {
+                precise_input * third_price * path_data.fee_multiplier()
+            } else {
+                (precise_input / third_price) * path_data.fee_multiplier()
             };
 
-            amount *= path_data.fee_multiplier_cubed;
+            amount = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
+                third_price_prec
+            } else {
+                third_qty_prec
+            });
+
             let profit_ratio = amount / self.start_amount;
 
-            if profit_ratio > path_data.min_threshold {
-                Some(profit_ratio)
+            total_slippage += self.slippage_buffer + self.execution_delay_buffer;
+
+            if profit_ratio > path_data.min_threshold + total_slippage {
+                Some((profit_ratio, total_slippage))
             } else {
                 None
             }
@@ -270,20 +427,26 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path(&self, path_idx: u16, ratio: f32) -> Option<ArbitrageOpportunity> {
+    fn check_path(
+        &self,
+        path_idx: u16,
+        profit_ratio: f32,
+        estimated_slippage: f32
+    ) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path = self.all_paths.get_unchecked(path_idx as usize);
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
             Some(ArbitrageOpportunity {
                 path: Arc::new(path.clone()),
-                profit_ratio: ratio as f64,
+                profit_ratio: profit_ratio as f64,
                 start_amount: self.start_amount as f64,
                 symbols_involved: [
                     path_data.first_symbol_id,
                     path_data.second_symbol_id,
                     path_data.third_symbol_id,
                 ],
+                estimated_slippage: estimated_slippage as f64,
             })
         }
     }
@@ -302,13 +465,22 @@ impl ArbitrageDetector {
                 return;
             }
 
-            let max_paths_to_check = path_count.min(6);
+            let max_paths_to_check = path_count.min(3);
 
             for i in 0..max_paths_to_check {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
-                if let Some(profit_ratio) = self.calculate_portfolio(path_idx) {
-                    if let Some(opportunity) = self.check_path(path_idx, profit_ratio) {
+                if
+                    let Some((profit_ratio, estimated_slippage)) =
+                        self.calculate_portfolio(path_idx)
+                {
+                    if
+                        let Some(opportunity) = self.check_path(
+                            path_idx,
+                            profit_ratio,
+                            estimated_slippage
+                        )
+                    {
                         self.trigger_execution_callbacks(opportunity);
                     }
                 }
@@ -337,7 +509,8 @@ pub fn create_detector(
     fee_rate: f64,
     min_profit_threshold: f64,
     start_amount: f64,
-    min_volume_multiplier: f64
+    min_volume_multiplier: f64,
+    symbol_map: &crate::models::symbol_map::SymbolMap
 ) -> Arc<ArbitrageDetector> {
     ArbitrageDetector::new(
         orderbook_manager,
@@ -346,6 +519,7 @@ pub fn create_detector(
         fee_rate,
         min_profit_threshold,
         start_amount,
-        min_volume_multiplier
+        min_volume_multiplier,
+        symbol_map
     )
 }

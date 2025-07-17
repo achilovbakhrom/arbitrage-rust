@@ -33,42 +33,20 @@ fn main() -> Result<()> {
         .context("Failed to initialize logging")?;
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown_flag);
+    let shutdown = Arc::clone(&shutdown_flag);
+    let shutdown_clone_for_handler = Arc::clone(&shutdown);
+
+    ctrlc
+        ::set_handler(move || {
+            info!("Received Ctrl+C signal, initiating graceful shutdown...");
+            shutdown_clone_for_handler.store(true, Ordering::Relaxed);
+        })
+        .context("Failed to set Ctrl+C handler")?;
 
     let result = match command {
-        Command::Run => {
-            let shutdown_clone_for_handler = Arc::clone(&shutdown_clone);
-            ctrlc
-                ::set_handler(move || {
-                    info!("Received Ctrl+C signal, initiating graceful shutdown...");
-                    shutdown_clone_for_handler.store(true, Ordering::Relaxed);
-                })
-                .context("Failed to set Ctrl+C handler")?;
-
-            app::normal_mode::run_normal_mode(config, shutdown_clone)
-        }
-        Command::PerformanceTest => {
-            let shutdown_clone_for_handler = Arc::clone(&shutdown_clone);
-            ctrlc
-                ::set_handler(move || {
-                    info!("Received Ctrl+C signal, stopping performance test...");
-                    shutdown_clone_for_handler.store(true, Ordering::Relaxed);
-                })
-                .context("Failed to set Ctrl+C handler")?;
-
-            app::perf_mode::run_performance_test(config, shutdown_clone)
-        }
-        Command::TestExecution => {
-            let shutdown_clone_for_handler = Arc::clone(&shutdown_clone);
-            ctrlc
-                ::set_handler(move || {
-                    info!("Received Ctrl+C signal, stopping test execution...");
-                    shutdown_clone_for_handler.store(true, Ordering::Relaxed);
-                })
-                .context("Failed to set Ctrl+C handler")?;
-
-            app::test_execution::run_test_execution(config, Some(shutdown_clone))
-        }
+        Command::Run => { app::normal_mode::run(config, shutdown) }
+        Command::PerformanceTest => { app::perf_mode::run(config, shutdown) }
+        Command::TestExecution => { app::test_execution::run(config, Some(shutdown)) }
     };
 
     match result {

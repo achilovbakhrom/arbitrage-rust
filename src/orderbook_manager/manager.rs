@@ -171,13 +171,9 @@ impl OrderBookManager {
             }
         };
 
-        match book.apply_depth_update_raw(bids, asks, first_update_id, last_update_id) {
+        match book.apply_depth_update_internal(bids, asks, first_update_id, last_update_id) {
             Ok(true) => true,
-            Ok(false) => {
-                self.trigger_recovery_by_id(symbol_id);
-                false
-            }
-            Err(_) => {
+            Ok(false) | Err(_) => {
                 self.trigger_recovery_by_id(symbol_id);
                 false
             }

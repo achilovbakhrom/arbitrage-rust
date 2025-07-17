@@ -15,13 +15,13 @@ use crate::{
         fix_ops::{ create_fix_client, FixClientType, execute_triangular_trades_with_simulation },
         thread_ops::{ start_detection_thread, start_execution_thread, ThreadManager },
         validation::{ print_trading_mode_info },
-        websocket_ops::{ start_websocket_thread, create_standard_depth_callback, WebSocketConfig },
+        websocket_ops::{ start_websocket_thread, create_depth_update_callback, WebSocketConfig },
     },
 };
 use anyhow::{ anyhow, Context, Result };
 use tracing::{ error, info };
 
-pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     print_app_starting();
     print_config(&config);
 
@@ -30,8 +30,6 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
             "Failed to create Binance client"
         )?
     );
-
-    info!("Connected to exchange: {}", client.name());
 
     let rt = build_tokio_async_runtime()?;
 
@@ -61,13 +59,14 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
         config.fee,
         config.threshold,
         config.trade_amount,
-        config.min_volume_multiplier
+        config.min_volume_multiplier,
+        &symbol_map
     );
 
     let fix_client = create_fix_executor(Arc::clone(&symbol_map), &config)?;
-
     let mut thread_manager = ThreadManager::new();
 
+    // 1. Detection handling
     let detection_handle = start_detection_thread(
         Arc::clone(&detector),
         Arc::clone(&orderbook_manager),
@@ -75,10 +74,11 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
     );
     thread_manager.add_handle(detection_handle);
 
+    // 2. Execution handling (fix socket)
     let execution_callback = fix_client
         .as_ref()
         .map(|client| {
-            create_execution_callback_with_simulation(
+            create_execution_callback(
                 client.clone(),
                 Arc::clone(&symbol_map),
                 Arc::clone(&orderbook_manager)
@@ -92,9 +92,9 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
     );
     thread_manager.add_handle(execution_handle);
 
+    // 3. depth update handling (sbe socket)
     let ws_config = WebSocketConfig::new(config.sbe_api_key.clone(), unique_symbols.clone());
-
-    let depth_callback = create_standard_depth_callback(Arc::clone(&orderbook_manager));
+    let depth_callback = create_depth_update_callback(Arc::clone(&orderbook_manager));
     let ws_handle = start_websocket_thread(
         ws_config,
         Arc::clone(&orderbook_manager),
@@ -104,6 +104,7 @@ pub fn run_normal_mode(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> 
     thread_manager.add_handle(ws_handle);
 
     print_app_started();
+
     info!("\nPress Ctrl+C to exit");
 
     print_trading_mode_info(fix_client.is_some(), config.debug);
@@ -164,7 +165,7 @@ fn create_fix_executor(
     }
 }
 
-fn create_execution_callback_with_simulation(
+fn create_execution_callback(
     fix_client: FixClientType,
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
     orderbook_manager: Arc<OrderBookManager>
