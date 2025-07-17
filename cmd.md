@@ -8,3 +8,6 @@ cargo clippy -- \
   -W clippy::vec_box \
   -W clippy::box_collection \
   -W clippy::rc_buffer
+
+# apply env args command
+export $(grep -v '^#' .env | xargs)

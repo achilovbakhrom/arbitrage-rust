@@ -68,7 +68,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
         config.fee,
         config.threshold,
         config.trade_amount,
-        config.min_volume_multiplier,
         &symbol_map
     );
 

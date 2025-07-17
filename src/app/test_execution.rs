@@ -7,11 +7,11 @@ use crate::{
     utils::{
         console::print_config,
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
+        validation::{ validate_test_execution_config, print_trading_mode_info },
     },
     utils::{
         fix_ops::{ create_fix_client, execute_triangular_trades },
         order_ops::TriangularTradeData,
-        validation::validate_trading_enabled,
     },
 };
 use anyhow::{ anyhow, Context, Result };
@@ -21,7 +21,7 @@ pub fn run(config: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<()> {
     print_config(&config);
     info!("🧪 Starting triangular arbitrage test execution");
 
-    validate_trading_enabled(&config)?;
+    validate_test_execution_config(&config)?;
 
     let shutdown = shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
@@ -59,6 +59,8 @@ pub fn run(config: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<()> {
 
             client.connect()?;
             info!("✅ FIX client connected successfully");
+
+            print_trading_mode_info(true, config.debug);
 
             let opportunity = create_test_opportunity(&config, &symbol_map)?;
             info!("📋 Created test triangular arbitrage:");
@@ -132,7 +134,6 @@ fn create_test_opportunity(
         profit_ratio: 1.005,
         start_amount: test_amount,
         symbols_involved: [0, 1, 2],
-        estimated_slippage: 0.002,
     };
 
     Ok(opportunity)

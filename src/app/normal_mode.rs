@@ -10,11 +10,11 @@ use crate::{
         console::{ print_app_started, print_app_starting, print_config },
         helpers::{ build_symbol_map, build_tokio_async_runtime, run_api_with_timeout },
         symbol_interner::global,
+        validation::{ print_trading_mode_info, validate_startup_config },
     },
     utils::{
         fix_ops::{ create_fix_client, FixClientType, execute_triangular_trades_with_simulation },
         thread_ops::{ start_detection_thread, start_execution_thread, ThreadManager },
-        validation::{ print_trading_mode_info },
         websocket_ops::{ start_websocket_thread, create_depth_update_callback, WebSocketConfig },
     },
 };
@@ -24,6 +24,8 @@ use tracing::{ error, info };
 pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     print_app_starting();
     print_config(&config);
+
+    validate_startup_config(&config)?;
 
     let client = Arc::new(
         BinanceClient::new(config.fix_api.clone(), config.debug).context(
@@ -59,7 +61,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
         config.fee,
         config.threshold,
         config.trade_amount,
-        config.min_volume_multiplier,
         &symbol_map
     );
 
