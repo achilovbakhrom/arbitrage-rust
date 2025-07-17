@@ -11,7 +11,6 @@ pub struct DepthResponse {
 
 #[async_trait]
 pub trait ExchangeClient: Send + Sync {
-    fn name(&self) -> &str;
     async fn get_all_symbols(&self) -> Result<Vec<Symbol>>;
     async fn get_active_spot_symbols(&self) -> Result<Vec<Symbol>>;
     async fn is_operational(&self) -> Result<bool>;

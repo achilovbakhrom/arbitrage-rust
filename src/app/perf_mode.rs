@@ -24,7 +24,7 @@ use anyhow::{ anyhow, Context, Result };
 use parking_lot::RwLock;
 use tracing::{ error, info };
 
-pub fn run_performance_test(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     print_config(&config);
     info!("Starting performance test for triangular arbitrage system");
 

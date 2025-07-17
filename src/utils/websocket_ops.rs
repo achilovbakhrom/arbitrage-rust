@@ -93,7 +93,7 @@ pub fn start_websocket_thread<F>(
     Ok(handle)
 }
 
-pub fn create_standard_depth_callback(
+pub fn create_depth_update_callback(
     orderbook_manager: Arc<OrderBookManager>
 ) -> impl Fn(u16, &[(f64, f64); 5], &[(f64, f64); 5], u64, u64, u64) + Send + Sync {
     move |

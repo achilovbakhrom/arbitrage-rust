@@ -8,7 +8,7 @@ use crate::exchange::mock_fix_api::MockFixClient;
 use crate::models::symbol_map::SymbolMap;
 use crate::arbitrage::detector::ArbitrageOpportunity;
 use crate::orderbook_manager::manager::OrderBookManager;
-use crate::utils::simulation_logger::{ SimulationLogger, SimulationResult };
+use crate::utils::simulation_logger::SimulationLogger;
 
 use crate::utils::order_ops::{ self, TriangularTradeData };
 

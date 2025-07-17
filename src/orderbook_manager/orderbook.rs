@@ -68,7 +68,7 @@ impl OrderBook {
     }
 
     #[inline(always)]
-    pub fn apply_depth_update_raw(
+    pub fn apply_depth_update_internal(
         &self,
         bids: &[(f64, f64)],
         asks: &[(f64, f64)],

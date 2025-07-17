@@ -192,13 +192,13 @@ impl ArbitrageDetector {
             start_amount: start_amount as f32,
             min_volume_multiplier: min_volume_multiplier as f32,
             symbol_precisions,
-            slippage_buffer: 0.002,
+            slippage_buffer: 0.02,
             execution_delay_buffer: 0.001,
         })
     }
 
     #[inline(always)]
-    fn apply_precision_f32(&self, value: f32, precision: u8) -> f32 {
+    fn apply_precision(&self, value: f32, precision: u8) -> f32 {
         let factor = (10f32).powi(precision as i32);
         (value * factor).floor() / factor
     }
@@ -238,7 +238,7 @@ impl ArbitrageDetector {
     }
 
     #[inline]
-    fn check_full_path_liquidity(&self, path_data: &PathData, start_amount: f32) -> bool {
+    fn check_path_liquidity(&self, path_data: &PathData, start_amount: f32) -> bool {
         let first_book = self.orderbook_manager.get_or_create_book_by_id(path_data.first_symbol_id);
         let second_book = self.orderbook_manager.get_or_create_book_by_id(
             path_data.second_symbol_id
@@ -297,7 +297,7 @@ impl ArbitrageDetector {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
-            if !self.check_full_path_liquidity(path_data, self.start_amount) {
+            if !self.check_path_liquidity(path_data, self.start_amount) {
                 return None;
             }
 
@@ -336,9 +336,7 @@ impl ArbitrageDetector {
                 path_data.first_is_base_to_quote()
             );
 
-            let precise_input = self.apply_precision_f32(amount, if
-                path_data.first_is_base_to_quote()
-            {
+            let precise_input = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
                 first_qty_prec
             } else {
                 first_price_prec
@@ -350,7 +348,7 @@ impl ArbitrageDetector {
                 (precise_input / first_price) * path_data.fee_multiplier()
             };
 
-            amount = self.apply_precision_f32(amount, if path_data.first_is_base_to_quote() {
+            amount = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
                 first_price_prec
             } else {
                 first_qty_prec
@@ -368,9 +366,7 @@ impl ArbitrageDetector {
                 path_data.second_is_base_to_quote()
             );
 
-            let precise_input = self.apply_precision_f32(amount, if
-                path_data.second_is_base_to_quote()
-            {
+            let precise_input = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
                 second_qty_prec
             } else {
                 second_price_prec
@@ -382,7 +378,7 @@ impl ArbitrageDetector {
                 (precise_input / second_price) * path_data.fee_multiplier()
             };
 
-            amount = self.apply_precision_f32(amount, if path_data.second_is_base_to_quote() {
+            amount = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
                 second_price_prec
             } else {
                 second_qty_prec
@@ -400,9 +396,7 @@ impl ArbitrageDetector {
                 path_data.third_is_base_to_quote()
             );
 
-            let precise_input = self.apply_precision_f32(amount, if
-                path_data.third_is_base_to_quote()
-            {
+            let precise_input = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
                 third_qty_prec
             } else {
                 third_price_prec
@@ -414,7 +408,7 @@ impl ArbitrageDetector {
                 (precise_input / third_price) * path_data.fee_multiplier()
             };
 
-            amount = self.apply_precision_f32(amount, if path_data.third_is_base_to_quote() {
+            amount = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
                 third_price_prec
             } else {
                 third_qty_prec
