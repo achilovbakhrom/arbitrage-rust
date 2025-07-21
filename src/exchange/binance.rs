@@ -67,6 +67,31 @@ enum BinanceSymbolFilter {
         max_qty: String,
         step_size: String,
     },
+    #[serde(rename = "MIN_NOTIONAL")] #[serde(rename_all = "camelCase")] MinNotional {
+        min_notional: String,
+        apply_to_market: bool,
+        avg_price_mins: i32,
+    },
+    #[serde(rename = "NOTIONAL")] #[serde(rename_all = "camelCase")] Notional {
+        min_notional: String,
+        apply_min_to_market: bool,
+        max_notional: String,
+        apply_max_to_market: bool,
+        avg_price_mins: i32,
+    },
+    #[serde(rename = "MARKET_LOT_SIZE")] #[serde(rename_all = "camelCase")] MarketLotSize {
+        min_qty: String,
+        max_qty: String,
+        step_size: String,
+    },
+    #[serde(rename = "PERCENT_PRICE")] #[serde(rename_all = "camelCase")] PercentPrice {
+        multiplier_up: String,
+        multiplier_down: String,
+        avg_price_mins: i32,
+    },
+    #[serde(rename = "MAX_NUM_ORDERS")] #[serde(rename_all = "camelCase")] MaxNumOrders {
+        max_num_orders: i32,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -106,14 +131,41 @@ impl BinanceClient {
     fn convert_symbol(binance_symbol: BinanceSymbol) -> Symbol {
         let mut price_precision = 8;
         let mut qty_precision = 8;
+        let mut min_notional = 0.0;
+        let mut max_notional = None;
+        let mut min_qty = 0.0;
+        let mut max_qty = f64::MAX;
+        let mut step_size = 0.0;
 
         for filter in &binance_symbol.filters {
             match filter {
-                BinanceSymbolFilter::LotSize { step_size: ss, .. } => {
+                BinanceSymbolFilter::LotSize { min_qty: min_q, max_qty: max_q, step_size: ss } => {
                     qty_precision = Self::calculate_precision(ss);
+                    min_qty = min_q.parse::<f64>().unwrap_or(0.0);
+                    max_qty = max_q.parse::<f64>().unwrap_or(f64::MAX);
+                    step_size = ss.parse::<f64>().unwrap_or(0.0);
+                }
+                BinanceSymbolFilter::MarketLotSize { min_qty: min_q, max_qty: max_q, .. } => {
+                    // Use market lot size if regular lot size not found
+                    if min_qty == 0.0 {
+                        min_qty = min_q.parse::<f64>().unwrap_or(0.0);
+                    }
+                    if max_qty == f64::MAX {
+                        max_qty = max_q.parse::<f64>().unwrap_or(f64::MAX);
+                    }
                 }
                 BinanceSymbolFilter::PriceFilter { tick_size: t, .. } => {
                     price_precision = Self::calculate_precision(t);
+                }
+                BinanceSymbolFilter::MinNotional { min_notional: mn, .. } => {
+                    min_notional = mn.parse::<f64>().unwrap_or(0.0);
+                }
+                BinanceSymbolFilter::Notional { min_notional: mn, max_notional: mx, .. } => {
+                    min_notional = mn.parse::<f64>().unwrap_or(0.0);
+                    let max_n = mx.parse::<f64>().unwrap_or(0.0);
+                    if max_n > 0.0 {
+                        max_notional = Some(max_n);
+                    }
                 }
                 _ => {}
             }
@@ -127,6 +179,11 @@ impl BinanceClient {
             qty_precision,
             is_trading: binance_symbol.status == "TRADING",
             is_spot_trading_allowed: binance_symbol.is_spot_trading_allowed,
+            min_notional,
+            max_notional,
+            min_qty,
+            max_qty,
+            step_size,
         }
     }
 

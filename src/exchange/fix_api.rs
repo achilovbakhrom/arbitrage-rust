@@ -14,8 +14,10 @@ use std::thread;
 use std::time::{ Duration, Instant };
 use anyhow::{ Result, Context };
 use tracing::{ info, error, debug, warn };
+use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::exchange::user_data_ws::UserDataWebSocket;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +167,8 @@ pub struct FixClient {
     logout_condvar: Arc<(StdMutex<bool>, Condvar)>,
     http_client: HttpClient,
     config: Config,
+    user_data_ws: Option<Arc<Mutex<UserDataWebSocket>>>,
+    ws_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl FixClient {
@@ -205,6 +209,8 @@ impl FixClient {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(2.0))),
             logout_received: Arc::new(AtomicBool::new(false)),
             logout_condvar: Arc::new((StdMutex::new(false), Condvar::new())),
+            user_data_ws: None,
+            ws_handle: None,
         })
     }
 
@@ -305,6 +311,14 @@ impl FixClient {
         self.send_logon_and_wait_response()?;
         self.start_heartbeat()?;
         self.start_message_reader()?;
+        
+        // Initialize WebSocket for order status updates
+        if !self.config.rest_api_secret.is_empty() {
+            match self.initialize_user_data_websocket() {
+                Ok(_) => info!("✓ User data WebSocket initialized"),
+                Err(e) => warn!("Failed to initialize user data WebSocket: {}. Falling back to REST API polling.", e),
+            }
+        }
 
         self.is_connected.store(true, Ordering::Release);
         info!("✓ FIX client connected successfully");
@@ -405,7 +419,15 @@ impl FixClient {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         );
 
-        info!("🚀 FAST execution mode: Placing order via FIX, checking status via REST");
+        let start_time = Instant::now();
+        
+        // Determine monitoring method
+        let use_websocket = self.user_data_ws.is_some();
+        if use_websocket {
+            info!("🚀 FAST execution mode: Placing order via FIX, monitoring via WebSocket");
+        } else {
+            info!("🚀 FAST execution mode: Placing order via FIX, checking status via REST");
+        }
 
         let initial_result = self.place_order_via_fix(&order, &client_order_id)?;
 
@@ -423,16 +445,37 @@ impl FixClient {
         }
 
         info!(
-            "✅ Order placed via FIX ({}), checking fill status via REST API...",
-            initial_result.order_status
+            "✅ Order placed via FIX ({}), checking fill status via {}...",
+            initial_result.order_status,
+            if use_websocket { "WebSocket" } else { "REST API" }
         );
 
-        let final_result = self.check_order_status_until_filled(
-            &order.symbol,
-            &initial_result.order_id,
-            &client_order_id,
-            Duration::from_secs(30)
-        )?;
+        let final_result = if use_websocket {
+            // Try WebSocket first, fall back to REST if it fails
+            match self.wait_for_order_via_websocket(
+                &client_order_id,
+                Duration::from_secs(30),
+                start_time
+            ) {
+                Ok(result) => result,
+                Err(e) => {
+                    warn!("WebSocket order monitoring failed: {}. Falling back to REST API.", e);
+                    self.check_order_status_until_filled(
+                        &order.symbol,
+                        &initial_result.order_id,
+                        &client_order_id,
+                        Duration::from_secs(30)
+                    )?
+                }
+            }
+        } else {
+            self.check_order_status_until_filled(
+                &order.symbol,
+                &initial_result.order_id,
+                &client_order_id,
+                Duration::from_secs(30)
+            )?
+        };
 
         Ok(final_result)
     }
@@ -541,7 +584,7 @@ impl FixClient {
     fn check_order_status_until_filled(
         &self,
         symbol: &str,
-        order_id: &str,
+        _order_id: &str,
         client_order_id: &str,
         max_wait_duration: Duration
     ) -> Result<ExecutionResult> {
@@ -1268,6 +1311,9 @@ impl FixClient {
         if let Some(handle) = self.connection_handle.take() {
             let _ = handle.join();
         }
+        if let Some(handle) = self.ws_handle.take() {
+            let _ = handle.join();
+        }
 
         {
             let mut stream_guard = self.stream.lock();
@@ -1282,5 +1328,85 @@ impl FixClient {
 
     pub fn is_connected(&self) -> bool {
         self.is_connected.load(Ordering::Relaxed)
+    }
+
+    fn initialize_user_data_websocket(&mut self) -> Result<()> {
+        if self.config.rest_api_secret.is_empty() {
+            return Err(anyhow::anyhow!("REST API secret not configured"));
+        }
+        
+        let mut ws_client = UserDataWebSocket::new(
+            self.fix_config.api_key.clone(),
+            self.config.rest_api_secret.clone()
+        );
+        
+        // Create listen key using tokio runtime
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(ws_client.create_listen_key())?;
+        
+        // Connect to WebSocket
+        let ws_stream = ws_client.connect()?;
+        
+        let ws_client_arc = Arc::new(Mutex::new(ws_client));
+        self.user_data_ws = Some(ws_client_arc.clone());
+        
+        // Start WebSocket reader thread
+        let shutdown = self.shutdown.clone();
+        let handle = thread::spawn(move || {
+            info!("Starting user data WebSocket reader thread");
+            let mut ws_stream = ws_stream;
+            
+            while !shutdown.load(Ordering::Relaxed) {
+                match ws_stream.read() {
+                    Ok(msg) => {
+                        if let Err(e) = ws_client_arc.lock().handle_message(msg) {
+                            error!("Error handling WebSocket message: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        if !shutdown.load(Ordering::Relaxed) {
+                            error!("WebSocket read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            info!("User data WebSocket reader thread stopped");
+        });
+        
+        self.ws_handle = Some(handle);
+        Ok(())
+    }
+
+    fn wait_for_order_via_websocket(
+        &self,
+        client_order_id: &str,
+        timeout: Duration,
+        start_time: Instant
+    ) -> Result<ExecutionResult> {
+        let (tx, mut rx) = mpsc::channel(1);
+        
+        // Register order with WebSocket
+        if let Some(ref ws) = self.user_data_ws {
+            ws.lock().register_order(client_order_id.to_string(), tx);
+        } else {
+            return Err(anyhow::anyhow!("WebSocket not initialized"));
+        }
+        
+        // Wait for result with timeout
+        let rt = tokio::runtime::Runtime::new()?;
+        let result = rt.block_on(async {
+            tokio::time::timeout(timeout, rx.recv()).await
+        });
+        
+        match result {
+            Ok(Some(mut exec_result)) => {
+                exec_result.execution_time = start_time.elapsed();
+                Ok(exec_result)
+            }
+            Ok(None) => Err(anyhow::anyhow!("Channel closed without result")),
+            Err(_) => Err(FixError::Timeout.into()),
+        }
     }
 }

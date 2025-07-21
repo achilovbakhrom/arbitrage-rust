@@ -10,6 +10,11 @@ pub struct Symbol {
     pub qty_precision: u8,
     pub is_trading: bool,
     pub is_spot_trading_allowed: bool,
+    pub min_notional: f64,
+    pub max_notional: Option<f64>,
+    pub min_qty: f64,
+    pub max_qty: f64,
+    pub step_size: f64,
 }
 
 impl fmt::Display for Symbol {

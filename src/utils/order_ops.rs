@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use crate::exchange::fix_api::{ MarketOrder, OrderSide };
 use crate::models::symbol_map::SymbolMap;
+use crate::models::symbol::Symbol;
 use crate::arbitrage::detector::ArbitrageOpportunity;
 
 const PRECISION_FACTORS: [f64; 9] = [
@@ -20,6 +21,18 @@ pub fn apply_precision(value: f64, precision: u8) -> f64 {
     };
 
     (value * factor).floor() / factor
+}
+
+/// Validates if a quantity meets the step size requirement with tolerance for floating-point errors
+#[inline]
+pub fn is_valid_step_size(quantity: f64, step_size: f64) -> bool {
+    if step_size <= 0.0 {
+        return true;
+    }
+    
+    let remainder = (quantity / step_size) % 1.0;
+    // Allow for floating-point precision errors
+    remainder.abs() < 1e-10 || (1.0 - remainder).abs() < 1e-10
 }
 
 #[inline(always)]
@@ -121,4 +134,101 @@ pub fn validate_trade_amount(amount: f64, symbol: &str) -> Result<(), &'static s
         return Err("Symbol cannot be empty");
     }
     Ok(())
+}
+
+pub fn validate_order_filters(order: &MarketOrder, symbol_info: &Symbol, estimated_price: f64) -> Result<MarketOrder, String> {
+    use tracing::debug;
+    
+    let mut validated_order = order.clone();
+    
+    // Get the raw quantity based on order type
+    let raw_qty = if let Some(quote_qty) = order.quote_quantity {
+        // For buy orders (using quote quantity), calculate base quantity
+        quote_qty / estimated_price
+    } else {
+        // For sell orders (using base quantity)
+        order.quantity
+    };
+    
+    debug!(
+        "Validating order for {}: raw_qty={:.8}, step_size={:.8}, min_qty={:.8}, min_notional={:.8}",
+        symbol_info.symbol, raw_qty, symbol_info.step_size, symbol_info.min_qty, symbol_info.min_notional
+    );
+    
+    // Apply LOT_SIZE step size adjustment with proper precision handling
+    let adjusted_qty = if symbol_info.step_size > 0.0 {
+        // Use high precision arithmetic to avoid floating point errors
+        let step_multiplier = (raw_qty / symbol_info.step_size).round();
+        let rounded_qty = step_multiplier * symbol_info.step_size;
+        
+        // Apply precision to ensure clean decimal representation
+        let final_qty = apply_precision(rounded_qty, symbol_info.qty_precision);
+        
+        debug!(
+            "Step size adjustment for {}: raw_qty={:.8} -> step_multiplier={:.2} -> rounded_qty={:.8} -> final_qty={:.8}",
+            symbol_info.symbol, raw_qty, step_multiplier, rounded_qty, final_qty
+        );
+        
+        final_qty
+    } else {
+        // Apply precision even if no step size
+        apply_precision(raw_qty, symbol_info.qty_precision)
+    };
+    
+    // Validate minimum quantity
+    if adjusted_qty < symbol_info.min_qty {
+        return Err(format!(
+            "Order quantity {:.8} is below minimum {:.8} for {} (step_size: {:.8})",
+            adjusted_qty, symbol_info.min_qty, symbol_info.symbol, symbol_info.step_size
+        ));
+    }
+    
+    // Validate maximum quantity  
+    if adjusted_qty > symbol_info.max_qty {
+        return Err(format!(
+            "Order quantity {:.8} exceeds maximum {:.8} for {} (step_size: {:.8})",
+            adjusted_qty, symbol_info.max_qty, symbol_info.symbol, symbol_info.step_size
+        ));
+    }
+    
+    // Calculate final notional value with adjusted quantity
+    let final_notional = adjusted_qty * estimated_price;
+    
+    // Validate NOTIONAL filter  
+    if final_notional < symbol_info.min_notional {
+        return Err(format!(
+            "Order notional {:.8} is below minimum {:.8} for {} (qty: {:.8} @ {:.8})",
+            final_notional, symbol_info.min_notional, symbol_info.symbol, adjusted_qty, estimated_price
+        ));
+    }
+    
+    if let Some(max_notional) = symbol_info.max_notional {
+        if final_notional > max_notional {
+            return Err(format!(
+                "Order notional {:.8} exceeds maximum {:.8} for {} (qty: {:.8} @ {:.8})",
+                final_notional, max_notional, symbol_info.symbol, adjusted_qty, estimated_price
+            ));
+        }
+    }
+    
+    // Final step size validation to ensure adjustment worked
+    if !is_valid_step_size(adjusted_qty, symbol_info.step_size) {
+        return Err(format!(
+            "Order quantity {:.8} does not meet step size {:.8} for {} after adjustment",
+            adjusted_qty, symbol_info.step_size, symbol_info.symbol
+        ));
+    }
+    
+    // Update the validated order with adjusted values
+    if order.quote_quantity.is_some() {
+        // For buy orders, update quote quantity based on adjusted quantity
+        validated_order.quote_quantity = Some(apply_precision(final_notional, symbol_info.price_precision));
+        validated_order.quantity = 0.0; // Market buy orders use quote quantity
+    } else {
+        // For sell orders, update base quantity
+        validated_order.quantity = adjusted_qty;
+        validated_order.quote_quantity = None;
+    }
+    
+    Ok(validated_order)
 }
