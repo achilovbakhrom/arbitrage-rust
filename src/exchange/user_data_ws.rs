@@ -298,12 +298,13 @@ impl UserDataWebSocket {
                 },
             };
 
-            // Send result and remove from pending if order is complete
+            // Only send result when order reaches final status, just log intermediate statuses
             if matches!(report.current_order_status.as_str(), "FILLED" | "REJECTED" | "CANCELED" | "EXPIRED") {
+                info!("📋 Order {} final status: {}", report.client_order_id, report.current_order_status);
                 let _ = sender.try_send(execution_result);
                 pending.remove(&report.client_order_id);
             } else {
-                let _ = sender.try_send(execution_result);
+                debug!("📋 Order {} intermediate status: {}", report.client_order_id, report.current_order_status);
             }
         }
 

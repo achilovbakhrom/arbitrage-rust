@@ -114,12 +114,6 @@ pub struct MarketOrder {
     pub price_precision: Option<u8>,
 }
 
-struct OrderExecution {
-    result: Arc<StdMutex<Option<ExecutionResult>>>,
-    condvar: Arc<Condvar>,
-    start_time: Instant,
-    completed: Arc<AtomicBool>,
-}
 
 #[derive(Debug, Clone)]
 pub struct SymbolPrecision {
@@ -154,7 +148,6 @@ pub struct FixClient {
     fix_config: FixConfig,
     sender_comp_id: String,
     seq_num: Arc<AtomicU32>,
-    pending_orders: Arc<Mutex<HashMap<String, OrderExecution>>>,
     signing_key: SigningKey,
     is_connected: AtomicBool,
     shutdown: Arc<AtomicBool>,
@@ -198,7 +191,6 @@ impl FixClient {
             fix_config: fix_config.clone(),
             sender_comp_id: fix_config.api_key[..8].to_string(),
             seq_num: Arc::new(AtomicU32::new(1)),
-            pending_orders: Arc::new(Mutex::new(HashMap::with_capacity(64))),
             signing_key,
             is_connected: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -429,24 +421,11 @@ impl FixClient {
             info!("🚀 FAST execution mode: Placing order via FIX, checking status via REST");
         }
 
-        let initial_result = self.place_order_via_fix(&order, &client_order_id)?;
-
-        if initial_result.order_status == "REJECTED" {
-            return Err(
-                FixError::OrderRejected(
-                    initial_result.reject_reason.unwrap_or("Order rejected".to_string())
-                ).into()
-            );
-        }
-
-        if initial_result.order_status == "FILLED" {
-            info!("✅ Order filled immediately via FIX");
-            return Ok(initial_result);
-        }
-
+        // Send order via FIX API (fire-and-forget)
+        let _sent_order_id = self.place_order_via_fix(&order, &client_order_id)?;
+        
         info!(
-            "✅ Order placed via FIX ({}), checking fill status via {}...",
-            initial_result.order_status,
+            "✅ Order placed via FIX, waiting for status via {}...",
             if use_websocket { "WebSocket" } else { "REST API" }
         );
 
@@ -462,7 +441,7 @@ impl FixClient {
                     warn!("WebSocket order monitoring failed: {}. Falling back to REST API.", e);
                     self.check_order_status_until_filled(
                         &order.symbol,
-                        &initial_result.order_id,
+                        "", // order_id not available since we don't wait for FIX response
                         &client_order_id,
                         Duration::from_secs(30)
                     )?
@@ -471,7 +450,7 @@ impl FixClient {
         } else {
             self.check_order_status_until_filled(
                 &order.symbol,
-                &initial_result.order_id,
+                "", // order_id not available since we don't wait for FIX response
                 &client_order_id,
                 Duration::from_secs(30)
             )?
@@ -484,23 +463,7 @@ impl FixClient {
         &mut self,
         order: &MarketOrder,
         client_order_id: &str
-    ) -> Result<ExecutionResult> {
-        let result = Arc::new(StdMutex::new(None));
-        let condvar = Arc::new(Condvar::new());
-        let completed = Arc::new(AtomicBool::new(false));
-
-        let order_exec = OrderExecution {
-            result: Arc::clone(&result),
-            condvar: Arc::clone(&condvar),
-            start_time: Instant::now(),
-            completed: Arc::clone(&completed),
-        };
-
-        {
-            let mut pending = self.pending_orders.lock();
-            pending.insert(client_order_id.to_string(), order_exec);
-        }
-
+    ) -> Result<String> {
         let mut order = order.clone();
         if order.qty_precision.is_none() {
             let cache = self.symbol_precisions.lock();
@@ -544,41 +507,9 @@ impl FixClient {
 
         let message = self.build_fix_message_fast(&fields);
         self.send_message_fast(message)?;
-
-        let timeout = Duration::from_secs(10);
-        let start_time = Instant::now();
-
-        loop {
-            if start_time.elapsed() > timeout {
-                self.pending_orders.lock().remove(client_order_id);
-                return Err(FixError::Timeout.into());
-            }
-
-            let guard = result.lock().unwrap();
-            let (result_guard, timeout_result) = condvar
-                .wait_timeout(guard, Duration::from_millis(500))
-                .unwrap();
-
-            if let Some(exec_result) = result_guard.clone() {
-                if exec_result.order_status == "REJECTED" {
-                    self.pending_orders.lock().remove(client_order_id);
-                    return Err(
-                        FixError::OrderRejected(
-                            exec_result.reject_reason.unwrap_or("Order rejected".to_string())
-                        ).into()
-                    );
-                }
-
-                if exec_result.order_status == "NEW" || exec_result.order_status == "FILLED" {
-                    self.pending_orders.lock().remove(client_order_id);
-                    return Ok(exec_result);
-                }
-            }
-
-            if timeout_result.timed_out() {
-                continue;
-            }
-        }
+        
+        info!("📤 Order sent via FIX API: {}", client_order_id);
+        Ok(client_order_id.to_string())
     }
 
     fn check_order_status_until_filled(
@@ -853,7 +784,6 @@ impl FixClient {
     }
 
     fn start_message_reader(&mut self) -> Result<()> {
-        let pending_orders = Arc::clone(&self.pending_orders);
         let shutdown = Arc::clone(&self.shutdown);
         let stream_ref = Arc::clone(&self.stream);
         let logout_received = Arc::clone(&self.logout_received);
@@ -862,7 +792,6 @@ impl FixClient {
         let handle = thread::spawn(move || {
             Self::message_reader_thread(
                 stream_ref,
-                pending_orders,
                 shutdown,
                 logout_received,
                 logout_condvar
@@ -875,7 +804,6 @@ impl FixClient {
 
     fn message_reader_thread(
         stream_ref: Arc<Mutex<Option<TlsStream<TcpStream>>>>,
-        pending_orders: Arc<Mutex<HashMap<String, OrderExecution>>>,
         shutdown: Arc<AtomicBool>,
         logout_received: Arc<AtomicBool>,
         logout_condvar: Arc<(StdMutex<bool>, Condvar)>
@@ -889,7 +817,6 @@ impl FixClient {
                     if
                         let Err(e) = Self::process_incoming_message(
                             &message,
-                            &pending_orders,
                             &logout_received,
                             &logout_condvar
                         )
@@ -1015,7 +942,6 @@ impl FixClient {
 
     fn process_incoming_message(
         message: &str,
-        pending_orders: &Arc<Mutex<HashMap<String, OrderExecution>>>,
         logout_received: &Arc<AtomicBool>,
         logout_condvar: &Arc<(StdMutex<bool>, Condvar)>
     ) -> Result<()> {
@@ -1034,31 +960,10 @@ impl FixClient {
                 cvar.notify_one();
             }
             Some("8") => {
+                // Execution reports are now handled by WebSocket, just log for debugging
                 if let Some(exec_result) = Self::parse_execution_report(&fields)? {
-                    let client_order_id = exec_result.client_order_id.clone();
-
-                    let orders = pending_orders.lock();
-                    if let Some(order_exec) = orders.get(&client_order_id) {
-                        let mut result = exec_result;
-                        result.execution_time = order_exec.start_time.elapsed();
-
-                        let is_final =
-                            matches!(
-                                result.order_status.as_str(),
-                                "FILLED" | "REJECTED" | "CANCELED" | "EXPIRED"
-                            ) || (result.leaves_qty == 0.0 && result.filled_qty > 0.0);
-
-                        {
-                            let mut guard = order_exec.result.lock().unwrap();
-                            *guard = Some(result);
-                        }
-
-                        if is_final {
-                            order_exec.completed.store(true, Ordering::Relaxed);
-                        }
-
-                        order_exec.condvar.notify_one();
-                    }
+                    debug!("FIX execution report received (handled by WebSocket): {} - {}", 
+                        exec_result.client_order_id, exec_result.order_status);
                 }
             }
             Some("9") => {
