@@ -48,6 +48,8 @@ pub fn start_websocket_thread<F>(
                 client.disable_timing();
             }
 
+            // Optimized: Exponential backoff for faster initial connections
+            let mut retry_count = 0u32;
             let mut ws_stream = loop {
                 if shutdown.load(Ordering::Relaxed) {
                     return;
@@ -55,11 +57,18 @@ pub fn start_websocket_thread<F>(
 
                 match client.connect() {
                     Ok(stream) => {
+                        if retry_count > 0 {
+                            info!("✅ WebSocket reconnected after {} attempts", retry_count);
+                        }
                         break stream;
                     }
                     Err(err) => {
-                        warn!("Connection failed: {}, retrying in 5 seconds...", err);
-                        thread::sleep(Duration::from_secs(5));
+                        retry_count += 1;
+                        // Exponential backoff: 1s, 2s, 4s, 8s, max 10s
+                        let delay_secs = std::cmp::min(2u64.pow(retry_count.min(3)), 10);
+                        warn!("Connection failed: {}, retrying in {}s (attempt #{})...", 
+                              err, delay_secs, retry_count);
+                        thread::sleep(Duration::from_secs(delay_secs));
                     }
                 }
             };

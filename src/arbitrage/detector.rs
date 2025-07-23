@@ -184,7 +184,16 @@ impl ArbitrageDetector {
 
     #[inline(always)]
     fn apply_precision(&self, value: f32, precision: u8) -> f32 {
-        let factor = (10f32).powi(precision as i32);
+        // Optimized: Use pre-computed factors for common precision values
+        let factor = if precision <= 8 {
+            // Common precision values 0-8, pre-computed for speed
+            const PRECISION_FACTORS_F32: [f32; 9] = [
+                1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0,
+            ];
+            PRECISION_FACTORS_F32[precision as usize]
+        } else {
+            (10f32).powi(precision as i32)
+        };
         (value * factor).floor() / factor
     }
 

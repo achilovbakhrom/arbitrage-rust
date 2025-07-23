@@ -113,8 +113,9 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
 
     print_trading_mode_info(fix_client.is_some(), config.debug);
 
+    // Optimized: More responsive shutdown detection
     while !shutdown.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50)); // Reduced from 100ms to 50ms
     }
 
     info!("Shutting down triangular arbitrage system...");
