@@ -1,4 +1,5 @@
 use std::sync::{ Arc, atomic::{ AtomicBool, Ordering } };
+use std::sync::mpsc;
 use std::thread::{ self, JoinHandle };
 use std::time::Duration;
 use tracing::{ info, error, debug };
@@ -30,8 +31,9 @@ pub fn start_detection_thread(
 
             orderbook_manager.register_update_callback(update_callback);
 
+            // Optimized: Reduced sleep interval for faster shutdown response
             while !shutdown.load(Ordering::Relaxed) && !detector.is_shutdown() {
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(10)); // Reduced from 50ms to 10ms
             }
 
             debug!("Arbitrage detection thread stopped");
@@ -39,6 +41,7 @@ pub fn start_detection_thread(
         .expect("Failed to spawn arbitrage detection thread")
 }
 
+/// Optimized event-driven execution thread that eliminates polling delays
 pub fn start_execution_thread(
     detector: Arc<ArbitrageDetector>,
     execution_callback: Option<ExecutionCallback>,
@@ -48,9 +51,12 @@ pub fn start_execution_thread(
         ::new()
         .name("execution".to_string())
         .spawn(move || {
-            debug!("Execution thread started");
+            debug!("🚀 OPTIMIZED: Event-driven execution thread started");
 
             if let Some(callback) = execution_callback {
+                // Create a channel for immediate opportunity notifications
+                let (tx, rx) = mpsc::channel::<ArbitrageOpportunity>();
+                
                 let wrapped_callback = {
                     let shutdown_ref = Arc::clone(&shutdown);
                     Arc::new(move |opportunity: ArbitrageOpportunity| {
@@ -59,17 +65,42 @@ pub fn start_execution_thread(
                             return;
                         }
 
-                        info!(
-                            "Execution opportunity: {} with {:.4}% profit",
-                            opportunity.display(),
-                            opportunity.profit_percentage()
-                        );
-                        callback(opportunity);
+                        // Send opportunity through channel for immediate processing
+                        if let Err(_) = tx.send(opportunity) {
+                            debug!("Execution channel closed, stopping callback");
+                        }
                     })
                 };
 
                 detector.register_execution_callback(wrapped_callback);
 
+                // Event-driven loop - no sleep delays!
+                loop {
+                    // Use select-like behavior with timeout for shutdown check
+                    match rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(opportunity) => {
+                            // Process opportunity immediately - zero delay!
+                            info!(
+                                "⚡ FAST EXECUTION: {} with {:.4}% profit (no polling delay)",
+                                opportunity.display(),
+                                opportunity.profit_percentage()
+                            );
+                            callback(opportunity);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            // Check shutdown without blocking execution
+                            if shutdown.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            debug!("Execution channel disconnected");
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // If no callback, just wait for shutdown
                 while !shutdown.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_millis(100));
                 }

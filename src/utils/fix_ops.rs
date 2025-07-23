@@ -298,8 +298,9 @@ fn execute_triangular_sequence(
             };
         }
 
+        // Optimized: Reduced mock trading delay for faster testing
         if matches!(client, FixClientType::Mock(_)) && i < trade_data.symbols.len() - 1 {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(10)); // Reduced from 50ms to 10ms
         }
     }
 

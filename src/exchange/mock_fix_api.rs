@@ -16,7 +16,7 @@ impl MockFixClient {
     pub fn new() -> Self {
         Self {
             is_connected: false,
-            simulated_latency: Duration::from_millis(50),
+            simulated_latency: Duration::from_millis(10), // Optimized: Reduced from 50ms to 10ms
             success_rate: 0.98,
             symbol_precisions: HashMap::new(),
         }
@@ -24,7 +24,7 @@ impl MockFixClient {
 
     pub fn connect(&mut self) -> Result<()> {
         info!("Mock FIX client: Simulating connection...");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50)); // Optimized: Reduced from 200ms to 50ms
         self.is_connected = true;
         info!("Mock FIX client: Connected successfully");
         Ok(())
@@ -32,7 +32,7 @@ impl MockFixClient {
 
     pub fn disconnect(&mut self) -> Result<()> {
         info!("Mock FIX client: Disconnecting...");
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(20)); // Optimized: Reduced from 50ms to 20ms
         self.is_connected = false;
         info!("Mock FIX client: Disconnected successfully");
         Ok(())
