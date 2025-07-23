@@ -12,6 +12,7 @@ use crate::{
     utils::{
         fix_ops::{ create_fix_client, execute_triangular_trades_test },
         order_ops::TriangularTradeData,
+        execution_guard::ExecutionGuard,
     },
 };
 use anyhow::{ anyhow, Context, Result };
@@ -75,8 +76,9 @@ pub fn run(config: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<()> {
             }
 
             info!("🚀 Executing triangular arbitrage...");
+            let execution_guard = Arc::new(ExecutionGuard::new());
             let trade_data = TriangularTradeData::from_opportunity(&opportunity);
-            let success = execute_triangular_trades_test(&trade_data, &client, &symbol_map)?;
+            let success = execute_triangular_trades_test(&trade_data, &client, &symbol_map, &execution_guard)?;
 
             if success {
                 info!("🎉 {} triangular arbitrage completed successfully!", if config.debug {

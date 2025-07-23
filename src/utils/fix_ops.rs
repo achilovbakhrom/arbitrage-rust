@@ -17,6 +17,7 @@ use crate::utils::order_ops::{
     validate_trade_amount,
     validate_order_filters,
 };
+use crate::utils::execution_guard::{ExecutionGuard, ExecutionLockGuard};
 
 #[derive(Clone)]
 pub enum FixClientType {
@@ -326,8 +327,17 @@ pub fn execute_triangular_trades(
     opportunity: &ArbitrageOpportunity,
     client: &FixClientType,
     symbol_map: &Arc<SymbolMap>,
-    orderbook_manager: &Arc<OrderBookManager>
+    orderbook_manager: &Arc<OrderBookManager>,
+    execution_guard: &Arc<ExecutionGuard>
 ) -> Result<bool> {
+    // Try to acquire execution lock
+    let _guard = ExecutionLockGuard::new(execution_guard);
+    if !_guard.is_acquired() {
+        // Execution is already in progress, skip this opportunity
+        return Ok(false);
+    }
+
+    info!("🔒 Execution lock acquired, starting arbitrage: {}", opportunity.display());
     let simulation_logger = SimulationLogger::new(
         Arc::clone(orderbook_manager),
         Arc::clone(symbol_map)
@@ -512,8 +522,17 @@ fn execute_triangular_sequence_simple(
 pub fn execute_triangular_trades_test(
     trade_data: &TriangularTradeData,
     client: &FixClientType,
-    symbol_map: &Arc<SymbolMap>
+    symbol_map: &Arc<SymbolMap>,
+    execution_guard: &Arc<ExecutionGuard>
 ) -> Result<bool> {
+    // Try to acquire execution lock
+    let _guard = ExecutionLockGuard::new(execution_guard);
+    if !_guard.is_acquired() {
+        // Execution is already in progress, skip this opportunity
+        return Ok(false);
+    }
+
+    info!("🔒 Test execution lock acquired");
     let (success, _) = execute_triangular_sequence_simple(trade_data, client, symbol_map)?;
     Ok(success)
 }

@@ -16,6 +16,7 @@ use crate::{
         fix_ops::{ create_fix_client, FixClientType, execute_triangular_trades },
         thread_ops::{ start_detection_thread, start_execution_thread, ThreadManager },
         websocket_ops::{ start_websocket_thread, create_depth_update_callback, WebSocketConfig },
+        execution_guard::ExecutionGuard,
     },
 };
 use anyhow::{ anyhow, Context, Result };
@@ -64,6 +65,9 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
 
     let fix_client = create_fix_executor(Arc::clone(&symbol_map), &config)?;
     let mut thread_manager = ThreadManager::new();
+    
+    // Create execution guard to prevent concurrent arbitrage executions
+    let execution_guard = Arc::new(ExecutionGuard::new());
 
     // 1. Detection handling
     let detection_handle = start_detection_thread(
@@ -80,7 +84,8 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
             create_execution_callback(
                 client.clone(),
                 Arc::clone(&symbol_map),
-                Arc::clone(&orderbook_manager)
+                Arc::clone(&orderbook_manager),
+                Arc::clone(&execution_guard)
             )
         });
 
@@ -167,12 +172,13 @@ fn create_fix_executor(
 fn create_execution_callback(
     fix_client: FixClientType,
     symbol_map: Arc<crate::models::symbol_map::SymbolMap>,
-    orderbook_manager: Arc<OrderBookManager>
+    orderbook_manager: Arc<OrderBookManager>,
+    execution_guard: Arc<crate::utils::execution_guard::ExecutionGuard>
 ) -> crate::arbitrage::detector::ExecutionCallback {
     Arc::new(move |opportunity| {
         info!("🚀 ENHANCED EXECUTION: Starting arbitrage with simulation logging");
 
-        match execute_triangular_trades(&opportunity, &fix_client, &symbol_map, &orderbook_manager) {
+        match execute_triangular_trades(&opportunity, &fix_client, &symbol_map, &orderbook_manager, &execution_guard) {
             Ok(true) => {
                 info!(
                     "✅ Enhanced triangular arbitrage completed successfully: {}",
