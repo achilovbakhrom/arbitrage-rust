@@ -9,3 +9,4 @@ analyze
 .DS_Store
 *.lock
 flamegraph.svg
+WEBSOCKET_ORDER_STATUS.md

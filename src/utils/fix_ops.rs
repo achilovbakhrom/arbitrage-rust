@@ -15,6 +15,7 @@ use crate::utils::order_ops::{
     get_symbol_precision,
     calculate_next_amount,
     validate_trade_amount,
+    validate_order_filters,
 };
 
 #[derive(Clone)]
@@ -87,6 +88,7 @@ fn execute_trade_step(
     is_base_to_quote: bool,
     amount: f64,
     symbol_map: &Arc<SymbolMap>,
+    orderbook_manager: &Arc<OrderBookManager>,
     step_number: usize,
     total_steps: usize
 ) -> Result<ExecutionResult> {
@@ -100,13 +102,83 @@ fn execute_trade_step(
 
     let (qty_precision, price_precision) = get_symbol_precision(symbol_map, symbol);
 
-    let order = create_order_with_precision(
+    let mut order = create_order_with_precision(
         symbol.to_string(),
         is_base_to_quote,
         amount,
         qty_precision,
         price_precision
     );
+
+    // Get symbol info for validation
+    if let Some(symbol_info) = symbol_map.get(symbol) {
+        // Get symbol ID for orderbook lookup
+        if let Some(symbol_id) = crate::utils::symbol_interner::global::get_id(symbol) {
+            // Get estimated price from orderbook
+            if let Some(book) = orderbook_manager.get_book_by_id(symbol_id) {
+                if book.is_synced() {
+                    // Calculate trade volume for price estimation
+                    let trade_volume = if order.quote_quantity.is_some() {
+                        order.quote_quantity.unwrap()
+                    } else {
+                        // For sell orders, we need to estimate based on current price
+                        // Use a simple fallback calculation
+                        order.quantity
+                    };
+
+                    // Get effective price based on trade direction
+                    let estimated_price = if is_base_to_quote {
+                        // For sell orders, use bid side (we're selling into bids)
+                        book.get_effective_price(trade_volume, true)
+                    } else {
+                        // For buy orders, use ask side (we're buying from asks) 
+                        book.get_effective_price(trade_volume, false)
+                    };
+
+                    if let Some(price) = estimated_price {
+                        // Validate and potentially adjust the order
+                        match validate_order_filters(&order, &symbol_info, price) {
+                            Ok(validated_order) => {
+                                order = validated_order;
+                                info!(
+                                    "✓ Order validated for {}: {:.8} @ ~{:.8}",
+                                    symbol,
+                                    if order.quote_quantity.is_some() { 
+                                        order.quote_quantity.unwrap() 
+                                    } else { 
+                                        order.quantity 
+                                    },
+                                    price
+                                );
+                            }
+                            Err(validation_error) => {
+                                warn!(
+                                    "⚠️ Order validation failed for {}: {}",
+                                    symbol,
+                                    validation_error
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Order validation failed for {}: {}",
+                                    symbol,
+                                    validation_error
+                                ));
+                            }
+                        }
+                    } else {
+                        warn!("⚠️ Could not get effective price for {} - insufficient liquidity or invalid volume", symbol);
+                    }
+                } else {
+                    warn!("⚠️ Orderbook for {} is not synced - skipping validation", symbol);
+                }
+            } else {
+                warn!("⚠️ No orderbook available for {} - skipping validation", symbol);
+            }
+        } else {
+            warn!("⚠️ Symbol {} not found in interner - skipping validation", symbol);
+        }
+    } else {
+        warn!("⚠️ Symbol {} not found in symbol map - skipping validation", symbol);
+    }
 
     let trade_start = Instant::now();
     info!(
@@ -159,7 +231,8 @@ fn execute_trade_step(
 fn execute_triangular_sequence(
     trade_data: &TriangularTradeData,
     client: &FixClientType,
-    symbol_map: &Arc<SymbolMap>
+    symbol_map: &Arc<SymbolMap>,
+    orderbook_manager: &Arc<OrderBookManager>
 ) -> Result<(bool, Vec<(String, f64, f64)>)> {
     let mut current_amount = trade_data.start_amount;
     let mut executed_trades = Vec::with_capacity(3);
@@ -180,6 +253,7 @@ fn execute_triangular_sequence(
             trade_data.directions[i],
             current_amount,
             symbol_map,
+            orderbook_manager,
             i + 1,
             trade_data.symbols.len()
         )?;
@@ -271,7 +345,7 @@ pub fn execute_triangular_trades(
     let trade_data = TriangularTradeData::from_opportunity(opportunity);
     let execution_start = Instant::now();
 
-    let result = execute_triangular_sequence(&trade_data, client, symbol_map);
+    let result = execute_triangular_sequence(&trade_data, client, symbol_map, orderbook_manager);
     let execution_time = execution_start.elapsed();
 
     match result {
@@ -298,13 +372,149 @@ pub fn execute_triangular_trades(
     }
 }
 
+// for trade simulation mode - simplified without orderbook validation
+fn execute_trade_step_simple(
+    client: &FixClientType,
+    symbol: &str,
+    is_base_to_quote: bool,
+    amount: f64,
+    symbol_map: &Arc<SymbolMap>,
+    step_number: usize,
+    total_steps: usize
+) -> Result<ExecutionResult> {
+    validate_trade_amount(amount, symbol).expect("Error while executing validate_trade_amount");
+
+    if !client.is_connected() {
+        return Err(
+            anyhow::anyhow!("FIX client disconnected during execution at step {}", step_number)
+        );
+    }
+
+    let (qty_precision, price_precision) = get_symbol_precision(symbol_map, symbol);
+
+    let order = create_order_with_precision(
+        symbol.to_string(),
+        is_base_to_quote,
+        amount,
+        qty_precision,
+        price_precision
+    );
+
+    let trade_start = Instant::now();
+    info!(
+        "📤 Executing trade {}/{}: {} {} {:.8}",
+        step_number,
+        total_steps,
+        if is_base_to_quote {
+            "SELL"
+        } else {
+            "BUY"
+        },
+        symbol,
+        amount
+    );
+
+    let result = client.place_market_order(order)?;
+    let trade_time = trade_start.elapsed();
+
+    if result.order_status != "FILLED" {
+        return Err(
+            anyhow::anyhow!("Unexpected order status: {} (expected FILLED)", result.order_status)
+        );
+    }
+
+    if result.filled_qty <= 0.0 {
+        return Err(
+            anyhow::anyhow!(
+                "No quantity filled for trade {}/{}: {}",
+                step_number,
+                total_steps,
+                symbol
+            )
+        );
+    }
+
+    info!(
+        "✅ Trade {}/{} COMPLETED: {} {} - Filled: {:.8} @ {:.8} in {:.2}ms",
+        step_number,
+        total_steps,
+        result.side,
+        symbol,
+        result.filled_qty,
+        result.avg_price,
+        trade_time.as_secs_f64() * 1000.0
+    );
+
+    Ok(result)
+}
+
+fn execute_triangular_sequence_simple(
+    trade_data: &TriangularTradeData,
+    client: &FixClientType,
+    symbol_map: &Arc<SymbolMap>
+) -> Result<(bool, Vec<(String, f64, f64)>)> {
+    let mut current_amount = trade_data.start_amount;
+    let mut executed_trades = Vec::with_capacity(3);
+    let execution_start = Instant::now();
+
+    info!(
+        "🔄 Starting triangular arbitrage execution: {} → {} → {} (Start: {:.8})",
+        trade_data.symbols[0],
+        trade_data.symbols[1],
+        trade_data.symbols[2],
+        current_amount
+    );
+
+    for (i, symbol) in trade_data.symbols.iter().enumerate() {
+        let result = execute_trade_step_simple(
+            client,
+            symbol,
+            trade_data.directions[i],
+            current_amount,
+            symbol_map,
+            i + 1,
+            trade_data.symbols.len()
+        )?;
+
+        executed_trades.push((
+            symbol.clone(),
+            result.avg_price,
+            result.filled_qty
+        ));
+
+        // Calculate next trade amount
+        if i < trade_data.symbols.len() - 1 {
+            let next_symbol = &trade_data.symbols[i + 1];
+            let (next_qty_precision, next_price_precision) = get_symbol_precision(symbol_map, next_symbol);
+            
+            current_amount = calculate_next_amount(
+                result.filled_qty,
+                result.cum_quote_qty,
+                trade_data.directions[i],
+                trade_data.directions[i + 1],
+                next_qty_precision,
+                next_price_precision
+            );
+        }
+    }
+
+    let execution_time = execution_start.elapsed();
+    info!(
+        "✅ Triangular arbitrage completed in {:.2}ms - Final amount: {:.8}",
+        execution_time.as_secs_f64() * 1000.0,
+        current_amount
+    );
+
+    Ok((true, executed_trades))
+}
+
 // for trade simulation mode
 pub fn execute_triangular_trades_test(
     trade_data: &TriangularTradeData,
     client: &FixClientType,
     symbol_map: &Arc<SymbolMap>
 ) -> Result<bool> {
-    let (success, _) = execute_triangular_sequence(trade_data, client, symbol_map)?;
+    let (success, _) = execute_triangular_sequence_simple(trade_data, client, symbol_map)?;
     Ok(success)
 }
 
