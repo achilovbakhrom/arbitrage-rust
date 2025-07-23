@@ -23,6 +23,23 @@ pub fn apply_precision(value: f64, precision: u8) -> f64 {
     (value * factor).floor() / factor
 }
 
+/// Applies step size adjustment to a value, ensuring it conforms to exchange LOT_SIZE requirements
+/// This function rounds down the value to the nearest step size increment with precision handling
+#[inline]
+pub fn apply_step_size(value: f64, step_size: f64, precision: u8) -> f64 {
+    if step_size <= 0.0 {
+        // If no step size, just apply precision
+        return apply_precision(value, precision);
+    }
+    
+    // Calculate the step multiplier and round down
+    let step_multiplier = (value / step_size).floor();
+    let rounded_value = step_multiplier * step_size;
+    
+    // Apply precision to ensure clean decimal representation
+    apply_precision(rounded_value, precision)
+}
+
 /// Validates if a quantity meets the step size requirement with tolerance for floating-point errors
 #[inline]
 pub fn is_valid_step_size(quantity: f64, step_size: f64) -> bool {
@@ -156,24 +173,12 @@ pub fn validate_order_filters(order: &MarketOrder, symbol_info: &Symbol, estimat
     );
     
     // Apply LOT_SIZE step size adjustment with proper precision handling
-    let adjusted_qty = if symbol_info.step_size > 0.0 {
-        // Use high precision arithmetic to avoid floating point errors
-        let step_multiplier = (raw_qty / symbol_info.step_size).round();
-        let rounded_qty = step_multiplier * symbol_info.step_size;
-        
-        // Apply precision to ensure clean decimal representation
-        let final_qty = apply_precision(rounded_qty, symbol_info.qty_precision);
-        
-        debug!(
-            "Step size adjustment for {}: raw_qty={:.8} -> step_multiplier={:.2} -> rounded_qty={:.8} -> final_qty={:.8}",
-            symbol_info.symbol, raw_qty, step_multiplier, rounded_qty, final_qty
-        );
-        
-        final_qty
-    } else {
-        // Apply precision even if no step size
-        apply_precision(raw_qty, symbol_info.qty_precision)
-    };
+    let adjusted_qty = apply_step_size(raw_qty, symbol_info.step_size, symbol_info.qty_precision);
+    
+    debug!(
+        "Step size adjustment for {}: raw_qty={:.8} -> step_size={:.8} -> adjusted_qty={:.8}",
+        symbol_info.symbol, raw_qty, symbol_info.step_size, adjusted_qty
+    );
     
     // Validate minimum quantity
     if adjusted_qty < symbol_info.min_qty {

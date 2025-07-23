@@ -3,6 +3,7 @@ use anyhow::Result;
 use tracing::info;
 use std::collections::HashMap;
 use super::fix_api::{ ExecutionResult, MarketOrder, OrderSide };
+use crate::utils::order_ops::apply_step_size;
 
 pub struct MockFixClient {
     is_connected: bool,
@@ -44,10 +45,6 @@ impl MockFixClient {
         }
     }
 
-    fn apply_precision(value: f64, precision: u8) -> f64 {
-        let factor = (10f64).powi(precision as i32);
-        (value * factor).floor() / factor
-    }
 
     pub fn place_market_order(&mut self, order: MarketOrder) -> Result<ExecutionResult> {
         if !self.is_connected {
@@ -92,15 +89,15 @@ impl MockFixClient {
             OrderSide::Sell => 1.0 - (rand::random::<f64>() * 0.0004 + 0.0001),
         };
 
-        let final_price = Self::apply_precision(simulated_price * slippage_factor, price_precision);
+        let final_price = apply_step_size(simulated_price * slippage_factor, 0.0, price_precision);
 
         let (filled_qty, cum_quote_qty) = if let Some(quote_qty) = order.quote_quantity {
-            let precise_quote = Self::apply_precision(quote_qty, price_precision);
+            let precise_quote = apply_step_size(quote_qty, 0.0, price_precision);
             let qty = precise_quote / final_price;
-            let precise_qty = Self::apply_precision(qty, precision);
+            let precise_qty = apply_step_size(qty, 0.0, precision);
             (precise_qty, precise_quote)
         } else {
-            let precise_qty = Self::apply_precision(order.quantity, precision);
+            let precise_qty = apply_step_size(order.quantity, 0.0, precision);
             let quote_value = precise_qty * final_price;
             (precise_qty, quote_value)
         };
