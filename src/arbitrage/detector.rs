@@ -1,9 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
 
+use tracing::debug;
+
 use crate::models::triangular_path::TriangularPath;
 use crate::orderbook_manager::manager::OrderBookManager;
 use crate::utils::symbol_interner::global;
+use crate::utils::order_ops::apply_step_size;
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
@@ -33,7 +36,7 @@ impl ArbitrageOpportunity {
 pub type ExecutionCallback = Arc<dyn Fn(ArbitrageOpportunity) + Send + Sync + 'static>;
 
 #[repr(C, align(64))]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PathData {
     first_symbol_id: u16,
     second_symbol_id: u16,
@@ -70,7 +73,7 @@ const MAX_PATHS_PER_SYMBOL: usize = 12;
 const MAX_SYMBOLS: usize = 2048;
 
 #[repr(C, align(64))]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct SymbolPaths {
     count: u8,
     indices: [u16; MAX_PATHS_PER_SYMBOL],
@@ -84,15 +87,14 @@ pub struct ArbitrageDetector {
     symbol_map: Box<[SymbolPaths; MAX_SYMBOLS]>,
     execution_callbacks: parking_lot::RwLock<Vec<ExecutionCallback>>,
     start_amount: f32,
-    shutdown: Arc<AtomicBool>,
     symbol_precisions: Box<[(u8, u8); MAX_SYMBOLS]>,
+    symbol_step_sizes: Box<[f64; MAX_SYMBOLS]>,
 }
 
 impl ArbitrageDetector {
     pub fn new(
         orderbook_manager: Arc<OrderBookManager>,
         paths: Vec<Arc<TriangularPath>>,
-        shutdown: Arc<AtomicBool>,
         fee_rate: f64,
         min_profit_threshold: f64,
         start_amount: f64,
@@ -130,6 +132,7 @@ impl ArbitrageDetector {
         );
 
         let mut symbol_precisions = Box::new([(8u8, 8u8); MAX_SYMBOLS]);
+        let mut symbol_step_sizes = Box::new([0.0f64; MAX_SYMBOLS]);
 
         for symbol_info in symbol_precision_map.get_all_symbols() {
             if let Some(symbol_id) = global::get_id(&symbol_info.symbol) {
@@ -138,6 +141,7 @@ impl ArbitrageDetector {
                         symbol_info.qty_precision,
                         symbol_info.price_precision,
                     );
+                    symbol_step_sizes[symbol_id as usize] = symbol_info.step_size;
                 }
             }
         }
@@ -172,29 +176,14 @@ impl ArbitrageDetector {
 
         Arc::new(ArbitrageDetector {
             orderbook_manager,
-            shutdown,
             all_paths: unwrapped_paths.into_boxed_slice(),
             path_data: path_data.into_boxed_slice(),
             symbol_map,
             execution_callbacks: parking_lot::RwLock::new(Vec::with_capacity(2)),
             start_amount: start_amount as f32,
             symbol_precisions,
+            symbol_step_sizes,
         })
-    }
-
-    #[inline(always)]
-    fn apply_precision(&self, value: f32, precision: u8) -> f32 {
-        // Optimized: Use pre-computed factors for common precision values
-        let factor = if precision <= 8 {
-            // Common precision values 0-8, pre-computed for speed
-            const PRECISION_FACTORS_F32: [f32; 9] = [
-                1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0,
-            ];
-            PRECISION_FACTORS_F32[precision as usize]
-        } else {
-            (10f32).powi(precision as i32)
-        };
-        (value * factor).floor() / factor
     }
 
     #[inline]
@@ -224,7 +213,6 @@ impl ArbitrageDetector {
             path_data.second_symbol_id
         );
         let third_book = self.orderbook_manager.get_or_create_book_by_id(path_data.third_symbol_id);
-
         if !first_book.is_synced() || !second_book.is_synced() || !third_book.is_synced() {
             return false;
         }
@@ -273,7 +261,7 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn calculate_portfolio(&self, path_idx: u16) -> Option<f32> {
+    fn calculate_profit(&self, path_idx: u16) -> Option<f32> {
         unsafe {
             let path_data = self.path_data.get_unchecked(path_idx as usize);
 
@@ -301,6 +289,16 @@ impl ArbitrageDetector {
                 path_data.third_symbol_id as usize
             );
 
+            let first_step_size = *self.symbol_step_sizes.get_unchecked(
+                path_data.first_symbol_id as usize
+            );
+            let second_step_size = *self.symbol_step_sizes.get_unchecked(
+                path_data.second_symbol_id as usize
+            );
+            let third_step_size = *self.symbol_step_sizes.get_unchecked(
+                path_data.third_symbol_id as usize
+            );
+
             let mut amount = self.start_amount;
 
             // First trade
@@ -310,11 +308,11 @@ impl ArbitrageDetector {
                 path_data.first_is_base_to_quote()
             )? as f32;
 
-            let precise_input = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
-                first_qty_prec
+            let precise_input = if path_data.first_is_base_to_quote() {
+                apply_step_size(amount as f64, first_step_size, first_qty_prec) as f32
             } else {
-                first_price_prec
-            });
+                amount // For quote amounts, don't apply step_size to input
+            };
 
             amount = if path_data.first_is_base_to_quote() {
                 precise_input * first_price * path_data.fee_multiplier()
@@ -322,11 +320,12 @@ impl ArbitrageDetector {
                 (precise_input / first_price) * path_data.fee_multiplier()
             };
 
-            amount = self.apply_precision(amount, if path_data.first_is_base_to_quote() {
-                first_price_prec
+            // Apply step_size to the output amount only
+            amount = if path_data.first_is_base_to_quote() {
+                amount // Quote output, no step_size needed
             } else {
-                first_qty_prec
-            });
+                apply_step_size(amount as f64, first_step_size, first_qty_prec) as f32 // Base output
+            };
 
             // Second trade
             let second_amount_f64 = amount as f64;
@@ -335,11 +334,11 @@ impl ArbitrageDetector {
                 path_data.second_is_base_to_quote()
             )? as f32;
 
-            let precise_input = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
-                second_qty_prec
+            let precise_input = if path_data.second_is_base_to_quote() {
+                apply_step_size(amount as f64, second_step_size, second_qty_prec) as f32
             } else {
-                second_price_prec
-            });
+                amount // For quote amounts, don't apply step_size to input
+            };
 
             amount = if path_data.second_is_base_to_quote() {
                 precise_input * second_price * path_data.fee_multiplier()
@@ -347,11 +346,12 @@ impl ArbitrageDetector {
                 (precise_input / second_price) * path_data.fee_multiplier()
             };
 
-            amount = self.apply_precision(amount, if path_data.second_is_base_to_quote() {
-                second_price_prec
+            // Apply step_size to the output amount only
+            amount = if path_data.second_is_base_to_quote() {
+                amount // Quote output, no step_size needed
             } else {
-                second_qty_prec
-            });
+                apply_step_size(amount as f64, second_step_size, second_qty_prec) as f32 // Base output
+            };
 
             // Third trade
             let third_amount_f64 = amount as f64;
@@ -360,11 +360,11 @@ impl ArbitrageDetector {
                 path_data.third_is_base_to_quote()
             )? as f32;
 
-            let precise_input = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
-                third_qty_prec
+            let precise_input = if path_data.third_is_base_to_quote() {
+                apply_step_size(amount as f64, third_step_size, third_qty_prec) as f32
             } else {
-                third_price_prec
-            });
+                amount // For quote amounts, don't apply step_size to input
+            };
 
             amount = if path_data.third_is_base_to_quote() {
                 precise_input * third_price * path_data.fee_multiplier()
@@ -372,11 +372,12 @@ impl ArbitrageDetector {
                 (precise_input / third_price) * path_data.fee_multiplier()
             };
 
-            amount = self.apply_precision(amount, if path_data.third_is_base_to_quote() {
-                third_price_prec
+            // Apply step_size to the output amount only
+            amount = if path_data.third_is_base_to_quote() {
+                amount // Quote output, no step_size needed
             } else {
-                third_qty_prec
-            });
+                apply_step_size(amount as f64, third_step_size, third_qty_prec) as f32 // Base output
+            };
 
             let profit_ratio = amount / self.start_amount;
 
@@ -389,7 +390,7 @@ impl ArbitrageDetector {
     }
 
     #[inline(always)]
-    fn check_path(&self, path_idx: u16, profit_ratio: f32) -> Option<ArbitrageOpportunity> {
+    fn build_opportunity(&self, path_idx: u16, profit_ratio: f32) -> Option<ArbitrageOpportunity> {
         unsafe {
             let path = self.all_paths.get_unchecked(path_idx as usize);
             let path_data = self.path_data.get_unchecked(path_idx as usize);
@@ -426,8 +427,8 @@ impl ArbitrageDetector {
             for i in 0..max_paths_to_check {
                 let path_idx = *symbol_paths.indices.get_unchecked(i);
 
-                if let Some(profit_ratio) = self.calculate_portfolio(path_idx) {
-                    if let Some(opportunity) = self.check_path(path_idx, profit_ratio) {
+                if let Some(profit_ratio) = self.calculate_profit(path_idx) {
+                    if let Some(opportunity) = self.build_opportunity(path_idx, profit_ratio) {
                         self.trigger_execution_callbacks(opportunity);
                     }
                 }
@@ -442,17 +443,11 @@ impl ArbitrageDetector {
             callback(opportunity.clone());
         }
     }
-
-    #[inline]
-    pub fn is_shutdown(&self) -> bool {
-        self.shutdown.load(Ordering::Relaxed)
-    }
 }
 
 pub fn create_detector(
     orderbook_manager: Arc<OrderBookManager>,
     paths: Vec<Arc<TriangularPath>>,
-    shutdown: Arc<AtomicBool>,
     fee_rate: f64,
     min_profit_threshold: f64,
     start_amount: f64,
@@ -461,7 +456,6 @@ pub fn create_detector(
     ArbitrageDetector::new(
         orderbook_manager,
         paths,
-        shutdown,
         fee_rate,
         min_profit_threshold,
         start_amount,

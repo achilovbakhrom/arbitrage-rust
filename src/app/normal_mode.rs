@@ -56,7 +56,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     let detector = arbitrage::detector::create_detector(
         Arc::clone(&orderbook_manager),
         triangular_paths,
-        Arc::clone(&shutdown),
         config.fee,
         config.threshold,
         config.trade_amount,
@@ -65,7 +64,7 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
 
     let fix_client = create_fix_executor(Arc::clone(&symbol_map), &config)?;
     let mut thread_manager = ThreadManager::new();
-    
+
     // Create execution guard to prevent concurrent arbitrage executions
     let execution_guard = Arc::new(ExecutionGuard::new());
 
@@ -115,7 +114,7 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
 
     // Optimized: More responsive shutdown detection
     while !shutdown.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(50)); // Reduced from 100ms to 50ms
+        thread::sleep(Duration::from_millis(1000)); // Reduced from 100ms to 50ms
     }
 
     info!("Shutting down triangular arbitrage system...");
@@ -179,7 +178,15 @@ fn create_execution_callback(
     Arc::new(move |opportunity| {
         info!("🚀 ENHANCED EXECUTION: Starting arbitrage with simulation logging");
 
-        match execute_triangular_trades(&opportunity, &fix_client, &symbol_map, &orderbook_manager, &execution_guard) {
+        match
+            execute_triangular_trades(
+                &opportunity,
+                &fix_client,
+                &symbol_map,
+                &orderbook_manager,
+                &execution_guard
+            )
+        {
             Ok(true) => {
                 info!(
                     "✅ Enhanced triangular arbitrage completed successfully: {}",

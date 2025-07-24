@@ -60,7 +60,6 @@ pub fn run(config: Config, shutdown: Arc<AtomicBool>) -> Result<()> {
     let detector = arbitrage::detector::create_detector(
         Arc::clone(&orderbook_manager),
         triangular_paths.clone(),
-        Arc::clone(&shutdown),
         config.fee,
         config.threshold,
         config.trade_amount,

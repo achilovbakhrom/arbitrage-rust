@@ -31,14 +31,13 @@ fn main() -> Result<()> {
         ::init_logging(config.log_level, &config.log_config)
         .context("Failed to initialize logging")?;
 
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown = Arc::clone(&shutdown_flag);
-    let shutdown_clone_for_handler = Arc::clone(&shutdown);
+    let shutdown: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
 
     ctrlc
         ::set_handler(move || {
             info!("Received Ctrl+C signal, initiating graceful shutdown...");
-            shutdown_clone_for_handler.store(true, Ordering::Relaxed);
+            shutdown_clone.store(true, Ordering::Relaxed);
         })
         .context("Failed to set Ctrl+C handler")?;
 

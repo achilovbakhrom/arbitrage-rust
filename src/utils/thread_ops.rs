@@ -11,6 +11,7 @@ pub fn start_detection_thread(
     orderbook_manager: Arc<OrderBookManager>,
     shutdown: Arc<AtomicBool>
 ) -> JoinHandle<()> {
+    let shutdown_clone = Arc::clone(&shutdown);
     thread::Builder
         ::new()
         .name("arbitrage-detector".to_string())
@@ -21,7 +22,7 @@ pub fn start_detection_thread(
                 let detector = Arc::clone(&detector);
                 Arc::new(
                     move |symbol_id: u16, _book: &crate::orderbook_manager::orderbook::OrderBook| {
-                        if detector.is_shutdown() {
+                        if shutdown_clone.load(Ordering::Relaxed) {
                             return;
                         }
                         detector.process_symbol_update(symbol_id);
@@ -31,9 +32,8 @@ pub fn start_detection_thread(
 
             orderbook_manager.register_update_callback(update_callback);
 
-            // Optimized: Reduced sleep interval for faster shutdown response
-            while !shutdown.load(Ordering::Relaxed) && !detector.is_shutdown() {
-                thread::sleep(Duration::from_millis(10)); // Reduced from 50ms to 10ms
+            while !shutdown.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(1000));
             }
 
             debug!("Arbitrage detection thread stopped");
@@ -56,7 +56,7 @@ pub fn start_execution_thread(
             if let Some(callback) = execution_callback {
                 // Create a channel for immediate opportunity notifications
                 let (tx, rx) = mpsc::channel::<ArbitrageOpportunity>();
-                
+
                 let wrapped_callback = {
                     let shutdown_ref = Arc::clone(&shutdown);
                     Arc::new(move |opportunity: ArbitrageOpportunity| {
